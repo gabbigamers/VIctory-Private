@@ -8,6 +8,8 @@
 //! period, with the process's and the card's memory beside the frame times,
 //! for comparing runs (docs/progress.md, "Measuring").
 
+use crate::account::Owner;
+
 /// The frame time of the target rate, 30 frames a second, in microseconds.
 pub(crate) const TARGET_US: u64 = 33_333;
 
@@ -138,12 +140,18 @@ pub(crate) struct Memory {
     pub host_textures: Option<f64>,
     pub texture_heaps: Option<f64>,
     pub uploads: Option<f64>,
+    /// Our process's working set without section and mapped-file pages,
+    /// where the system gives it (not before Windows 10 22H2).
+    pub private_working_set: Option<f64>,
+    /// What each owner of [`crate::account`] held at its highest in the
+    /// period, in [`Owner::ALL`]'s order.
+    pub owners: [Option<f64>; Owner::ALL.len()],
 }
 
 impl Memory {
-    /// The columns, in [`MEMORY_COLUMNS`]' order.
-    fn values(&self) -> [Option<f64>; 17] {
-        [
+    /// The columns, in [`header`]'s order.
+    fn values(&self) -> Vec<Option<f64>> {
+        let fixed = [
             self.commit,
             self.working_set,
             self.system_commit,
@@ -161,7 +169,9 @@ impl Memory {
             self.host_textures,
             self.texture_heaps,
             self.uploads,
-        ]
+            self.private_working_set,
+        ];
+        fixed.into_iter().chain(self.owners).collect()
     }
 }
 
@@ -170,12 +180,13 @@ draws_per_frame,dropped_per_frame,preparing_ms,gpu_ms";
 
 const MEMORY_COLUMNS: &str = "commit_mb,working_set_mb,system_commit_mb,commit_limit_mb,video_mb,video_budget_mb,\
 video_shared_mb,peak_commit_mb,peak_working_set_mb,page_faults_per_s,physical_mb,physical_free_mb,pagefile_mb,\
-pagefile_size_mb,host_textures_mb,texture_heaps_mb,uploads_mb";
+pagefile_size_mb,host_textures_mb,texture_heaps_mb,uploads_mb,private_working_set_mb";
 
 /// The first line of the file: [`Row::line`]'s columns. Readers find
 /// columns by name (`cargo xtask perf-summary`), so columns are only added.
 pub(crate) fn header() -> String {
-    format!("{FRAME_COLUMNS},{MEMORY_COLUMNS}")
+    let owners = Owner::ALL.map(Owner::column).join(",");
+    format!("{FRAME_COLUMNS},{MEMORY_COLUMNS},{owners}")
 }
 
 impl Row {
@@ -184,7 +195,9 @@ impl Row {
     pub(crate) fn line(&self) -> String {
         let p = &self.pacing;
         let fps = if p.mean > 0.0 { 1000.0 / p.mean } else { 0.0 };
-        let known = self.memory.values().map(|v| v.map_or(String::new(), |v| format!("{v:.0}"))).join(",");
+        let known: Vec<String> =
+            self.memory.values().into_iter().map(|v| v.map_or(String::new(), |v| format!("{v:.0}"))).collect();
+        let known = known.join(",");
         format!(
             "{:.1},{},{},{fps:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.2},{:.0},{:.1},{:.2},{:.2},{known}",
             self.seconds,
@@ -367,6 +380,8 @@ mod tests {
                 host_textures: Some(8_000.0),
                 texture_heaps: Some(8_600.0),
                 uploads: Some(64.0),
+                private_working_set: Some(7_000.0),
+                owners: std::array::from_fn(|i| Some(i as f64 + 1.0)),
             },
         };
         let (line, columns) = (row.line(), header());
@@ -374,13 +389,16 @@ mod tests {
         assert_eq!(
             line,
             "12.3,370,150,30.00,33.33,33.33,33.33,33.33,33.33,0.0000,0.00,5123,0.2,12.35,6.50,\
-             20480,9000,28000,40000,9500,15000,120,21000,9500,1234,16300,2100,3000,24000,8000,8600,64"
+             20480,9000,28000,40000,9500,15000,120,21000,9500,1234,16300,2100,3000,24000,8000,8600,64,7000,\
+             1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
         );
         (row.memory.commit, row.memory.video_budget, row.memory.uploads) = (None, None, None);
+        row.memory.owners[14] = None;
         let line = row.line();
         assert_eq!(line.split(',').count(), columns.split(',').count());
         assert!(line.contains(",6.50,,9000,28000,40000,9500,,120,"), "{line}");
-        assert!(line.ends_with(",8600,"), "{line}");
+        assert!(line.contains(",8600,,7000,1,2,"), "{line}");
+        assert!(line.ends_with(",13,14,"), "{line}");
     }
 
     /// Each value under the column that names it: the reader goes by name.
@@ -404,10 +422,16 @@ mod tests {
             host_textures: Some(15.0),
             texture_heaps: Some(16.0),
             uploads: Some(17.0),
+            private_working_set: Some(18.0),
+            owners: std::array::from_fn(|i| Some(100.0 + i as f64)),
         };
-        let names: Vec<&str> = MEMORY_COLUMNS.split(',').collect();
+        let columns = header();
+        let names: Vec<&str> = columns.split(',').skip(FRAME_COLUMNS.split(',').count()).collect();
         assert_eq!(names.len(), memory.values().len());
         let at = |name: &str| memory.values()[names.iter().position(|n| *n == name).unwrap()];
+        for (i, owner) in Owner::ALL.into_iter().enumerate() {
+            assert_eq!(at(owner.column()), Some(100.0 + i as f64), "{owner:?}");
+        }
         for (name, value) in [
             ("commit_mb", 1.0),
             ("working_set_mb", 2.0),
@@ -426,6 +450,7 @@ mod tests {
             ("host_textures_mb", 15.0),
             ("texture_heaps_mb", 16.0),
             ("uploads_mb", 17.0),
+            ("private_working_set_mb", 18.0),
         ] {
             assert_eq!(at(name), Some(value), "{name}");
         }

@@ -195,6 +195,28 @@ impl Summary {
         put("our count", "heaps of textures (used and free), peak", "MB", max(a("texture_heaps_mb")), Lower);
         put("our count", "list upload memory, peak", "MB", max(a("uploads_mb")), Lower);
 
+        put("in RAM", "private working set, peak (without section pages)", "MB", max(a("private_working_set_mb")), Lower);
+
+        // By owner, as the runtime counts what it allocates: each column
+        // is the owner's highest in the period, so the run's peak is the
+        // highest of those. Owners are found by their prefix, so a newer
+        // log's owners are summarised without this tool knowing them.
+        let mut owners: Vec<(&String, &usize)> =
+            log.columns.iter().filter(|(name, _)| name.starts_with("own_")).collect();
+        owners.sort_by_key(|&(_, &at)| at);
+        let mut owned = Vec::new();
+        for (name, _) in owners {
+            let unit = if name.ends_with("_mb") { "MB" } else { "" };
+            owned.push(Figure {
+                group: "by owner (our count), peak",
+                name: owner_name(name),
+                unit,
+                value: max(log.values(name, &all)),
+                better: Lower,
+            });
+        }
+        figures.extend(owned);
+
         Self {
             periods: all.len(),
             world_periods: if reached_world { world.len() } else { 0 },
@@ -212,6 +234,14 @@ impl Summary {
             format!("{} periods over {seconds}; the run never reached the world, so all periods are summarised", self.periods)
         }
     }
+}
+
+/// An owner column's name as a figure's name: `own_buffer_copies_mb` is
+/// "buffer copies". Kept for the program's life, as the other names are.
+fn owner_name(column: &str) -> &'static str {
+    let name = column.strip_prefix("own_").unwrap_or(column);
+    let name = name.strip_suffix("_mb").unwrap_or(name);
+    Box::leak(name.replace('_', " ").into_boxed_str())
 }
 
 fn show(value: Option<f64>, unit: &str) -> String {
@@ -244,8 +274,10 @@ pub fn compare(before: &Summary, after: &Summary) -> String {
     let mut out = format!("before: {}\nafter:  {}\n", before.head(), after.head());
     let mut group = "";
     let mut worse = Vec::new();
-    for (b, a) in before.figures.iter().zip(&after.figures) {
-        debug_assert_eq!(b.name, a.name);
+    let missing = Figure { group: "", name: "", unit: "", value: None, better: Better::Neither };
+    for a in &after.figures {
+        // By name: the two logs need not have the same owners.
+        let b = before.figures.iter().find(|b| b.name == a.name && b.group == a.group).unwrap_or(&missing);
         if a.group != group {
             group = a.group;
             let _ = writeln!(out, "\n{group}");
@@ -277,7 +309,7 @@ pub fn compare(before: &Summary, after: &Summary) -> String {
             out,
             "  {:<66} {:>14} -> {:>14}  {verdict}",
             a.name,
-            show(b.value, b.unit),
+            show(b.value, a.unit),
             show(a.value, a.unit)
         );
     }
@@ -414,6 +446,28 @@ mod tests {
         assert!(line("machine's RAM").trim_end().ends_with("16000 MB"));
         assert!(text.contains("worse in 2: in use, peak (machine); growth over the run (machine)"), "{text}");
         assert!(compare(&before, &before).contains("nothing is worse"));
+    }
+
+    #[test]
+    fn owners_are_summarised_by_their_prefix_and_compared_by_name() {
+        let before = "seconds,draws_per_frame,own_buffer_copies_mb,own_title_sections,own_snapshot_pool_mb\n\
+                      5,6000,900,3,512\n10,6000,1400,4,512\n15,6000,1200,4,\n";
+        let s = Summary::of(&Log::parse(before).unwrap());
+        assert_eq!(figure(&s, "buffer copies"), Some(1400.0), "the highest period");
+        assert_eq!(figure(&s, "title sections"), Some(4.0));
+        assert_eq!(figure(&s, "snapshot pool"), Some(512.0));
+        let text = render(&s);
+        assert!(text.contains("by owner (our count), peak"), "{text}");
+        assert!(text.lines().any(|l| l.contains("title sections") && l.trim_end().ends_with("4.0")), "{text}");
+        // A later log with an owner more and the pool smaller.
+        let after = "seconds,draws_per_frame,own_buffer_copies_mb,own_title_sections,own_snapshot_pool_mb,own_new_thing_mb\n\
+                     5,6000,1400,4,128,77\n";
+        let text = compare(&s, &Summary::of(&Log::parse(after).unwrap()));
+        let line = |name: &str| text.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("{name}\n{text}"));
+        assert!(line("snapshot pool").ends_with("-384 MB  better"), "{text}");
+        assert!(line("buffer copies").ends_with("+0 MB  same"), "{text}");
+        assert!(line("new thing").contains("not recorded ->          77 MB"), "{text}");
+        assert!(text.contains("nothing is worse"), "{text}");
     }
 
     #[test]

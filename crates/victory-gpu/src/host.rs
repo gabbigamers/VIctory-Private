@@ -310,6 +310,25 @@ fn process_memory() -> ProcessMemory {
     }
 }
 
+/// Our process's working set without section and mapped-file pages, bytes.
+/// `None` where the system does not give it (before Windows 10 22H2 the
+/// larger structure is refused).
+fn private_working_set() -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut c = PROCESS_MEMORY_COUNTERS_EX2 {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: our own process; the structure begins as the shorter one does
+    // and the system writes no more than the size given.
+    let known =
+        unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), (&raw mut c).cast::<PROCESS_MEMORY_COUNTERS>(), c.cb) };
+    (known != 0).then_some(c.PrivateWorkingSetSize as u64)
+}
+
 /// The machine's memory, bytes: the commit charge and its limit (RAM and
 /// paging files), and physical memory in all and free for use.
 #[derive(Clone, Copy)]
@@ -3341,6 +3360,8 @@ impl Meter {
                             host_textures: Some(mb(texture_bytes)),
                             texture_heaps: Some(mb(heap_used + heap_free)),
                             uploads: Some(mb(crate::list::UPLOADS[1].load(Ordering::Relaxed))),
+                            private_working_set: private_working_set().map(mb),
+                            owners: crate::account::take_period().map(Some),
                         },
                     });
                 }

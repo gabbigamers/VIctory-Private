@@ -16,6 +16,7 @@
 //! libraries recording into title lists. Planned:
 //! `present` (swap chain).
 
+pub mod account;
 #[cfg(windows)]
 mod bindless;
 pub mod caps;
