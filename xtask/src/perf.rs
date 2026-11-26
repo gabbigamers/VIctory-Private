@@ -12,6 +12,13 @@
 //! memory, and the paging file. The run fits a machine when its working set
 //! does and the machine did not have to page; a commit figure alone says
 //! neither.
+//!
+//! No figure here is one counter minus another. The process's commit is
+//! private commit and leaves out memory held as sections (the title's
+//! largest pool), while its working set counts section pages, possibly once
+//! per address they are mapped at; their difference means nothing. The
+//! machine's own figures (commit, free RAM, paging file) are the ones that
+//! count everything once. See docs/memory.md.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -163,13 +170,6 @@ impl Summary {
         let peak_commit = max([a("peak_commit_mb"), a("commit_mb")].concat());
         put("commit", "process commit, peak", "MB", peak_commit, Lower);
         put("commit", "process commit, sustained (median, world)", "MB", sustained_commit, Lower);
-        put(
-            "commit",
-            "committed and not in RAM, sustained (paged out or never touched)",
-            "MB",
-            sustained_commit.zip(sustained_ws).map(|(c, ws)| (c - ws).max(0.0)),
-            Lower,
-        );
         put("commit", "machine commit, peak", "MB", max(a("system_commit_mb")), Lower);
         put("commit", "machine commit limit", "MB", min(a("commit_limit_mb")), Neither);
 
@@ -356,11 +356,6 @@ mod tests {
         assert_eq!(figure(&s, "working set, peak"), Some(12000.0));
         assert_eq!(figure(&s, "process commit, peak"), Some(27500.0));
         assert_eq!(figure(&s, "process commit, sustained (median, world)"), Some(27000.0));
-        assert_eq!(
-            figure(&s, "committed and not in RAM, sustained (paged out or never touched)"),
-            Some(15500.0),
-            "27 GB of commit with 11.5 GB of it in RAM"
-        );
         assert_eq!(figure(&s, "machine's free RAM, lowest"), Some(2000.0));
         assert_eq!(figure(&s, "in use, peak (machine)"), Some(9500.0));
         assert_eq!(figure(&s, "growth over the run (machine)"), Some(8500.0), "from the first period's 1000");

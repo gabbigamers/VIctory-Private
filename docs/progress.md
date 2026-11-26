@@ -153,7 +153,8 @@ before and after; a larger paging file is not a fix.
 | Milestone | State |
 |---|---|
 | M0 | A memory profile of a world run on the target machine (performance log, `cargo xtask perf-summary`): all four quantities, peak and sustained | instrumentation written; not started (needs the owner's machine) |
-| M1 | Where it goes, by owner (title memory, host copies, caches, video memory): an allocation inventory from the code, then the profile's figures against it | inventory in progress |
+| M1 | Where it goes, by owner (title memory, host copies, caches, video memory): an allocation inventory from the code, then the profile's figures against it | inventory done and verified ([memory.md](memory.md), "What allocates": 26 entries, none measured); profile not started |
+| M1c | The counters the inventory found missing (memory.md, "What no line reports"), so each candidate has a measurable before | not started |
 | M1a | Ownership, residency and dirty-state tracking where a case needs it and it is missing, built and tested as its own change | not started |
 | M1b | Allocations removed, reused or made evictable one at a time, each through a case, with tests and a before and an after in memory.md's ledger | not started |
 | M2 | A5 met | not started |
@@ -345,4 +346,11 @@ Only what cannot be done from a cloud session.
   (C7); the regression tests that run full-length loops stay in the default
   test run. `lower.rs` is to be split into modules as a change of its own
   that alters no behaviour, apart from functional changes.
+* Memory inventory completed and verified (67 claims: 40 confirmed, 27
+  corrected, none refuted): [memory.md](memory.md) now holds the breakdown
+  by owner and kind, what each log counter does and does not count, the
+  counters still missing, and eleven candidates, none approved. The host
+  copies of title buffers, depth twins and the title's own memory are
+  recorded as needed today, not as waste. One figure of the run summary
+  that subtracted two counters measuring different things was removed.
 

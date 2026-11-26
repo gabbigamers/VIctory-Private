@@ -76,8 +76,11 @@ repository nearer the drive's root.
 A run in the world takes about 33 GB of Windows commit (RAM plus paging
 file) and about 10 GB of video memory. The tested machine has 32 GB of RAM
 and a commit limit of about 80 GB. Check **Committed** under **Task Manager →
-Performance → Memory**. If `crashes.log` reports Windows error 1455, close
-other applications or increase the Windows paging file size, then retry.
+Performance → Memory**. If `crashes.log` reports Windows error 1455, the
+machine's commit limit was reached: close other applications and retry. A
+larger paging file raises that limit and gets a run going, but it is a
+stop-gap and not how this is meant to work: running inside 16 GB of RAM is
+a goal of the project ([docs/memory.md](docs/memory.md)).
 
 ```powershell
 cargo xtask install-hooks                # asset-policy check on every commit
