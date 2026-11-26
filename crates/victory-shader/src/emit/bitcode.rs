@@ -1074,6 +1074,455 @@ impl Plan {
     }
 }
 
+/// The function as [`Module::write`] writes it: the written blocks in their
+/// order with the written instructions, folded blocks and the edges a
+/// constant branch never takes gone. Tests check it ([`Flow::check`]), walk
+/// it and run it ([`Flow::run`]) where no DXIL validator and no GPU exist.
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Flow {
+    /// Block 0 is the entry; successors and phi sources are indices here.
+    pub blocks: Vec<FlowBlock>,
+    /// Per module block: the written block a branch to it lands in.
+    at: Vec<Option<usize>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct FlowBlock {
+    /// Phis first.
+    pub insts: Vec<FlowInst>,
+    pub term: FlowTerm,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct FlowInst {
+    /// The instruction's number in the module ([`Arg::Inst`]).
+    pub id: u32,
+    /// Its result's width in bits (a float's 32; 0 for anything else).
+    pub bits: u32,
+    /// Whether the result is a float.
+    pub float: bool,
+    pub op: FlowOp,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Arg {
+    Inst(u32),
+    /// An integer constant's bits in its own width (`true` is 1), or a
+    /// float constant's.
+    Int(u64),
+    /// A global, a function, an undefined value or an aggregate.
+    Other,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) enum FlowOp {
+    Bin(Bin, Arg, Arg),
+    /// Predicate, the operands' width, the operands.
+    Cmp(u8, u32, Arg, Arg),
+    Select(Arg, Arg, Arg),
+    /// The operation, the operand's width, the operand.
+    Cast(Cast, u32, Arg),
+    Extract(Arg, u32),
+    Call(String, Vec<Arg>),
+    /// (value, block it comes from).
+    Phi(Vec<(Arg, usize)>),
+    /// Memory instructions, with what they read.
+    Other(Vec<Arg>),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlowTerm {
+    /// The block was never terminated.
+    Missing,
+    Ret,
+    Br(usize),
+    CondBr(Arg, usize, usize),
+}
+
+#[cfg(test)]
+impl Module {
+    /// The function as [`Module::write`] writes it.
+    pub fn flow(&self) -> Flow {
+        let plan = self.plan();
+        let width = |t: Ty| match self.types[t.0 as usize] {
+            TypeDef::Int(bits) => (bits, false),
+            TypeDef::Float => (32, true),
+            _ => (0, false),
+        };
+        let mask = |x: i64, bits: u32| x as u64 & (u64::MAX >> (64 - bits.clamp(1, 64)));
+        let arg = |v: V| match v {
+            V::Inst(i) => Arg::Inst(i),
+            V::Const(i) => match self.consts[i as usize] {
+                (t, Const::Int(x)) => Arg::Int(mask(x, width(t).0)),
+                (_, Const::Float(bits)) => Arg::Int(u64::from(bits)),
+                _ => Arg::Other,
+            },
+            _ => Arg::Other,
+        };
+        let at = |b: usize| plan.pos[plan.to(b)] as usize;
+        let blocks = plan
+            .layout
+            .iter()
+            .map(|&x| {
+                let b = &self.blocks[x];
+                let written = b.phis.iter().chain(&b.body).filter(|&&i| plan.live[i as usize]);
+                let insts = written
+                    .map(|&i| {
+                        let inst = &self.insts[i as usize];
+                        let of = |v: V| width(self.type_of(v)).0;
+                        let op = match &inst.op {
+                            Op::Bin(op, a, b) => FlowOp::Bin(*op, arg(*a), arg(*b)),
+                            Op::Cmp(p, a, b) => FlowOp::Cmp(*p, of(*a), arg(*a), arg(*b)),
+                            Op::Select(c, t, f) => FlowOp::Select(arg(*c), arg(*t), arg(*f)),
+                            Op::Cast(op, v) => FlowOp::Cast(*op, of(*v), arg(*v)),
+                            Op::Extract(a, index) => FlowOp::Extract(arg(*a), *index),
+                            Op::Call(f, args) => FlowOp::Call(
+                                self.funcs[*f as usize].name.clone(),
+                                args.iter().map(|&a| arg(a)).collect(),
+                            ),
+                            // As `write` keeps a phi's entries and names
+                            // their blocks.
+                            Op::Phi(incoming) => FlowOp::Phi(
+                                incoming
+                                    .iter()
+                                    .filter(|&&(_, b)| plan.edge(self, b, x))
+                                    .map(|&(v, b)| (arg(v), plan.pos[plan.src(b)] as usize))
+                                    .collect(),
+                            ),
+                            other => {
+                                let mut read = Vec::new();
+                                for_each_operand(other, |v| read.push(arg(v)));
+                                FlowOp::Other(read)
+                            }
+                        };
+                        let (bits, float) = width(inst.ty);
+                        FlowInst { id: i, bits, float, op }
+                    })
+                    .collect();
+                let term = match self.term(x) {
+                    None => FlowTerm::Missing,
+                    Some(Term::Ret) => FlowTerm::Ret,
+                    Some(Term::Br(t)) => FlowTerm::Br(at(t)),
+                    Some(Term::CondBr(c, t, f)) => FlowTerm::CondBr(arg(c), at(t), at(f)),
+                };
+                FlowBlock { insts, term }
+            })
+            .collect();
+        let at = (0..self.blocks.len()).map(|b| plan.seen[b].then(|| at(b))).collect();
+        Flow { blocks, at }
+    }
+}
+
+#[cfg(test)]
+impl Flow {
+    /// The written block a branch to module block `b` lands in; `None` if
+    /// nothing reaches it.
+    pub fn at(&self, b: usize) -> Option<usize> {
+        self.at.get(b).copied().flatten()
+    }
+
+    /// Block `b`'s successors, one per edge.
+    pub fn succs(&self, b: usize) -> Vec<usize> {
+        match self.blocks[b].term {
+            FlowTerm::Br(t) => vec![t],
+            FlowTerm::CondBr(_, t, f) => vec![t, f],
+            FlowTerm::Missing | FlowTerm::Ret => Vec::new(),
+        }
+    }
+
+    /// Block `b`'s predecessors, one per edge, in ascending order.
+    pub fn preds(&self, b: usize) -> Vec<usize> {
+        let all = 0..self.blocks.len();
+        all.flat_map(|p| self.succs(p).into_iter().filter(|&s| s == b).map(move |_| p))
+            .collect()
+    }
+
+    /// The functions block `b` calls, in order.
+    pub fn calls(&self, b: usize) -> Vec<&str> {
+        let insts = self.blocks[b].insts.iter();
+        insts
+            .filter_map(|i| match &i.op {
+                FlowOp::Call(name, _) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Instruction `id` as written: its block, its place there, itself.
+    pub fn inst(&self, id: u32) -> Option<(usize, usize, &FlowInst)> {
+        self.blocks.iter().enumerate().find_map(|(b, block)| {
+            let n = block.insts.iter().position(|i| i.id == id)?;
+            Some((b, n, &block.insts[n]))
+        })
+    }
+
+    /// Whether a path leads from block `from` to block `to` that passes
+    /// through none of the blocks `without` (`from` and `to` included).
+    pub fn reaches(&self, from: usize, to: usize, without: &[usize]) -> bool {
+        let mut seen = vec![false; self.blocks.len()];
+        let mut stack = vec![from];
+        while let Some(b) = stack.pop() {
+            if seen[b] || without.contains(&b) {
+                continue;
+            }
+            seen[b] = true;
+            stack.extend(self.succs(b));
+        }
+        seen[to]
+    }
+
+    /// What the validator's structural rules ask of a function, as far as
+    /// this host can tell: every block ends in a terminator, the entry has
+    /// no predecessor, phis come first and have exactly one entry per
+    /// incoming edge, and every value read is written and computed on every
+    /// path to its reader (its definition dominates the use; for a phi's
+    /// entry, the end of the block the entry comes from). The first rule
+    /// broken is the error.
+    pub fn check(&self) -> Result<(), String> {
+        let n = self.blocks.len();
+        for (b, block) in self.blocks.iter().enumerate() {
+            if block.term == FlowTerm::Missing {
+                return Err(format!("block {b} has no terminator"));
+            }
+        }
+        let preds: Vec<Vec<usize>> = (0..n).map(|b| self.preds(b)).collect();
+        if !preds[0].is_empty() {
+            return Err(format!("the entry has predecessors {:?}", preds[0]));
+        }
+        // Dominators: the blocks on every path from the entry to each block.
+        let mut dom = vec![vec![true; n]; n];
+        dom[0] = (0..n).map(|d| d == 0).collect();
+        loop {
+            let mut changed = false;
+            for b in 1..n {
+                let mut new: Vec<bool> =
+                    (0..n).map(|d| preds[b].iter().all(|&p| dom[p][d])).collect();
+                new[b] = true;
+                changed |= new != dom[b];
+                dom[b] = new;
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut def = HashMap::new();
+        for (b, block) in self.blocks.iter().enumerate() {
+            for (i, inst) in block.insts.iter().enumerate() {
+                if def.insert(inst.id, (b, i)).is_some() {
+                    return Err(format!("instruction {} is written twice", inst.id));
+                }
+            }
+        }
+        // Whether `a` is computed before place `i` of block `b` (`None`:
+        // its end) on every path there.
+        let computed = |a: Arg, b: usize, i: Option<usize>| -> Result<(), String> {
+            let Arg::Inst(id) = a else { return Ok(()) };
+            let Some(&(d, j)) = def.get(&id) else {
+                return Err(format!("block {b} reads instruction {id}, which is not written"));
+            };
+            let before = if d == b { i.is_none_or(|i| j < i) } else { dom[b][d] };
+            if before {
+                Ok(())
+            } else {
+                Err(format!(
+                    "block {b} reads instruction {id} of block {d}, which does not dominate it"
+                ))
+            }
+        };
+        for (b, block) in self.blocks.iter().enumerate() {
+            let mut body = false;
+            for (i, inst) in block.insts.iter().enumerate() {
+                match &inst.op {
+                    FlowOp::Phi(incoming) => {
+                        if body {
+                            return Err(format!("block {b}: a phi after another instruction"));
+                        }
+                        let mut from: Vec<usize> = incoming.iter().map(|x| x.1).collect();
+                        from.sort_unstable();
+                        if from != preds[b] {
+                            return Err(format!(
+                                "block {b}: phi {} has entries from {from:?}, not from {:?}",
+                                inst.id, preds[b]
+                            ));
+                        }
+                        for &(a, p) in incoming {
+                            computed(a, p, None)?;
+                        }
+                    }
+                    op => {
+                        body = true;
+                        let mut read = Vec::new();
+                        match op {
+                            FlowOp::Bin(_, a, b) | FlowOp::Cmp(_, _, a, b) => read.extend([*a, *b]),
+                            FlowOp::Select(a, b, c) => read.extend([*a, *b, *c]),
+                            FlowOp::Cast(_, _, a) | FlowOp::Extract(a, _) => read.push(*a),
+                            FlowOp::Call(_, args) | FlowOp::Other(args) => read.extend(args),
+                            FlowOp::Phi(_) => unreachable!(),
+                        }
+                        for a in read {
+                            computed(a, b, Some(i))?;
+                        }
+                    }
+                }
+            }
+            if let FlowTerm::CondBr(c, ..) = block.term {
+                computed(c, b, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs the function once, as one lane: integer arithmetic, compares,
+    /// selects, casts, phis and branches as LLVM defines them. `call` gives
+    /// each call's result from the function's name and its arguments (the
+    /// fields of a structure; nothing for no result), and sees every call
+    /// in the order the lane makes them. Float arithmetic and memory
+    /// instructions are not run: reaching one is an error, as is running
+    /// more than `steps` instructions.
+    pub fn run(
+        &self,
+        mut steps: u64,
+        call: &mut dyn FnMut(&str, &[u64]) -> Vec<u64>,
+    ) -> Result<(), String> {
+        let ids = self.blocks.iter().flat_map(|b| &b.insts).map(|i| i.id as usize + 1);
+        // Per instruction: its result (a structure's first field), and the
+        // structures whole.
+        let mut values = vec![0u64; ids.max().unwrap_or(0)];
+        let mut fields: HashMap<u32, Vec<u64>> = HashMap::new();
+        let mut joined = Vec::new();
+        // (Functions, not closures: a test build inlines these.)
+        #[inline(always)]
+        fn get(values: &[u64], a: Arg) -> u64 {
+            match a {
+                Arg::Inst(i) => values[i as usize],
+                Arg::Int(x) => x,
+                Arg::Other => 0,
+            }
+        }
+        #[inline(always)]
+        fn ones(bits: u32) -> u64 {
+            u64::MAX >> (64 - bits.clamp(1, 64))
+        }
+        #[inline(always)]
+        fn signed(x: u64, bits: u32) -> i64 {
+            let shift = 64 - bits.clamp(1, 64);
+            ((x << shift) as i64) >> shift
+        }
+        let (mut b, mut from) = (0, usize::MAX);
+        loop {
+            let block = &self.blocks[b];
+            steps = steps.checked_sub(1).ok_or("the step budget ran out")?;
+            // A block's phis all read the values of the edge taken.
+            joined.clear();
+            for inst in &block.insts {
+                let FlowOp::Phi(incoming) = &inst.op else { break };
+                let Some(&(a, _)) = incoming.iter().find(|x| x.1 == from) else {
+                    return Err(format!("block {b}: phi {} has no entry from {from}", inst.id));
+                };
+                joined.push((inst.id, get(&values, a)));
+            }
+            for &(id, x) in &joined {
+                values[id as usize] = x;
+            }
+            for inst in &block.insts[joined.len()..] {
+                steps = steps.checked_sub(1).ok_or("the step budget ran out")?;
+                let not_run = |what: &str| Err(format!("block {b}: {what} {} is not run", inst.id));
+                let result = match &inst.op {
+                    FlowOp::Bin(..) if inst.float => return not_run("float instruction"),
+                    FlowOp::Bin(op, x, y) => {
+                        let (x, y, bits) = (get(&values, *x), get(&values, *y), inst.bits);
+                        let r = match op {
+                            Bin::Add => x.wrapping_add(y),
+                            Bin::Sub => x.wrapping_sub(y),
+                            Bin::Mul => x.wrapping_mul(y),
+                            Bin::UDiv | Bin::URem | Bin::SDiv if y == 0 => {
+                                return not_run("division by 0 in instruction");
+                            }
+                            Bin::UDiv => x / y,
+                            Bin::URem => x % y,
+                            Bin::SDiv => signed(x, bits).wrapping_div(signed(y, bits)) as u64,
+                            Bin::Shl | Bin::LShr | Bin::AShr if y >= u64::from(bits) => 0,
+                            Bin::Shl => x << y,
+                            Bin::LShr => x >> y,
+                            Bin::AShr => (signed(x, bits) >> y) as u64,
+                            Bin::And => x & y,
+                            Bin::Or => x | y,
+                            Bin::Xor => x ^ y,
+                        };
+                        r & ones(bits)
+                    }
+                    FlowOp::Cmp(p, bits, x, y) => {
+                        let (x, y) = (get(&values, *x), get(&values, *y));
+                        let (sx, sy) = (signed(x, *bits), signed(y, *bits));
+                        u64::from(match *p {
+                            pred::EQ => x == y,
+                            pred::NE => x != y,
+                            pred::IUGT => x > y,
+                            pred::IUGE => x >= y,
+                            pred::IULT => x < y,
+                            pred::IULE => x <= y,
+                            pred::SGT => sx > sy,
+                            pred::SGE => sx >= sy,
+                            pred::SLT => sx < sy,
+                            pred::SLE => sx <= sy,
+                            _ => return not_run("float compare"),
+                        })
+                    }
+                    FlowOp::Select(c, t, f) => {
+                        get(&values, if get(&values, *c) != 0 { *t } else { *f })
+                    }
+                    FlowOp::Cast(op, bits, x) => {
+                        let x = get(&values, *x);
+                        match op {
+                            Cast::Trunc | Cast::ZExt | Cast::Bitcast => x & ones(inst.bits),
+                            Cast::SExt => signed(x, *bits) as u64 & ones(inst.bits),
+                            _ => return not_run("float cast"),
+                        }
+                    }
+                    FlowOp::Extract(a, index) => {
+                        let Arg::Inst(a) = *a else {
+                            return not_run("field of a constant read by instruction");
+                        };
+                        match fields.get(&a).and_then(|v| v.get(*index as usize)) {
+                            Some(&x) => x,
+                            None => return not_run("field no call gave, read by instruction"),
+                        }
+                    }
+                    FlowOp::Call(name, args) => {
+                        let args: Vec<u64> = args.iter().map(|&a| get(&values, a)).collect();
+                        let result = call(name, &args);
+                        let first = result.first().copied().unwrap_or(0);
+                        fields.insert(inst.id, result);
+                        first
+                    }
+                    FlowOp::Other(_) => return not_run("memory instruction"),
+                    FlowOp::Phi(_) => return not_run("phi after another instruction,"),
+                };
+                values[inst.id as usize] = result;
+            }
+            let next = match block.term {
+                FlowTerm::Missing => return Err(format!("block {b} has no terminator")),
+                FlowTerm::Ret => return Ok(()),
+                FlowTerm::Br(t) => t,
+                FlowTerm::CondBr(c, t, f) => {
+                    if get(&values, c) != 0 {
+                        t
+                    } else {
+                        f
+                    }
+                }
+            };
+            (from, b) = (b, next);
+        }
+    }
+}
+
 /// Calls `f` with every value `op` reads, in operand order.
 fn for_each_operand(op: &Op, mut f: impl FnMut(V)) {
     match op {
@@ -1621,6 +2070,67 @@ mod tests {
         let _ = (m.call(live, sink, vec![t]), h);
         let u = m.uses();
         assert!(u.int64 && !u.heap && !u.sampler_heap, "{u:?}");
+    }
+
+    /// A counted loop with a branch in its body, as lowering makes one:
+    /// `for (i = 0; i < 10; i++) if (i & 1) sink(i << 1);` then `sink(i)`.
+    /// With `fault`, one thing about it is wrong.
+    fn counted_loop(fault: &str) -> Module {
+        let (mut m, b, sink) = module(5);
+        let [entry, head, side, latch, exit] = b[..] else { unreachable!() };
+        let i32t = m.int(32);
+        let (zero, one, ten) = (m.i32(0), m.i32(1), m.i32(10));
+        m.terminate(entry, Term::Br(head));
+        let i = m.phi(head, i32t);
+        let low = m.bin(head, Bin::And, i, one);
+        let odd = m.cmp(head, pred::NE, low, zero);
+        m.terminate(head, Term::CondBr(odd, side, latch));
+        let twice = m.bin(side, Bin::Shl, i, one);
+        let _ = m.call(side, sink, vec![twice]);
+        m.terminate(side, Term::Br(latch));
+        let next = m.bin(latch, Bin::Add, i, one);
+        let more = m.cmp(latch, pred::IULT, next, ten);
+        let back = if fault == "a branch to the entry" { entry } else { head };
+        if fault != "a block left open" {
+            m.terminate(latch, Term::CondBr(more, back, exit));
+        }
+        let mut incoming = vec![(zero, entry), (next, latch)];
+        if fault == "a phi short of an entry" {
+            incoming.pop();
+        }
+        m.set_phi(i, incoming);
+        // `twice` is computed on one of the two paths to the exit only.
+        let last = if fault == "a value some path skips" { twice } else { next };
+        let _ = m.call(exit, sink, vec![last]);
+        m.terminate(exit, Term::Ret);
+        m
+    }
+
+    /// [`Flow::check`] passes a well-formed function and names what is
+    /// wrong with one that is not; [`Flow::run`] runs it as LLVM would.
+    #[test]
+    fn a_written_function_is_checked_and_run() {
+        let flow = counted_loop("").flow();
+        assert_eq!(flow.check(), Ok(()));
+        let mut sunk = Vec::new();
+        let mut call = |name: &str, args: &[u64]| {
+            assert_eq!(name, "dx.op.sink");
+            sunk.push(args[0]);
+            Vec::new()
+        };
+        assert_eq!(flow.run(1000, &mut call), Ok(()));
+        assert_eq!(sunk, [2, 6, 10, 14, 18, 10]);
+        let short = flow.run(20, &mut |_, _| Vec::new());
+        assert!(short.is_err_and(|e| e.contains("budget")));
+        for (fault, says) in [
+            ("a phi short of an entry", "has entries from"),
+            ("a value some path skips", "does not dominate"),
+            ("a block left open", "no terminator"),
+            ("a branch to the entry", "the entry has predecessors"),
+        ] {
+            let found = counted_loop(fault).flow().check();
+            assert!(found.as_ref().is_err_and(|e| e.contains(says)), "{fault}: {found:?}");
+        }
     }
 
     #[test]

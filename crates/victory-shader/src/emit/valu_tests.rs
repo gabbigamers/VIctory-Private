@@ -73,8 +73,9 @@ const fn vgpr(n: u8) -> u16 {
 
 /// Builds and lowers a 1-thread synthetic RDNA2 compute shader that receives
 /// 4 dwords of root constants in `s0..s3`, runs `body` (leaving its result in
-/// `v0`), and stores `v0` to dword 0 of the raw UAV at heap index 0.
-fn build_valu_cs(body: &[u32]) -> HostShader {
+/// `v0`), and stores `v0` to dword 0 of the raw UAV at heap index 0. (The
+/// loop-limit tests in `lower/limit.rs` run their programs through it too.)
+pub(super) fn build_valu_cs(body: &[u32]) -> HostShader {
     try_build_valu_cs(body).expect("build")
 }
 
@@ -189,7 +190,7 @@ pub(super) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 /// Runs `shader` on every available SM 6.6 host (hardware GPU and WARP) for
 /// each 4-dword input set and invokes `check(backend, case_index, inputs, result_dword)`.
-fn run_cases(
+pub(super) fn run_cases(
     shader: &HostShader,
     cases: &[[u32; 4]],
     mut check: impl FnMut(&str, usize, [u32; 4], u32),

@@ -116,7 +116,7 @@ Tracks are worked in this order where they compete.
 | C3 | Ray-tracing structures built: ray-traced shadows and indirect light | open |
 | C4 | Known picture defects gone: the local-light shadow mask, the pink band over nearer bodies, the stand-in head | open |
 | C5 | Map completeness at fixed places | not started |
-| C7 | No loop-limit stop in a run. A translated loop cut short by the iteration limit is a correctness failure to be investigated (why does the loop not end: data with no host copy, a mistranslation, a loop that really is longer), never an accepted way to render. Stops are counted and reported by shader and stage, and a stopped lane ends in a defined, stage-appropriate way with no output left undefined | fix for conditional back edges in review; counters and defined termination planned (owner's decisions of 2026-11-26) |
+| C7 | No loop-limit stop in a run. A translated loop cut short by the iteration limit is a correctness failure to be investigated (why does the loop not end: data with no host copy, a mistranslation, a loop that really is longer), never an accepted way to render. Stops are counted and reported by shader and stage, and a stopped lane ends in a defined, stage-appropriate way with no output left undefined | fix for conditional back edges committed, host-tested, not yet run on Windows; counters and defined termination planned (owner's decisions of 2026-11-26) |
 | C6 | Host independence: the wave-size, heap-size, fused multiply-add and float-behaviour dependencies removed (G2 to G5 in [gpu-compatibility.md](gpu-compatibility.md)) | open; G1 (one capability record) started |
 
 Ledger (measured runs only):
@@ -193,7 +193,7 @@ that need no title files; the items marked "owner's machine, title" wait.
 
 | # | Blocker | Audit | Next step | Where |
 |---|---|---|---|---|
-| 1 | A lane stopped by the loop limit keeps running with a truncated loop's values | A-C4 | fix and test | any host |
+| 1 | A lane stopped by the loop limit keeps running with a truncated loop's values | A-C4 | **fixed and host-tested** (2026-11-26); to run on Windows: the DXIL validator and the hardware and WARP cases its tests now carry. Counters and a defined end per stage follow (C7) | owner's machine, no title |
 | 2 | BCPack: a codebook difference against the independent decoder, untested block formats, no end-state check | A-C15 | differential tests against `bcpack-rs` on synthetic streams | any host |
 | 3 | Lane-dependent compute programs declare the console's wave size; a host with narrower waves drops them, and the trigger is wider than needed | A-C1, A-C3, G2 | refusal reason and tally; narrow the trigger; lane-carrying lowering | any host; counts need the title |
 | 4 | A host with a smaller view heap gets shaders that redirect past it | A-C2, G3 | heap layout as a tested function of the host's size | any host; `gpu-info` for the card's limit |
@@ -384,4 +384,21 @@ Only what cannot be done from a cloud session.
   proof. Validation uses Microsoft's published decoder module simulated
   unmodified (Verilator) as the oracle for a single lane; how several
   lanes share one stream is not published and cannot be checked that way.
+* Loop limit (A-C4) fixed, reviewed and committed. A lane stopped by the
+  limit on a conditional back edge now ends in the stop block (a pixel
+  discards, then returns) instead of leaving through the loop's exit with
+  a truncated loop's values. The loop's own shape is unchanged: the test
+  sits on the exit path. A second defect went with it: where both sides of
+  a latch's branch are back edges, one of the two loops had no limit at
+  all. 15 host tests (structure checked and one lane run on the host,
+  including loops of exactly 2^20 iterations), a structural checker and a
+  one-lane interpreter for written functions, used by the existing host
+  lowering helpers too. The reviewer's own fuzz (3,000 programs) and
+  separate interpreter agreed. Not run on Windows: DXIL validity and any
+  GPU. Open for the owner under C7: a stopped pixel returns instead of
+  running on as a helper lane, so neighbours' derivatives may be
+  undefined; loops that share a header block share one count, so a genuine
+  nest of inner times outer over 2^20 iterations is stopped. `lower.rs` is
+  745 bytes under the asset-policy size limit: its split comes before the
+  next functional change to it.
 

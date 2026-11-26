@@ -482,9 +482,9 @@ const CS_CASES: &[(&str, &str)] = &[
     ),
     // A loop whose count comes from a view that reads zeros (as a null or
     // not yet mirrored one does) runs four billion times on the console;
-    // the translation leaves it after `LOOP_LIMIT` iterations. Run on WARP
-    // only (`VICTORY_WARP=1`), ours only: without the limit it would hang
-    // the GPU.
+    // the translation ends such a lane after `LOOP_LIMIT` iterations (it
+    // stores nothing). Run on WARP only (`VICTORY_WARP=1`), ours only:
+    // without the limit it would hang the GPU.
     (
         "terminates on zero data",
         r#"CS {

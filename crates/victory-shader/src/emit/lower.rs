@@ -21,6 +21,7 @@ use crate::resource::{Address, CODE, MEMORY, Resources, Role, Site, Source, USER
 use crate::structure::{Atom, Bool, LaneExit, Structured};
 
 mod bvh;
+mod limit;
 
 type Why = &'static str;
 
@@ -72,6 +73,13 @@ pub(crate) struct Lowered {
     /// Whether the module contains the 32-lane half mask (`!31`).
     #[cfg(test)]
     pub has_half_wave_mask: bool,
+    /// The function as the module writes it.
+    #[cfg(test)]
+    pub flow: super::bitcode::Flow,
+    /// Where in [`Lowered::flow`] a lane stopped by [`LOOP_LIMIT`] leaves
+    /// the program, if any block can stop one.
+    #[cfg(test)]
+    pub limit_stop: Option<usize>,
 }
 
 pub(crate) struct Parts<'a> {
@@ -223,7 +231,9 @@ struct Lower<'a> {
     /// Handles of descriptors chosen by control flow, made in their join
     /// block, by the choice (its `Debug` text), sampler heap and properties.
     join_handles: HashMap<(String, bool, u32), V>,
-    /// Blocks splitting the edge from one IR block to another.
+    /// Where the edge from one IR block to another arrives from, if not
+    /// from the end of the first: the block splitting a critical edge, or
+    /// what [`Lower::limit_exit`] puts on a latch's other edge.
     edges: HashMap<(usize, usize), usize>,
     /// Per IR block: a `done` export is behind every lane entering it.
     exported: Vec<bool>,
@@ -349,9 +359,21 @@ fn round16(p: &crate::ir::Program) -> Vec<Option<u8>> {
 /// [`super::loop_limit`] says otherwise. The console runs a loop as long as
 /// its data says; data the host has not mirrored yet (a null view reads
 /// zeros) can make that four billion iterations, which hangs the host GPU
-/// until the driver resets it. A lane that reaches the limit leaves the
-/// program as killed (a pixel discards).
-// shortcut: a genuine loop of more iterations than this is cut short too.
+/// until the driver resets it. A lane the limit stops (it would have gone
+/// round its loop once more) leaves the program as killed: it goes to the
+/// abort block, where a pixel discards, and runs nothing that follows the
+/// loop. A latch with an unconditional back edge branches there itself; one
+/// with a conditional back edge leaves the loop first, and the block after
+/// it sends the stopped lanes there ([`Lower::limit_exit`]). A lane whose
+/// own condition ends the loop, also on the last iteration the limit
+/// allows, goes on as it would without a limit.
+///
+/// The count is the header block's: every back edge to it counts, and only
+/// an entry from outside starts it at 0. An outer loop whose body begins
+/// with its inner loop shares that loop's header, so there the limit is on
+/// the inner iterations of all outer ones together.
+// shortcut: a genuine loop of more iterations than this is cut short too
+// (its lanes are killed).
 pub(super) const LOOP_LIMIT: u32 = 1 << 20;
 
 /// Lane masks read as numbers (`s_bcnt1`, `s_ff1`, `v_mbcnt`, scalar
@@ -1389,6 +1411,8 @@ impl<'a> Lower<'a> {
         let memory_writes = self.s.memory_dirty.is_some();
         let view_addresses = self.s.view_addresses.is_some();
         let cmp_samplers = self.s.cmp_samplers;
+        #[cfg(test)]
+        let flow = self.s.m.flow();
         Ok(Lowered {
             cmp_samplers,
             root_cbvs,
@@ -1412,6 +1436,10 @@ impl<'a> Lower<'a> {
             uses_lane_index: self.s.m.has_function("dx.op.waveGetLaneIndex"),
             #[cfg(test)]
             has_half_wave_mask: self.s.m.has_i32_const(!31),
+            #[cfg(test)]
+            limit_stop: self.abort.and_then(|a| flow.at(a)),
+            #[cfg(test)]
+            flow,
             dxil: self.s.finish(),
             user_data,
             samplers: self.samplers,
@@ -10185,32 +10213,61 @@ impl<'a> Lower<'a> {
                 // A back edge is taken only below the iteration limit.
                 let back =
                     |l: &Self, to: usize| l.counters.contains_key(&to) && l.rpo[to] <= l.rpo[b];
+                // The latch's other side and the value of `cond` in the
+                // lanes that take it of themselves.
+                let leaves = if back(self, taken) {
+                    Some((not_taken, false))
+                } else if back(self, not_taken) {
+                    Some((taken, true))
+                } else {
+                    None
+                };
                 // (No `xor` of a compare: a loop exit testing one hung the
                 // AMD driver.)
-                let cond = if back(self, taken) {
-                    let ok = self.count_iteration(taken, pred::IULT);
-                    self.s.m.bin(self.cur, Bin::And, cond, ok)
-                } else if back(self, not_taken) {
-                    let stop = self.count_iteration(not_taken, pred::IUGE);
-                    self.s.m.bin(self.cur, Bin::Or, cond, stop)
-                } else {
-                    cond
+                let latch = match leaves {
+                    Some((_, false)) => {
+                        let ok = self.count_iteration(taken, pred::IULT);
+                        self.s.m.bin(self.cur, Bin::And, cond, ok)
+                    }
+                    Some((_, true)) => {
+                        let stop = self.count_iteration(not_taken, pred::IUGE);
+                        self.s.m.bin(self.cur, Bin::Or, cond, stop)
+                    }
+                    None => cond,
                 };
                 // Critical edges get a block of their own, so loops have
                 // dedicated exits and preheaders as DXC emits them.
-                let (t, f) = (self.edge(b, taken), self.edge(b, not_taken));
-                for (to, via) in [(taken, t), (not_taken, f)] {
+                let (mut t, mut f) = (self.edge(b, taken), self.edge(b, not_taken));
+                // Where each side's edge arrives from: an edge block, or
+                // here.
+                let from = |l: &Self, to: usize, via: usize| {
+                    if Some(via) == l.block[to] {
+                        l.cur
+                    } else {
+                        via
+                    }
+                };
+                let mut arrives = [from(self, taken, t), from(self, not_taken, f)];
+                // The latch's branch keeps its shape; where it leaves the
+                // loop, the lanes the limit stopped are told from the others.
+                if let Some((to, own)) = leaves {
+                    let (via, arrives) = if own {
+                        (&mut t, &mut arrives[0])
+                    } else {
+                        (&mut f, &mut arrives[1])
+                    };
+                    let test = self.limit_exit(b, to, *via, cond, own);
+                    if *arrives == self.cur {
+                        *arrives = test;
+                    }
+                    *via = test;
+                }
+                for (to, from) in [(taken, arrives[0]), (not_taken, arrives[1])] {
                     if !back(self, to) {
-                        // From an edge block, or from here.
-                        let from = if Some(via) == self.block[to] {
-                            self.cur
-                        } else {
-                            via
-                        };
                         self.enter_loop(b, to, from);
                     }
                 }
-                Term::CondBr(cond, t, f)
+                Term::CondBr(latch, t, f)
             }
             LaneExit::End => {
                 if self.s.pixel && !self.exported[b] && !self.has_done_export(b) {
@@ -10635,7 +10692,8 @@ impl<'a> Lower<'a> {
                 }
                 let mut k = none;
                 // Forward edges out of a block that is no loop's latch (a
-                // loop's exit is also taken at its iteration limit).
+                // latch's exit is not narrowed by its condition, which
+                // only keeps more edges live).
                 if let LaneExit::Branch {
                     when,
                     taken,
@@ -10984,7 +11042,7 @@ mod tests {
             mesh_stride: 0,
             view_marks: false,
         })
-        .map(|_| ())
+        .map(|l| l.flow.check().unwrap())
     }
 
     /// Lowers a compute program with the root parameters `layout` (in user
@@ -11023,7 +11081,7 @@ mod tests {
         let st = structure::structure(&p).unwrap();
         let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
         let io = io::raise(&p, &native).unwrap();
-        lower(&Parts {
+        let lowered = lower(&Parts {
             native: &native,
             p: &p,
             st: &st,
@@ -11034,11 +11092,14 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
             view_marks: false,
-        })
+        })?;
+        // Every program these tests lower is a well-formed function.
+        lowered.flow.check().unwrap();
+        Ok(lowered)
     }
 
     /// Root parameter `slot` in user SGPRs from `user_data` on.
-    fn root(root: RootType, user_data: u8, slot: u8) -> RootParam {
+    pub(super) fn root(root: RootType, user_data: u8, slot: u8) -> RootParam {
         RootParam {
             root,
             table_offset_dwords: 0,
@@ -11052,7 +11113,7 @@ mod tests {
     /// Lowers a one-thread compute program that copies four root constants
     /// (s0..s3) into v1..v4, runs `body`, and stores v0 to a raw buffer from a
     /// descriptor table, so the vector instructions in `body` have an effect.
-    fn lower_valu(body: &[u32]) -> Result<Lowered, crate::ShaderError> {
+    pub(super) fn lower_valu(body: &[u32]) -> Result<Lowered, crate::ShaderError> {
         let mut words = vec![
             0xBE85_0380, // s_mov_b32 s5, 0
             0xF408_0202, // s_load_dwordx4 s[8:11], s[4:5], 0

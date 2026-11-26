@@ -245,7 +245,11 @@ pub use shader::{
 pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 
 /// The iteration count after which a translated loop is left, per lane and
-/// per entry into the loop: [`DEFAULT_LOOP_LIMIT`].
+/// per entry into the loop: [`DEFAULT_LOOP_LIMIT`]. A lane that would go
+/// round once more ends there as killed: a pixel is discarded, and nothing
+/// after the loop runs in it. Loops that begin at the same instruction (an
+/// outer loop whose body starts with its inner loop) are counted as one:
+/// the limit is then on the inner iterations of all outer ones together.
 ///
 /// With the `diagnostics` feature, `VICTORY_SHADER_LOOP_LIMIT` (decimal or
 /// `0x` hex, at least 1) sets it instead. A loop that hits the limit in
