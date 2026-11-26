@@ -34,6 +34,20 @@ by the project owner's decision (2026-11-23), entered as an exception in
 repository's licence does not cover them. Nothing else of this kind is
 accepted.
 
+## Access controls
+
+VIctory does not decrypt, and its tools do not either.
+
+* No package decryption, console keys or key material, in code, tests or
+  documents.
+* The running title reads its own archives with its own code. Our tools
+  read only what is plain in a file: an archive's header, uncompressed or
+  zlib payload, shader containers. A span they cannot read is reported as
+  opaque, not decoded.
+* No tool calls, copies or reimplements a title's cipher routines, and no
+  code that does is taken from another project, whatever its licence
+  (docs/audit-2026-11-26.md, "Reuse").
+
 ## Where data lives
 
 Outside the repository, configured in `victory.toml`: `game_dir` (the

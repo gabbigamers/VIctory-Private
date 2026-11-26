@@ -162,6 +162,35 @@ Ledger (medians over the run's periods after loading unless noted):
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | | | | | | | | | | | | | no measured run yet |
 
+## Blockers
+
+From the audit of 2026-11-26 ([audit-2026-11-26.md](audit-2026-11-26.md):
+98 claims checked against the code by a second reader, none measured).
+Ordered by track, then by what can be done next. "Any host" means a cloud
+session can do and validate it.
+
+**Gate.** Where the title's files come from and how they became readable
+is not recorded anywhere, and the reference repositories call the only
+data of this build they know "circulating" and "leaked" (audit, "Gate").
+It is the first item under "Needed from the owner". Until it is answered,
+sessions work on this repository's own code, synthetic data and checks
+that need no title files; the items marked "owner's machine, title" wait.
+
+| # | Blocker | Audit | Next step | Where |
+|---|---|---|---|---|
+| 1 | A lane stopped by the loop limit keeps running with a truncated loop's values | A-C4 | fix and test | any host |
+| 2 | BCPack: a codebook difference against the independent decoder, untested block formats, no end-state check | A-C15 | differential tests against `bcpack-rs` on synthetic streams | any host |
+| 3 | Lane-dependent compute programs declare the console's wave size; a host with narrower waves drops them, and the trigger is wider than needed | A-C1, A-C3, G2 | refusal reason and tally; narrow the trigger; lane-carrying lowering | any host; counts need the title |
+| 4 | A host with a smaller view heap gets shaders that redirect past it | A-C2, G3 | heap layout as a tested function of the host's size | any host; `gpu-info` for the card's limit |
+| 5 | Fused multiply-add and other float behaviour follow the host | A-C9, A-C10, G4, G5 | probe run on the target card; exact lowering where it differs | owner's machine, no title; then any host |
+| 6 | Geometry-stage programs and under 100 others are untranslated; their draws are dropped | A-C5, A-C6, A-C14 | per-reason tally | owner's machine, title |
+| 7 | Ray-tracing structures never appear; three candidate causes in the code, none shown | A-C7 | log which occurs | owner's machine, title |
+| 8 | No test runs translated shader code without a Direct3D 12 device | A-B3 | an interpreter for the compute-probe subset, with the existing CPU models as oracle | any host |
+| 9 | No commit check at start; the title's own 30 s rule ends a stalled run | A-S1, A-S2 | start-up check with a clear message | any host |
+| 10 | Pipeline library held and rewritten whole | A-S3, G8 | measure, then map the file | owner's machine; then any host |
+| 11 | Where memory and a frame's time go | A-M1 to A-M4, A-P1 to A-P8 | M0, P0, then M1 and P1 | owner's machine, title |
+| 12 | The BCPack tables' origin; notices; identifiers in source | A-B6, A-B7, A-B8 | owner's decision; the derivable section and a notices file can be done now | any host |
+
 ## Measuring
 
 One procedure, so rows are comparable.
@@ -223,17 +252,26 @@ Written at tier 2, not yet run on Windows:
 
 Only what cannot be done from a cloud session.
 
-1. The output of `victory gpu-info` on the target machine (no title files
+1. Where the title's files used for runs come from and how they became
+   readable (see "Blockers", gate). This project's rules are lawfully
+   obtained data and no bypass of access controls, and no repository
+   records the answer. Items 3 and 4 below wait on it; 2 and 5 do not.
+2. The output of `victory gpu-info` on the target machine (no title files
    needed). It replaces expectation with the card's own answers on wave
    lanes, heap size and fused multiply-add, and is the first check of the
    capability code.
-2. One run with `VICTORY_PERF_LOG` on the target machine at the current
+3. One run with `VICTORY_PERF_LOG` on the target machine at the current
    commit, following "Measuring", and the CSV. This is P0, M0 and S0 at
    once, and the first check of the new instrumentation.
-3. For the 15 fps report: the build or commit, where in the game, the
+4. For the 15 fps report: the build or commit, where in the game, the
    console mode, and how the rate was read.
-4. `cargo test --workspace --locked` on the target machine (C2): the shader
-   probes have only run on an AMD card.
+5. `cargo test --workspace --locked` on the target machine (C2): the shader
+   probes have no recorded full run on an NVIDIA card.
+6. The design decision records (0001, 0003, 0005, 0007) and the named
+   measurement runs the code cites, if they exist outside the repository.
+7. A decision on `bcpack-tables.bin`: where its tables came from, and
+   whether the section that can be generated from MIT-licensed tables
+   should be (audit, A-B6).
 
 ## Session log
 
@@ -257,7 +295,9 @@ Only what cannot be done from a cloud session.
   roadmap. First step done: one capability record with a stated loss for
   each unmet need (`crates/victory-gpu/src/caps.rs`, 8 tests at tier 1),
   logged by every run and printed by `victory gpu-info` (tier 2 only).
-* A subsystem audit with adversarial verification (GPU layer, shader
-  translator, runtime and formats, and the two reference-repository
-  research tracks) was started; its verified findings are entered here when
-  it completes.
+* Audit completed ([audit-2026-11-26.md](audit-2026-11-26.md)): GPU layer,
+  shader translator, runtime and formats, and the two reference-repository
+  research tracks, each re-read by a verifier. 72 claims confirmed, 25
+  corrected, 1 unverifiable. "Blockers" above is its prioritised result;
+  the reuse table and licence findings are in the audit file. It raised
+  the provenance of the title's files as an open question for the owner.
