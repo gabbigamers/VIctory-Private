@@ -353,4 +353,19 @@ Only what cannot be done from a cloud session.
   copies of title buffers, depth twins and the title's own memory are
   recorded as needed today, not as waste. One figure of the run summary
   that subtracted two counters measuring different things was removed.
+* Owner's decision on the BCPack decoder: VIctory's decoder is kept. The
+  parts of `bcpack-rs` whose origin is independently verified (its entropy
+  layer, ported from Microsoft's MIT-licensed hardware description, the
+  model tables generated from it, and its synthetic encoder and vectors)
+  are used for testing. Its block rebuild is not independent evidence (it
+  was checked against VIctory and shares code shape with it) and its data
+  files stay out. The two differences in the entropy layer that were
+  reproduced by execution are to be investigated against Microsoft's
+  source, which is the authority for that layer: a lane that has delivered
+  its last symbol goes on asking for bytes, and a byte is dropped at the
+  end of a fragment that was not flushed. Microsoft's source is cloned
+  read-only at `/home/user/microsoft/silicon-rans` (commit `2f6827d`).
+* Memory counters (M1c): the accounting module and its log columns are in
+  (`crates/victory-gpu/src/account.rs`); putting the counting in at each
+  allocation and release is in review.
 
