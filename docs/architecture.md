@@ -50,6 +50,17 @@ title's), so a run finds them under the names it gives them itself.
 Everything except `victory-game` is platform-level and can be tested with
 any Xbox Series title.
 
+## Host GPU
+
+The console's GPU is fixed and reproduced exactly; the host's is whatever
+Direct3D 12 device the user has, and nothing about it is assumed.
+`victory-gpu::caps` asks the device what it can do and states what is lost
+where it lacks something; no code branches on a vendor or a model. The
+requirement, its rules, the host dependencies still in the code and the
+status of each tested device are in
+[gpu-compatibility.md](gpu-compatibility.md). `victory gpu-info` prints a
+device's report.
+
 ## Import resolution
 
 For every `dll!function` the title imports, in order:

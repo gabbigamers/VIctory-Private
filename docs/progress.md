@@ -16,13 +16,18 @@ Rules that do not change between sessions:
 * Code is reused only under a licence compatible with GPL-3.0-or-later, with
   attribution, as a module or dependency. No licence file means no code
   reuse (documented facts only).
+* Every GPU-related change follows [gpu-compatibility.md](gpu-compatibility.md):
+  NVIDIA-first, across generations, by capability and never by model.
 * A number in this document says where it comes from: **measured** (a run,
   with its commit and machine), **owner-reported**, or **project-reported**
   (the README). Estimates are marked as estimates and never fill a ledger.
 
 ## Objective
 
-The title runs on the owner's machine, correctly first and then at speed:
+The title runs on the owner's machine, correctly first and then at speed.
+The machine is where development and performance are validated; it is not
+what the code is written for (see [gpu-compatibility.md](gpu-compatibility.md)
+for the hardware the layer supports and what has been shown on each):
 
 | | Target machine | Tested by the project so far |
 |---|---|---|
@@ -105,6 +110,7 @@ Tracks are worked in this order where they compete.
 | C3 | Ray-tracing structures built: ray-traced shadows and indirect light | open |
 | C4 | Known picture defects gone: the local-light shadow mask, the pink band over nearer bodies, the stand-in head | open |
 | C5 | Map completeness at fixed places | not started |
+| C6 | Host independence: the wave-size, heap-size, fused multiply-add and float-behaviour dependencies removed (G2 to G5 in [gpu-compatibility.md](gpu-compatibility.md)) | open; G1 (one capability record) started |
 
 Ledger (measured runs only):
 
@@ -209,17 +215,24 @@ Written at tier 2, not yet run on Windows:
 * the frame-time line and `VICTORY_PERF_LOG` wiring in
   `crates/victory-gpu/src/host.rs` (`Meter::frame`). The statistics and the
   file format themselves are tested at tier 1.
+* `Host::caps` (the device and adapter queries, the heap-size probe) and
+  `victory gpu-info`. The record, its assessment and the report text are
+  tested at tier 1.
 
 ## Needed from the owner
 
 Only what cannot be done from a cloud session.
 
-1. One run with `VICTORY_PERF_LOG` on the target machine at the current
+1. The output of `victory gpu-info` on the target machine (no title files
+   needed). It replaces expectation with the card's own answers on wave
+   lanes, heap size and fused multiply-add, and is the first check of the
+   capability code.
+2. One run with `VICTORY_PERF_LOG` on the target machine at the current
    commit, following "Measuring", and the CSV. This is P0, M0 and S0 at
    once, and the first check of the new instrumentation.
-2. For the 15 fps report: the build or commit, where in the game, the
+3. For the 15 fps report: the build or commit, where in the game, the
    console mode, and how the rate was read.
-3. `cargo test --workspace --locked` on the target machine (C2): the shader
+4. `cargo test --workspace --locked` on the target machine (C2): the shader
    probes have only run on an AMD card.
 
 ## Session log
@@ -237,6 +250,13 @@ Only what cannot be done from a cloud session.
 * Instrumentation: frame-time distribution logged every five seconds in
   every build; `VICTORY_PERF_LOG` (8 new tests at tier 1; the Windows wiring
   is type-checked only).
+* Architecture: NVIDIA-first, cross-generation host support by capability
+  ([gpu-compatibility.md](gpu-compatibility.md)): rules, the host
+  dependencies in the code today (G1 to G11), a hardware status table that
+  separates expected, reported, tested, running and confirmed, and a
+  roadmap. First step done: one capability record with a stated loss for
+  each unmet need (`crates/victory-gpu/src/caps.rs`, 8 tests at tier 1),
+  logged by every run and printed by `victory gpu-info` (tier 2 only).
 * A subsystem audit with adversarial verification (GPU layer, shader
   translator, runtime and formats, and the two reference-repository
   research tracks) was started; its verified findings are entered here when

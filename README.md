@@ -155,7 +155,14 @@ victory translate [paths...] --cache [--pipelines] [--jobs N]
 victory run <exe> [--execute] [--unimplemented trap|zero] [--strict]
             [--console series-x|series-s] [-- <title arguments>]
 victory config
+victory gpu-info
 ```
+
+`gpu-info` describes the host GPU and how it meets what the translation
+needs (shader model, mesh shaders, wave lane counts, heap size, fused
+multiply-add, memory). It reads no title files. A run logs the same lines
+when it makes its device. See
+[docs/gpu-compatibility.md](docs/gpu-compatibility.md).
 
 `translate --jobs N` requires a positive worker count. Omit it to use the
 default worker count.

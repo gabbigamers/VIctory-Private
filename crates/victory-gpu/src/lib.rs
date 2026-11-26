@@ -18,6 +18,7 @@
 
 #[cfg(windows)]
 mod bindless;
+pub mod caps;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
 pub mod console;
@@ -72,6 +73,14 @@ mod watch;
 pub use copystat::CountingAlloc;
 #[cfg(windows)]
 pub use host::on_failure;
+
+/// The host GPU's capabilities, from the device a run uses (created here if
+/// none is yet); `None` without one. With `probe`, also what takes making
+/// something to learn: the largest view heap the device gives.
+#[cfg(windows)]
+pub fn host_caps(probe: bool) -> Option<caps::HostCaps> {
+    host::host().map(|host| host.caps(probe))
+}
 #[cfg(windows)]
 pub use watch::{
     Writing as KernelWrite, title_memory_aliased, title_memory_remapped,

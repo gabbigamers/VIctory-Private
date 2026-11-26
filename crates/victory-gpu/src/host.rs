@@ -42,6 +42,9 @@ const RTV_RING: u32 = 1024;
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
     pub(crate) depth_bounds_supported: bool,
+    /// Whether the device fuses a multiply-add, measured when it was made;
+    /// `None` if the measurement did not run.
+    fuses_fmad: Option<bool>,
     queue: ID3D12CommandQueue,
     fence: ID3D12Fence,
     /// The last value signalled on `fence`, behind the submission lock.
@@ -132,7 +135,15 @@ pub(crate) fn fail(what: std::fmt::Arguments) -> ! {
 pub(crate) fn host() -> Option<&'static Host> {
     static HOST: OnceLock<Option<Host>> = OnceLock::new();
     HOST.get_or_init(|| match create() {
-        Ok(host) => Some(host),
+        Ok(host) => {
+            // What this host is and how it meets the translation's needs,
+            // once a run: the first thing to read in a report from a GPU
+            // nobody has run on (docs/gpu-compatibility.md).
+            for line in crate::caps::report(&host.caps(false)).lines() {
+                tracing::info!("host GPU: {line}");
+            }
+            Some(host)
+        }
         Err(e) => {
             tracing::warn!(error = %e, "no host D3D12 device; command lists will not run");
             None
@@ -239,8 +250,8 @@ fn create() -> windows::core::Result<Host> {
         // The console fuses its multiply-adds (`v_fma_f32`, `v_fmac_f32`,
         // `v_fma_mix*`); the lowering's DXIL `FMad` is fused only where the
         // host chooses (the RX 6700 XT does, WARP does not).
-        match victory_shader::emit::host::Host::from_device(device.clone()).fuses_fmad()
-        {
+        let fuses_fmad = victory_shader::emit::host::Host::from_device(device.clone()).fuses_fmad();
+        match &fuses_fmad {
             Ok(true) => {}
             Ok(false) => tracing::warn!(
                 "the host GPU does not fuse multiply-adds: results of the console's fused v_fma and v_fmac can differ in kind here"
@@ -250,6 +261,7 @@ fn create() -> windows::core::Result<Host> {
         Ok(Host {
             device,
             depth_bounds_supported,
+            fuses_fmad: fuses_fmad.ok(),
             queue,
             fence,
             submitted: Mutex::new(0),
@@ -1043,7 +1055,102 @@ struct Deferred {
     missed: Vec<Box<dyn Fn() -> bool + Send>>,
 }
 
+/// A feature query's answer, `None` where the runtime does not know the
+/// query (an older one) or refuses it.
+fn feature<T: Default>(device: &ID3D12Device, feature: D3D12_FEATURE) -> Option<T> {
+    let mut data = T::default();
+    // SAFETY: the query writes a structure of the size given, which is `T`'s.
+    unsafe { device.CheckFeatureSupport(feature, (&raw mut data).cast(), size_of::<T>() as u32) }
+        .ok()
+        .map(|()| data)
+}
+
 impl Host {
+    /// What the host can do, asked of the device and its adapter
+    /// ([`crate::caps`]). With `probe`, also the largest view heap the
+    /// device makes of the sizes the translation cares about (it makes and
+    /// drops heaps, so a run does not ask).
+    pub(crate) fn caps(&self, probe: bool) -> crate::caps::HostCaps {
+        use crate::caps::{HostCaps, SHADER_HEAP_VIEWS};
+        const MB: u64 = 1 << 20;
+        let device = &self.device;
+        let mut caps = HostCaps {
+            depth_bounds: self.depth_bounds_supported,
+            fuses_fmad: self.fuses_fmad,
+            ..Default::default()
+        };
+        // SAFETY: plain adapter queries; the description is a fixed array.
+        unsafe {
+            let adapter: Option<IDXGIAdapter3> = CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+                .and_then(|factory| factory.EnumAdapterByLuid(device.GetAdapterLuid()))
+                .ok();
+            if let Some(adapter) = adapter {
+                if let Ok(desc) = adapter.GetDesc1() {
+                    let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+                    caps.name = String::from_utf16_lossy(&desc.Description[..end]);
+                    (caps.vendor, caps.device) = (desc.VendorId, desc.DeviceId);
+                    caps.software = desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0;
+                    caps.dedicated_mb = desc.DedicatedVideoMemory as u64 / MB;
+                    caps.shared_mb = desc.SharedSystemMemory as u64 / MB;
+                }
+                // The user-mode driver's version, as DXGI reports it for
+                // its own device interface.
+                caps.driver = adapter
+                    .CheckInterfaceSupport(&IDXGIDevice::IID)
+                    .ok()
+                    .map(|v| [48, 32, 16, 0].map(|shift| (v >> shift) as u16));
+                let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+                if adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info).is_ok() {
+                    caps.budget_mb = Some(info.Budget / MB);
+                }
+            }
+        }
+        if let Some(o) = feature::<D3D12_FEATURE_DATA_D3D12_OPTIONS>(device, D3D12_FEATURE_D3D12_OPTIONS) {
+            caps.binding_tier = o.ResourceBindingTier.0 as u32;
+        }
+        if let Some(o) = feature::<D3D12_FEATURE_DATA_D3D12_OPTIONS1>(device, D3D12_FEATURE_D3D12_OPTIONS1) {
+            caps.wave_ops = o.WaveOps.as_bool();
+            caps.wave_lanes = (o.WaveLaneCountMin, o.WaveLaneCountMax);
+        }
+        if let Some(o) = feature::<D3D12_FEATURE_DATA_D3D12_OPTIONS5>(device, D3D12_FEATURE_D3D12_OPTIONS5) {
+            caps.raytracing_tier = o.RaytracingTier.0 as u32;
+        }
+        if let Some(o) = feature::<D3D12_FEATURE_DATA_D3D12_OPTIONS7>(device, D3D12_FEATURE_D3D12_OPTIONS7) {
+            caps.mesh_shaders = o.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
+        }
+        // The query answers with the lower of what it is asked about and
+        // what the device has, so it is asked about the model needed.
+        let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
+            HighestShaderModel: D3D_SHADER_MODEL_6_6,
+        };
+        // SAFETY: the query writes the structure of the given size.
+        caps.shader_model_6_6 = unsafe {
+            device.CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, (&raw mut model).cast(), size_of_val(&model) as u32)
+        }
+        .is_ok()
+            && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_6.0;
+        caps.atomics64 = self.heap_atomics64();
+        if probe {
+            // Largest first: what shaders index with the dynamic slots a
+            // run adds, what shaders index, then sizes a capped host may
+            // still give.
+            let sizes = [SHADER_HEAP_VIEWS + (1 << 18), SHADER_HEAP_VIEWS, 1_500_000, 1 << 20, 1_000_000, 500_000, 1 << 16];
+            caps.view_heap = sizes.into_iter().find(|&count| {
+                // SAFETY: plain heap creation; the heap is dropped at once.
+                unsafe {
+                    device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(&D3D12_DESCRIPTOR_HEAP_DESC {
+                        Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                        NumDescriptors: count,
+                        Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                        NodeMask: 0,
+                    })
+                }
+                .is_ok()
+            });
+        }
+        caps
+    }
+
     /// Whether the host runs mesh shaders at shader model 6.6 (translated
     /// mesh shaders need both); logged once.
     pub(crate) fn mesh_shaders(&self) -> bool {

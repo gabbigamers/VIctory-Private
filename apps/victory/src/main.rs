@@ -123,6 +123,10 @@ enum Command {
     },
     /// Show the resolved configuration and check it.
     Config,
+    /// Describe the host GPU and how it meets what the translation needs.
+    /// Reads no title files; its output can go into a hardware report as
+    /// it is (docs/gpu-compatibility.md).
+    GpuInfo,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -205,7 +209,15 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Config => show_config(),
+        Command::GpuInfo => gpu_info(),
     }
+}
+
+fn gpu_info() -> Result<()> {
+    let caps = victory_gpu::host_caps(true)
+        .ok_or_else(|| anyhow::anyhow!("no host Direct3D 12 device could be created"))?;
+    print!("{}", victory_gpu::caps::report(&caps));
+    Ok(())
 }
 
 fn show_config() -> Result<()> {
