@@ -154,7 +154,7 @@ before and after; a larger paging file is not a fix.
 |---|---|
 | M0 | A memory profile of a world run on the target machine (performance log, `cargo xtask perf-summary`): all four quantities, peak and sustained | instrumentation written; not started (needs the owner's machine) |
 | M1 | Where it goes, by owner (title memory, host copies, caches, video memory): an allocation inventory from the code, then the profile's figures against it | inventory done and verified ([memory.md](memory.md), "What allocates": 26 entries, none measured); profile not started |
-| M1c | The counters the inventory found missing (memory.md, "What no line reports"), so each candidate has a measurable before | not started |
+| M1c | The counters the inventory found missing, so each candidate has a measurable before | in: fifteen owners counted at their allocation and release sites and logged ([memory.md](memory.md), "What is counted now"); reviewed; not yet run on Windows |
 | M1a | Ownership, residency and dirty-state tracking where a case needs it and it is missing, built and tested as its own change | not started |
 | M1b | Allocations removed, reused or made evictable one at a time, each through a case, with tests and a before and an after in memory.md's ledger | not started |
 | M2 | A5 met | not started |
@@ -267,6 +267,11 @@ Written at tier 2, not yet run on Windows:
 * the memory queries behind the performance log's memory columns (process
   counters, the machine's memory, paging files) in `host.rs`. The row
   format and `cargo xtask perf-summary` are tested at tier 1.
+* the counting of memory by owner: every add and release in `xmem.rs`,
+  `dstorage.rs`, `shadow.rs`, `watch.rs`, `texture.rs`, `host.rs`,
+  `descriptor/host.rs`, `memory.rs` and `pipeline/library.rs`, and the
+  miscount warning. The gauges, the snapshot pool's bookkeeping and the
+  log columns are tested at tier 1.
 * `Host::caps` (the device and adapter queries, the heap-size probe) and
   `victory gpu-info`. The record, its assessment and the report text are
   tested at tier 1.
@@ -401,4 +406,17 @@ Only what cannot be done from a cloud session.
   nest of inner times outer over 2^20 iterations is stopped. `lower.rs` is
   745 bytes under the asset-policy size limit: its split comes before the
   next functional change to it.
+* Memory counters (M1c) in: each of the fifteen owners of
+  `victory_gpu::account` is now added to where its memory is allocated and
+  taken from where it is released, mostly by a count held as a field of
+  what owns the memory. Written by two engineers, each checked by a
+  reviewer who traced every allocation and release path (13 findings, all
+  dealt with). Counting changes nothing else, with these disclosed
+  exceptions: one small allocation per pool the title allocates (a bitmap
+  of committed pages), one gauge update on the write-fault path, and a
+  one-time redo of the pipeline pre-build's list because the library file's
+  text is part of its tag. A test-only global allocator a corrector had
+  added to the runtime crate's Windows tests was taken out before commit:
+  it could not be run here and would have sat under every test of that
+  crate. None of the counting has run.
 

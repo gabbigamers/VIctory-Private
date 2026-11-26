@@ -214,6 +214,8 @@ struct Shared {
     /// The copies' generation it names ([`crate::shadow::generation`]).
     generation: u64,
     layout: Arc<Layout>,
+    /// The table's bytes, counted while this has it.
+    _held: crate::account::Held,
 }
 
 // SAFETY: `data` is the persistent mapping of `table`, written only under
@@ -482,6 +484,7 @@ impl Shared {
     fn new(heap: &HostHeap) -> Option<Shared> {
         let bytes = TABLE_DWORDS as u64 * 4;
         let (table, data) = crate::host::host()?.upload_buffer(bytes)?;
+        let held = crate::account::Held::new(crate::account::Owner::HeapTables, bytes);
         crate::host::name(&table, || "title memory page table".into());
         let null = heap.pair()?;
         heap.raw_pair_at(null, None, 0);
@@ -496,6 +499,7 @@ impl Shared {
             pairs: HashMap::new(),
             generation: u64::MAX,
             layout: Arc::default(),
+            _held: held,
         })
     }
 

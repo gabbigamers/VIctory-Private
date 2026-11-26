@@ -112,7 +112,10 @@ struct Saved {
     armed: Vec<(usize, usize)>,
     /// Pages of those runs that are not armed any more.
     unarmed: BTreeSet<usize>,
-    bytes: std::collections::HashMap<usize, Box<[u8]>>,
+    /// The bytes kept of each page, with the count of them
+    /// (`crate::account`, with the snapshots they stand in for), which ends
+    /// when the entry leaves the map by any way.
+    bytes: std::collections::HashMap<usize, (Box<[u8]>, crate::account::Held)>,
 }
 
 impl Saved {
@@ -164,7 +167,8 @@ impl Changed {
         }
         let mut bytes = vec![0u8; PAGE].into_boxed_slice();
         if crate::host::read_into((page * PAGE) as *const u8, &mut bytes) {
-            saved.bytes.insert(page, bytes);
+            let held = crate::account::Held::new(crate::account::Owner::Snapshots, PAGE as u64);
+            saved.bytes.insert(page, (bytes, held));
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::SavedPages, 1);
         }
@@ -613,7 +617,9 @@ impl Tracked {
     /// since it was taken, if it was armed then (and so changed), with what
     /// the copy took of it since: the copy's bytes before the submission.
     pub(crate) fn saved(&self, page: usize) -> Option<Box<[u8]>> {
-        self.changed.1.lock().unwrap_or_else(|e| e.into_inner()).bytes.remove(&page)
+        // Handed out, the bytes are the caller's for one page's copy-back
+        // and not counted any more.
+        self.changed.1.lock().unwrap_or_else(|e| e.into_inner()).bytes.remove(&page).map(|(bytes, _)| bytes)
     }
 
     /// The copy took `bytes` at title address `from`: any saved bytes of pages
@@ -629,7 +635,7 @@ impl Tracked {
         }
         let to = from + bytes.len();
         for page in from / PAGE..to.div_ceil(PAGE) {
-            if let Some(before) = saved.bytes.get_mut(&page) {
+            if let Some((before, _)) = saved.bytes.get_mut(&page) {
                 let (a, b) = (from.max(page * PAGE), to.min((page + 1) * PAGE));
                 before[a - page * PAGE..b - page * PAGE]
                     .copy_from_slice(&bytes[a - from..b - from]);

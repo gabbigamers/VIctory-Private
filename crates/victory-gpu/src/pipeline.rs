@@ -83,7 +83,12 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
     shaders
         .get_or_insert_with(HashMap::new)
         .entry(*full.as_bytes())
-        .or_insert_with(|| Arc::new(Shader::new(stage, bytes)))
+        .or_insert_with(|| {
+            // The map only inserts and is never dropped: counted once, with
+            // no release to count.
+            crate::account::gauge(crate::account::Owner::Shaders).add(bytes.len() as u64);
+            Arc::new(Shader::new(stage, bytes))
+        })
         .clone()
 }
 
@@ -146,6 +151,11 @@ impl Shader {
                         kernel_ms,
                         "shader does not translate; its pipelines' draws are dropped"
                     ),
+                }
+                // Kept with the container for the run (the map of
+                // containers only inserts): added, never released.
+                if let Ok(t) = &done {
+                    crate::account::gauge(crate::account::Owner::Shaders).add(t.host.dxil.capacity() as u64);
                 }
                 done.ok()
             })

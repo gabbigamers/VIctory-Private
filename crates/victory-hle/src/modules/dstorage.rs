@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 use victory_formats::bcpack::{self, Tables};
+use victory_gpu::account::{Held, Owner};
 
 use super::xasync::{E_INVALIDARG, E_NOTIMPL, E_PENDING};
 use super::xgameruntime::{Guid, HRESULT, Methods, Object, S_OK, add_ref, missing, put};
@@ -880,20 +881,32 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
             .map_err(|hr| fail(hr, "copying"));
     }
     let tables = if bc != 0 { Some(bcpack_tables()?) } else { None };
-    let source = read_source(request).map_err(|hr| fail(hr, "reading the source"))?;
+    // Each buffer's count is bound beside it and dropped with it, at the
+    // end of the request whichever way it ends. With zlib before BCPack the
+    // file's bytes stay until then too, behind the inflated ones.
+    let (source, _source_counted) =
+        read_source(request).map_err(|hr| fail(hr, "reading the source"))?;
     // The console's order: zlib first, then BCPack.
-    let source = if bc != 0 && options & ZLIB != 0 {
+    let (source, _intermediate_counted) = if bc != 0 && options & ZLIB != 0 {
         let mut packed = vec![0; request.intermediate_size as usize];
+        let counted = loading(packed.len());
         let n = inflate(&source, &mut packed).map_err(|hr| fail(hr, "zlib"))?;
         packed.truncate(n);
-        Cow::Owned(packed)
+        (Cow::Owned(packed), counted)
     } else {
-        source
+        (source, None)
     };
     into_destination(request, size, |out| match tables {
-        Some(tables) => bcpack::decode(bc, &source, out, tables)
-            .map(|()| out.len())
-            .map_err(|e| fail(INVALID_DATA, &e.to_string())),
+        Some(tables) => {
+            let decoded = {
+                // The decoder's records, which live for the call.
+                let _records_counted = loading(records_bytes(bc, out.len()));
+                bcpack::decode(bc, &source, out, tables)
+            };
+            decoded
+                .map(|()| out.len())
+                .map_err(|e| fail(INVALID_DATA, &e.to_string()))
+        }
         None => inflate(&source, out).map_err(|hr| fail(hr, "zlib")),
     })?;
     tracing::trace!(
@@ -956,18 +969,43 @@ fn load_bcpack_tables() -> Result<Tables, String> {
     Tables::parse(&bytes).map_err(|e| e.to_string())
 }
 
+/// A loading buffer of `bytes` in `Owner::Loading` from now until what is
+/// returned is dropped: kept beside the buffer, so that it is counted for
+/// as long as it lives on every way out of a request. Nothing for no bytes,
+/// which is no allocation.
+fn loading(bytes: usize) -> Option<Held> {
+    (bytes > 0).then(|| Held::new(Owner::Loading, bytes as u64))
+}
+
+/// The bytes of the records `bcpack::decode` allocates for a destination of
+/// `len` bytes: a record per block, of a byte per symbol of every lane (12
+/// for BC1 and BC4, 24 for BC3 and BC5, 32 for BC6 and BC7), which is 1.5
+/// times the destination, or twice it. Nothing where the decoder refuses
+/// the request before it allocates. The layout is the decoder's own, which
+/// it does not export: a change of it there is a change here.
+fn records_bytes(bc: u8, len: usize) -> usize {
+    let (block, record) = match bc {
+        1 | 4 => (8, 12),
+        3 | 5 => (16, 24),
+        6 | 7 => (16, 32),
+        _ => return 0,
+    };
+    if len.is_multiple_of(block) { len / block * record } else { 0 }
+}
+
 /// A compressed request's source: borrowed from memory, or read from the
-/// file.
-fn read_source(request: &Request) -> Result<Cow<'static, [u8]>, HRESULT> {
+/// file, with the count of the buffer it was read into.
+fn read_source(request: &Request) -> Result<(Cow<'static, [u8]>, Option<Held>), HRESULT> {
     let size = request.source_size as usize;
     if request.options & MEMORY_SOURCE != 0 {
         // SAFETY: the title's source holds `size` bytes until completion.
         let bytes = unsafe { std::slice::from_raw_parts(request.source.cast(), size) };
-        return Ok(Cow::Borrowed(bytes));
+        return Ok((Cow::Borrowed(bytes), None));
     }
     let mut bytes = vec![0; size];
+    let counted = loading(size);
     read_into(request, &mut bytes)?;
-    Ok(Cow::Owned(bytes))
+    Ok((Cow::Owned(bytes), counted))
 }
 
 /// Nanoseconds workers spent reading files, for the debug summary.
@@ -1034,6 +1072,7 @@ fn into_destination(
         return fill(window.bytes()).map(drop);
     }
     let mut data = vec![0; len];
+    let _counted = loading(len);
     let n = fill(&mut data)?;
     if super::xmem::write_physical(pages, offset, &data[..n]) {
         return Ok(());
@@ -1541,6 +1580,42 @@ mod tests {
         void(queue, 0x30);
         assert_eq!(wait(array, 0), S_OK);
         assert_eq!(out, bc4_blocks());
+    }
+
+    /// The records are the decoder's allocation, sized here from a layout
+    /// the decoder does not export: 12 bytes a block of 8 for BC1 and BC4,
+    /// 24 a block of 16 for BC3 and BC5, 32 a block of 16 for BC6H and BC7.
+    /// The count is nothing exactly where the decoder turns the request
+    /// away before it allocates, and otherwise the layout's size, between
+    /// one and a half and two times the destination.
+    // The decoder should export this size, so that the formula here can go
+    // and the count cannot drift from it (docs/memory.md, row T5).
+    #[test]
+    fn records_are_counted_at_the_layouts_size_and_not_where_the_decoder_refuses() {
+        with_test_tables();
+        let tables = bcpack_tables().unwrap();
+        for bc in 0..16 {
+            let per_block = match bc {
+                1 | 4 => Some((8, 12)),
+                3 | 5 => Some((16, 24)),
+                6 | 7 => Some((16, 32)),
+                _ => None,
+            };
+            for len in [0, 8, 12, 16, 24, 40, 4096, 1 << 20] {
+                let mut out = vec![0; len];
+                let error = bcpack::decode(bc, &[], &mut out, tables).unwrap_err();
+                let refused = matches!(
+                    error.0,
+                    "unsupported BC format" | "destination is not a whole number of blocks"
+                );
+                let counted = records_bytes(bc, len);
+                assert_eq!(counted == 0 && len > 0, refused && len > 0, "BC{bc}, {len} bytes: {}", error.0);
+                if let Some((block, record)) = per_block.filter(|&(block, _)| len % block == 0) {
+                    assert_eq!(counted, len / block * record, "BC{bc}, {len} bytes");
+                    assert!(counted * 2 >= len * 3 && counted <= len * 2, "BC{bc}, {len} bytes");
+                }
+            }
+        }
     }
 
     #[test]

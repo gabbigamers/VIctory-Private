@@ -10,9 +10,10 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
+use victory_gpu::account::{Gauge, Held, Owner, gauge};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_COMMITMENT_LIMIT, HANDLE, INVALID_HANDLE_VALUE,
 };
@@ -363,7 +364,14 @@ pub extern "system" fn XMemIsToolsMemAvailable() -> BOOL {
 
 const PAGE: usize = 64 << 10;
 
-struct Section(HANDLE);
+struct Section {
+    handle: HANDLE,
+    /// One in `Owner::TitleSections` from creation until the handle is
+    /// closed.
+    _alive: Held,
+    /// The pages committed so far, for `Owner::TitlePagesMapped`.
+    committed: Committed,
+}
 
 // SAFETY: a section handle may be used from any thread.
 unsafe impl Send for Section {}
@@ -373,7 +381,67 @@ unsafe impl Sync for Section {}
 impl Drop for Section {
     fn drop(&mut self) {
         // SAFETY: our handle; views keep the section alive on their own.
-        unsafe { CloseHandle(self.0) };
+        unsafe { CloseHandle(self.handle) };
+    }
+}
+
+/// Which pages of a section have been committed, a bit each, with their
+/// bytes in a gauge until this is dropped (the section is closed then, and
+/// its commit returned once its views are gone). `commit` commits a view's
+/// pages on every map and the system charges a page once, so only pages
+/// marked for the first time are counted. Atomic and not under the page
+/// table's lock: our own views (`View`) commit outside it.
+struct Committed {
+    gauge: &'static Gauge,
+    pages: usize,
+    bits: Box<[AtomicU64]>,
+}
+
+impl Committed {
+    /// For a section of `pages` pages, none committed yet.
+    fn new(pages: usize) -> Self {
+        Self::on(gauge(Owner::TitlePagesMapped), pages)
+    }
+
+    /// As [`Committed::new`], on a gauge given.
+    fn on(gauge: &'static Gauge, pages: usize) -> Self {
+        let bits = (0..pages.div_ceil(64)).map(|_| AtomicU64::new(0)).collect();
+        Self { gauge, pages, bits }
+    }
+
+    /// Pages `[first, first + n)` of the section are committed: those not
+    /// marked before are added to the gauge. Pages past the section's end
+    /// are none of its pages.
+    fn mark(&self, first: usize, n: usize) {
+        let end = first.saturating_add(n).min(self.pages);
+        let (mut page, mut new) = (first, 0);
+        while page < end {
+            let (word, bit) = (page / 64, page % 64);
+            let Some(bits) = self.bits.get(word) else {
+                break;
+            };
+            let count = (64 - bit).min(end - page);
+            let mask = (u64::MAX >> (64 - count)) << bit;
+            let before = bits.fetch_or(mask, Ordering::Relaxed);
+            new += u64::from((mask & !before).count_ones());
+            page += count;
+        }
+        if new > 0 {
+            self.gauge.add(new * PAGE as u64);
+        }
+    }
+
+    /// The pages marked.
+    fn marked(&self) -> u64 {
+        let ones = |bits: &AtomicU64| u64::from(bits.load(Ordering::Relaxed).count_ones());
+        self.bits.iter().map(ones).sum()
+    }
+}
+
+impl Drop for Committed {
+    fn drop(&mut self) {
+        // What `mark` added over the section's life.
+        self.gauge.sub(self.marked() * PAGE as u64);
     }
 }
 
@@ -515,7 +583,19 @@ pub extern "system" fn XMemAllocatePhysicalPages(
         flags = format_args!("{flags:#x}"),
         "XMemAllocatePhysicalPages"
     );
-    let section = Arc::new(Section(handle));
+    let section = Arc::new(Section {
+        handle,
+        _alive: Held::new(Owner::TitleSections, 1),
+        committed: Committed::new(n),
+    });
+    // Committed whole when made there (`SEC_COMMIT` above); elsewhere page
+    // by page in `commit`.
+    if on_wine() {
+        section.committed.mark(0, n);
+    }
+    // The `n` pages entered in the table below. `XMemFreePhysicalPages`
+    // takes out what it removes from the table.
+    gauge(Owner::TitlePages).add(size as u64);
     let mut physical = physical();
     let first = physical.next_page;
     physical.next_page += n * FRAMES;
@@ -550,10 +630,18 @@ pub extern "system" fn XMemFreePhysicalPages(n: usize, pages: *const usize) -> B
         return 0;
     }
     let mut physical = physical();
+    let mut freed = 0;
     for i in 0..n {
         // SAFETY: the title passes `n` page numbers.
-        physical.pages.remove(&unsafe { *pages.add(i) });
+        if physical.pages.remove(&unsafe { *pages.add(i) }).is_some() {
+            freed += 1;
+        }
     }
+    drop(physical);
+    // What `XMemAllocatePhysicalPages` added for the entries removed; a
+    // number that names no page (freed before, or never given) removed
+    // nothing.
+    gauge(Owner::TitlePages).sub(freed * PAGE as u64);
     1
 }
 
@@ -572,7 +660,7 @@ impl View {
         // SAFETY: slices of a section we own; the view is ours until dropped.
         let at = unsafe {
             MapViewOfFile(
-                slice.section.0,
+                slice.section.handle,
                 FILE_MAP_WRITE,
                 (offset >> 32) as u32,
                 offset as u32,
@@ -583,7 +671,7 @@ impl View {
             return None;
         }
         let view = View { at, len };
-        commit(at.Value as usize, len).then_some(view)
+        commit(slice, at.Value as usize, len).then_some(view)
     }
 
     fn bytes(&mut self) -> &mut [u8] {
@@ -811,7 +899,7 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
             MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER,
         );
         MapViewOfFile3(
-            slice.section.0,
+            slice.section.handle,
             GetCurrentProcess(),
             base as *const c_void,
             (slice.index * PAGE) as u64,
@@ -831,7 +919,7 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
         );
         return false;
     }
-    if !commit(base, len) {
+    if !commit(&slice, base, len) {
         // SAFETY: the view just mapped, back to a placeholder.
         unsafe { UnmapViewOfFile2(GetCurrentProcess(), view, MEM_PRESERVE_PLACEHOLDER) };
         return false;
@@ -848,13 +936,15 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     true
 }
 
-/// Commits the section pages a view shows (once per page, whichever view).
-fn commit(base: usize, len: usize) -> bool {
+/// Commits the section pages a view shows (once per page, whichever view):
+/// the view at `[base, base + len)` shows `slice` and the slices after it.
+fn commit(slice: &Slice, base: usize, len: usize) -> bool {
     if on_wine() {
         return true; // sections are committed whole there
     }
     // SAFETY: `[base, base + len)` is a view of a reserved section.
     if !unsafe { VirtualAlloc(base as *const c_void, len, MEM_COMMIT, PAGE_READWRITE) }.is_null() {
+        slice.section.committed.mark(slice.index, len.div_ceil(PAGE));
         return true;
     }
     commit_refused(len, "physical pages", std::io::Error::last_os_error());
@@ -1467,6 +1557,97 @@ mod tests {
         assert!(page_window(&[a[0], b[0]], 0, PAGE).is_some());
         assert_eq!(XMemFreePhysicalPages(3, a.as_ptr()), 1);
         assert_eq!(XMemFreePhysicalPages(1, b.as_ptr()), 1);
+    }
+
+    /// What `Owner::TitlePagesMapped` rests on: a page is counted the first
+    /// time it is committed and never again, and a section's pages are all
+    /// released with it.
+    #[test]
+    fn committed_pages_are_counted_once_and_go_with_their_section() {
+        static G: Gauge = Gauge::new();
+        let pages = || G.now() / PAGE as u64;
+        let section = Committed::on(&G, 200);
+        section.mark(60, 10); // across two words of bits
+        assert_eq!(pages(), 10);
+        section.mark(0, 64);
+        assert_eq!(pages(), 70, "60 to 63 were counted already");
+        section.mark(62, 3);
+        section.mark(0, 0);
+        assert_eq!((pages(), G.adds()), (70, 2), "nothing new, nothing added");
+        // Another section on the same gauge.
+        let other = Committed::on(&G, 64);
+        other.mark(0, 64);
+        assert_eq!(pages(), 134);
+        // Past the end: only the section's own pages.
+        section.mark(190, 100);
+        section.mark(500, 3);
+        section.mark(usize::MAX, 2);
+        assert_eq!((pages(), section.marked(), other.marked()), (144, 80, 64));
+        drop(section);
+        assert_eq!(pages(), 64);
+        drop(other);
+        assert_eq!((G.now(), G.peak(), G.underflows()), (0, 144 * PAGE as u64, 0));
+    }
+
+    /// Our own views commit without the page table's lock, several at once.
+    #[test]
+    fn pages_committed_from_several_threads_are_each_counted_once() {
+        static G: Gauge = Gauge::new();
+        let section = Committed::on(&G, 1000);
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let section = &section;
+                s.spawn(move || {
+                    for first in (0..1000).step_by(7 + t) {
+                        section.mark(first, 50);
+                    }
+                });
+            }
+        });
+        assert_eq!((section.marked(), G.now()), (1000, 1000 * PAGE as u64));
+        drop(section);
+        assert_eq!((G.now(), G.underflows()), (0, 0));
+    }
+
+    /// A page is counted when a view first commits it, ours or the title's,
+    /// as the page of the section it is, and stays counted after the title
+    /// frees it, until its section closes. Under Wine the whole section is,
+    /// from when it is made.
+    #[test]
+    fn views_count_the_pages_they_commit_once() {
+        let pages = allocate(8);
+        let section = physical().pages.get(&pages[0]).cloned().expect("known page").section;
+        // The section's pages marked, a bit each from its first.
+        let marked = || section.committed.bits[0].load(Ordering::Relaxed);
+        let expect = |bits: u64| if on_wine() { 0xff } else { bits };
+        assert_eq!(marked(), expect(0));
+        // Our own view of the sixth page (a DirectStorage destination).
+        assert!(write_physical(&pages[5..], 0, &[1]));
+        assert_eq!(marked(), expect(0b0010_0000));
+        // The title's view of the second to the fourth.
+        let reserve = |n| XMemVirtualAlloc(std::ptr::null_mut(), n * PAGE, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE);
+        let (a, b) = (reserve(3), reserve(1));
+        assert!(!a.is_null() && !b.is_null());
+        assert_eq!(XMemMapPhysicalPages(a, 3, pages[1..].as_ptr()), a);
+        assert_eq!(marked(), expect(0b0010_1110));
+        // A window of ours from inside the seventh page into the eighth.
+        assert!(page_window(&pages, 6 * PAGE + 16, PAGE).is_some());
+        assert_eq!(marked(), expect(0b1110_1110));
+        // Pages committed already are not counted again: a window on two of
+        // the title's, the neighbours of a page unmapped from the middle of
+        // its view (mapped again by that), and a page shown a second time.
+        assert!(page_window(&pages, 2 * PAGE, 2 * PAGE).is_some());
+        let middle = a.wrapping_byte_add(PAGE);
+        assert_eq!(XMemMapPhysicalPages(middle, 1, std::ptr::null()), middle);
+        assert!(map_alias(b as u64, a.wrapping_byte_add(2 * PAGE) as u64, PAGE as u64));
+        assert_eq!(marked(), expect(0b1110_1110));
+        assert!(map_alias(b as u64, 0, PAGE as u64));
+        assert_eq!(XMemMapPhysicalPages(a, 3, std::ptr::null()), a);
+        assert_eq!(XMemFreePhysicalPages(8, pages.as_ptr()), 1);
+        assert_eq!(marked(), expect(0b1110_1110), "a free returns nothing");
+        // No page and no view left: the section closes with this, and its
+        // counts go then.
+        assert_eq!(Arc::strong_count(&section), 1);
     }
 }
 

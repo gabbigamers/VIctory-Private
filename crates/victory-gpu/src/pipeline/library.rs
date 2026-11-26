@@ -57,6 +57,8 @@ struct Library {
     library: ID3D12PipelineLibrary1,
     /// The blob the library was made from: it must outlive the library.
     _blob: Vec<u8>,
+    /// The blob's bytes, counted while the library has them.
+    _blob_held: crate::account::Held,
     /// Pipelines stored since the last save.
     added: u64,
     /// Title pipelines the pre-build put in the library or found there, by
@@ -165,6 +167,9 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
             device.CreatePipelineLibrary::<ID3D12PipelineLibrary>(bytes)?.cast()
         }
     };
+    // Counted from here: for the library that keeps the blob, or until this
+    // returns without it (a blob the host rejects is freed then).
+    let held = crate::account::Held::new(crate::account::Owner::PipelineLibrary, blob.capacity() as u64);
     if !blob.is_empty() {
         let started = std::time::Instant::now();
         match make(&blob) {
@@ -174,6 +179,7 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
                 return Some(Library {
                     library,
                     _blob: blob,
+                    _blob_held: held,
                     added: 0,
                     prebuilt: HashSet::new(),
                     prebuilt_changed: false,
@@ -188,6 +194,7 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
     Some(Library {
         library,
         _blob: Vec::new(),
+        _blob_held: crate::account::Held::new(crate::account::Owner::PipelineLibrary, 0),
         added: 0,
         prebuilt: HashSet::new(),
         prebuilt_changed: false,
@@ -314,7 +321,9 @@ pub(crate) fn save(now: bool) {
         }
         *last = Some(std::time::Instant::now());
     }
-    let (blob, prebuilt) = {
+    // `_saving` counts the buffer serialised into for as long as `blob` is
+    // alive: to the end of this call.
+    let (blob, prebuilt, _saving) = {
         let mut l = library.state.lock().unwrap_or_else(|e| e.into_inner());
         if l.added == 0 && !l.prebuilt_changed && !USED_CHANGED.swap(false, Ordering::Relaxed) {
             return;
@@ -326,6 +335,7 @@ pub(crate) fn save(now: bool) {
             tracing::warn!(bytes = size, "no memory to serialise the host pipeline library; saved later");
             return;
         };
+        let saving = crate::account::Held::new(crate::account::Owner::PipelineSave, size as u64);
         // SAFETY: a buffer of the size the library asks for.
         let bytes = unsafe { l.library.Serialize(&mut bytes) }.map(|()| bytes);
         match bytes {
@@ -335,7 +345,7 @@ pub(crate) fn save(now: bool) {
                 // Kept beside the bytes it holds for (also when a run adds
                 // pipelines).
                 let prebuilt = (!l.prebuilt.is_empty()).then(|| list(&tag(&bytes), &l.prebuilt));
-                (bytes, prebuilt)
+                (bytes, prebuilt, saving)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "host pipeline library not serialised");

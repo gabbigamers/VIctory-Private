@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::account::{Held, Owner};
+
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
@@ -746,6 +748,11 @@ pub(crate) mod tests {
         list.reset();
         assert_eq!(list.scratch(512).unwrap(), first);
         list.close();
+        // Each chunk is counted at the size of its buffer.
+        for chunk in &list.scratch.lock().unwrap().chunks {
+            // SAFETY: a plain query on a live buffer.
+            assert_eq!(chunk._held.bytes(), unsafe { chunk._buffer.GetDesc() }.Width);
+        }
     }
 
     #[test]
@@ -927,11 +934,13 @@ pub(crate) struct HostList {
     /// data (see [`HostList::is_node`]).
     id: u64,
     /// The work its indirect executions may still do (`indirect`): a
-    /// shader-writable word, zeroed when the list is submitted.
-    budget: OnceLock<Option<(ID3D12Resource, usize)>>,
+    /// shader-writable word, zeroed when the list is submitted. With the
+    /// count of the buffer's bytes.
+    budget: OnceLock<Option<(ID3D12Resource, usize, Held)>>,
     /// Clamped indirect arguments (`crate::indirect`), reused by each
-    /// execution in turn; replaced by a bigger one when too small.
-    arguments: Mutex<Option<ID3D12Resource>>,
+    /// execution in turn; replaced by a bigger one when too small. With the
+    /// count of the buffer's bytes.
+    arguments: Mutex<Option<(ID3D12Resource, Held)>>,
     /// The texts of the markers `note_op` set, in order (for device-removed
     /// data without marker texts), with the host GPU range a copy reads.
     #[cfg(feature = "diagnostics")]
@@ -1070,6 +1079,8 @@ struct ScratchChunk {
     mapped: usize,
     gpu: u64,
     capacity: u64,
+    /// `capacity` bytes counted for as long as the list has the chunk.
+    _held: Held,
 }
 
 /// One piece of submission-time work, in recorded order.
@@ -1111,11 +1122,15 @@ enum Step {
 struct Deferred {
     /// Destination, source, bytes.
     copies: Vec<Step>,
-    uploads: Vec<ID3D12Resource>,
+    /// Each with the count of its bytes, which goes with it at the reset.
+    uploads: Vec<(ID3D12Resource, Held)>,
     /// Host objects the list's commands name (pipelines, root signatures,
     /// descriptor heaps): the title may release its objects before it
     /// submits the list.
     kept: Vec<windows::core::IUnknown>,
+    /// The counts of buffers of the list's own among `kept` (an argument
+    /// buffer a bigger one replaced): they go with it at the reset.
+    kept_counts: Vec<Held>,
     /// Buffer ranges refreshed since the last title copy (host copy,
     /// address, bytes): refreshing them again would find the same bytes.
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
@@ -2366,8 +2381,9 @@ impl HostList {
     /// shortcut: one buffer per copy; pool them once uploads are frequent.
     pub(crate) fn upload(&self, host: &Host, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         let (buffer, data) = host.upload_buffer(size)?;
+        let held = Held::new(Owner::ListBuffers, size);
         name(&buffer, || format!("list upload {size:#x}"));
-        self.deferred().uploads.push(buffer.clone());
+        self.deferred().uploads.push((buffer.clone(), held));
         Some((buffer, data))
     }
 
@@ -2375,8 +2391,9 @@ impl HostList {
     /// reset.
     pub(crate) fn readback(&self, host: &Host, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         let (buffer, data) = host.mapped_buffer(size, true)?;
+        let held = Held::new(Owner::ListBuffers, size);
         name(&buffer, || format!("list readback {size:#x}"));
-        self.deferred().uploads.push(buffer.clone());
+        self.deferred().uploads.push((buffer.clone(), held));
         Some((buffer, data))
     }
 
@@ -2388,10 +2405,11 @@ impl HostList {
         let len = len.max(1).checked_next_multiple_of(256)?;
         if len > SCRATCH_CHUNK {
             let (buffer, data) = host.upload_buffer(len)?;
+            let held = Held::new(Owner::ListBuffers, len);
             name(&buffer, || format!("list scratch {len:#x}"));
             // SAFETY: a live buffer.
             let gpu = unsafe { buffer.GetGPUVirtualAddress() };
-            self.deferred().uploads.push(buffer);
+            self.deferred().uploads.push((buffer, held));
             return Some((gpu, data));
         }
         while let Some(chunk) = s.chunks.get(s.current) {
@@ -2404,13 +2422,14 @@ impl HostList {
             let next = s.chunks.last().map_or(FIRST_SCRATCH_CHUNK, |c| 2 * c.capacity);
             let capacity = len.next_multiple_of(FIRST_SCRATCH_CHUNK).max(next).min(SCRATCH_CHUNK);
             let (buffer, data) = host.upload_buffer(capacity)?;
+            let held = Held::new(Owner::ListBuffers, capacity);
             name(&buffer, || format!("list scratch {capacity:#x}"));
             // SAFETY: a live buffer.
             let gpu = unsafe { buffer.GetGPUVirtualAddress() };
             #[cfg(feature = "diagnostics")]
             tracing::debug!(target: "victory_gpu::scratch", list = ?std::ptr::from_ref(self),
                 chunk = s.current, requested = len, capacity, "allocated list scratch");
-            s.chunks.push(ScratchChunk { _buffer: buffer, mapped: data as usize, gpu, capacity });
+            s.chunks.push(ScratchChunk { _buffer: buffer, mapped: data as usize, gpu, capacity, _held: held });
             s.used = 0;
         }
         let chunk = &s.chunks[s.current];
@@ -2423,11 +2442,11 @@ impl HostList {
     /// The host address of the list's indirect-work budget, zeroed at each
     /// submission of the list from the first use after a reset on.
     pub(crate) fn budget(&self) -> Option<u64> {
-        let (buffer, data) = self
+        let (buffer, data, _) = self
             .budget
             .get_or_init(|| {
                 let (b, d) = host()?.shared_buffer(256)?;
-                Some((b, d as usize))
+                Some((b, d as usize, Held::new(Owner::ListBuffers, 256)))
             })
             .as_ref()?;
         let mut deferred = self.deferred();
@@ -2448,14 +2467,16 @@ impl HostList {
     pub(crate) fn arguments(&self, bytes: u64) -> Option<ID3D12Resource> {
         let mut arguments = self.arguments.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: a plain query on a live buffer.
-        if let Some(b) = arguments.as_ref().filter(|b| unsafe { b.GetDesc() }.Width >= bytes) {
+        if let Some((b, _)) = arguments.as_ref().filter(|(b, _)| unsafe { b.GetDesc() }.Width >= bytes) {
             return Some(b.clone());
         }
-        let (made, _) = host()?.shared_buffer(bytes.next_power_of_two().max(1 << 16))?;
+        let size = bytes.next_power_of_two().max(1 << 16);
+        let (made, _) = host()?.shared_buffer(size)?;
+        let held = Held::new(Owner::ListBuffers, size);
         name(&made, || "indirect arguments".into());
         // Commands recorded earlier may still name the smaller one.
-        if let Some(old) = arguments.replace(made.clone()) {
-            self.keep(&old);
+        if let Some((old, held)) = arguments.replace((made.clone(), held)) {
+            self.keep_counted(&old, held);
         }
         Some(made)
     }
@@ -2464,6 +2485,16 @@ impl HostList {
     pub(crate) fn keep(&self, object: &impl Interface) {
         if let Ok(object) = object.cast::<windows::core::IUnknown>() {
             self.deferred().kept.push(object);
+        }
+    }
+
+    /// [`HostList::keep`] of a buffer whose bytes `held` counts for the
+    /// list: the count stays until the reset that lets go of the buffer.
+    fn keep_counted(&self, object: &impl Interface, held: Held) {
+        if let Ok(object) = object.cast::<windows::core::IUnknown>() {
+            let mut deferred = self.deferred();
+            deferred.kept.push(object);
+            deferred.kept_counts.push(held);
         }
     }
 
@@ -3365,6 +3396,29 @@ impl Meter {
                         },
                     });
                 }
+            }
+            // A release counted beyond its allocations: the owner's figure in
+            // the performance log is wrong from then on. Said when an owner
+            // is first found so (a line per owner in a run at most), with
+            // every owner wrong by then: one that goes wrong later is named
+            // too.
+            static NAMED: AtomicU32 = AtomicU32::new(0);
+            const _: () = assert!(Owner::ALL.len() <= u32::BITS as usize);
+            let wrong = Owner::ALL
+                .iter()
+                .filter(|&&owner| crate::account::gauge(owner).underflows() > 0)
+                .fold(0u32, |mask, &owner| mask | 1 << owner as usize);
+            if wrong & !NAMED.fetch_or(wrong, Ordering::Relaxed) != 0 {
+                let owners: Vec<String> = crate::account::miscounted()
+                    .iter()
+                    .map(|(owner, times)| format!("{} ({times} times)", owner.column()))
+                    .collect();
+                tracing::warn!(
+                    "memory counted wrongly: more was released than was counted as allocated for {}; \
+                     these figures of the performance log are not to be trusted \
+                     (logged when an owner is first found so)",
+                    owners.join(", ")
+                );
             }
             let (textures, bytes, used, shared, saved, replaced) = crate::resource::texture_counts();
             let (heaps, heap_used, heap_free) = crate::placement::stats();

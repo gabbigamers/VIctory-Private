@@ -60,6 +60,8 @@ pub mod shader_cache;
 #[cfg(windows)]
 mod shadow;
 pub mod signature;
+#[cfg(any(windows, test))]
+mod snapshot;
 mod switch;
 #[cfg(windows)]
 mod tdr;

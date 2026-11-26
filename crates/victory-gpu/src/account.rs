@@ -156,7 +156,10 @@ pub enum Kind {
     /// process's private commit.
     Section,
     /// Memory for the GPU in system RAM (upload heaps, custom heaps in the
-    /// CPU's pool).
+    /// CPU's pool). Not so in a diagnostics run with
+    /// `VICTORY_COPIES_IN_VIDEO_MEMORY` on: buffer copies, windows, view
+    /// chunks and the argument and budget buffers of lists are then on the
+    /// card, and still counted under their owners.
     GpuSystem,
     /// A count, not bytes.
     Count,
@@ -167,36 +170,80 @@ pub enum Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Owner {
-    /// T1: the title's physical pages allocated and not freed.
+    /// T1: the title's physical pages allocated and not freed: 64 KiB for
+    /// each entry of the page table. What the title holds by number, not
+    /// what is committed: a free returns nothing until its section closes.
     TitlePages,
-    /// T1: of those, the bytes shown in views (committed in their section).
+    /// T1: the bytes committed in the title's sections: each page once, from
+    /// the first time a view shows it (the title's, or ours for a loading
+    /// write) until its section's handle is closed. Pages the title has
+    /// freed stay counted until then, so this can be more than
+    /// `TitlePages`. Under Wine a section is committed whole when made and
+    /// counted so: an upper figure there, since such a section costs nothing
+    /// until touched. Not seen: a loading view of ours still mapped when the
+    /// handle closes keeps the section's memory for as long as it lasts.
     TitlePagesMapped,
-    /// T1: sections alive.
+    /// T1: the title's sections whose handle is open: one per allocation of
+    /// physical pages, closed when no page and no title view of it is left.
     TitleSections,
-    /// T5: loading buffers alive (source, intermediate, records, fallback).
+    /// T5: loading buffers alive: the source read from a file, the
+    /// intermediate between zlib and BCPack, the BCPack decoder's records
+    /// (at the size its layout gives, for the length of the decode call)
+    /// and the fallback destination. Not the decoder's history tables
+    /// (under 32 KiB a request), the page lists of a request, or the BCPack
+    /// tables parsed once and kept for the run.
     Loading,
-    /// G1: host copies of title buffers.
+    /// G1: host copies of whole title buffers, each at the size asked for
+    /// (the buffer rounded up to 64 KiB), while the copy's record lives: the
+    /// title holds the buffer, or a list or a slot record still holds the
+    /// copy. A lower bound: a view heap slot that still views a buffer
+    /// after that keeps the host buffer alive, uncounted, until the slot is
+    /// rewritten.
     BufferCopies,
-    /// G2: mapping windows for memory outside any buffer object.
+    /// G2: mapping windows for memory outside any buffer object. Never
+    /// freed, so this only grows.
     Windows,
-    /// G3: chunks holding copies for views off their buffer's element grid.
+    /// G3: chunks holding copies for views off their buffer's element grid:
+    /// whole chunks, which are never removed, not the runs in use in them.
     ViewChunks,
-    /// G4: snapshots alive during a submission.
+    /// G4: the bytes kept from before a submission to tell what its shaders
+    /// wrote, while they are kept. Each snapshot buffer handed out and not
+    /// yet back in the pool, at the capacity it was handed out with; and
+    /// 64 KiB for each page saved when the title writes it while shaders
+    /// may (`crate::watch`), until the page is taken again, handed to its
+    /// copy-back or disarmed. Not the 64 KiB buffers a copy-back reads
+    /// into.
     Snapshots,
-    /// G4: snapshot buffers kept for reuse.
+    /// G4: snapshot buffers kept for reuse, by capacity: what the pool holds
+    /// between submissions.
     SnapshotPool,
-    /// G5: texture staging, chunks and larger buffers, in use or kept.
+    /// G5: texture staging, chunks and larger buffers, in use or kept, while
+    /// the staging pools have them. A buffer dropped from a pool that the
+    /// upload list still names lives on, uncounted, until that list's reset.
     Staging,
     /// G6: the lookup tables of host view heaps (stride, mark, page and
-    /// address tables), without the descriptor heaps themselves.
+    /// address tables), without the descriptor heaps themselves and without
+    /// the heaps' slot vectors (process heap). Not here either: the two
+    /// bitmaps of pages written through views and of slots read, which
+    /// belong to no heap. Each table is counted while its heap has it: one
+    /// that a list still names after its heap is released lives on,
+    /// uncounted, until that list's reset.
     HeapTables,
-    /// G7: scratch, upload and readback buffers of host lists.
+    /// G7: scratch chunks, upload and readback buffers, and the argument and
+    /// budget buffers of host lists. Not the command allocators (runtime
+    /// memory), the written-pages bitmap of a list that uses title memory,
+    /// or the timestamp buffer of a timing run.
     ListBuffers,
-    /// C1: the pipeline library's bytes held for the library.
+    /// C1: the pipeline library's bytes held for the library, from when the
+    /// library is opened from them (not while the file is hashed just
+    /// before).
     PipelineLibrary,
-    /// C2: the buffer a save of the pipeline library serialises into.
+    /// C2: the buffer a save of the pipeline library serialises into, until
+    /// the save has written it.
     PipelineSave,
-    /// C3: shader containers and their translations kept for the run.
+    /// C3: the bytes of the shader containers kept for the run and of the
+    /// DXIL of each one translated. Not the translations' other tables or
+    /// the map itself.
     Shaders,
 }
 
@@ -278,7 +325,8 @@ pub fn take_period() -> [f64; Owner::ALL.len()] {
 }
 
 /// The owners whose releases ran ahead of their allocations, with how
-/// often: their figures are wrong, and a run says so once at its end.
+/// often: their figures are wrong, and a run says so when it first finds
+/// each (a warning beside the frame meter's five-second lines).
 pub fn miscounted() -> Vec<(Owner, u64)> {
     Owner::ALL.into_iter().map(|o| (o, gauge(o).underflows())).filter(|&(_, n)| n > 0).collect()
 }

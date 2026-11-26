@@ -268,21 +268,49 @@ ranges (address space only).
 | C3 | Every shader container the title passes, and its translation | process heap | container plus DXIL each | a static map that only inserts; after translation the DXIL is read only when a pipeline is made | the shader cache on disk | none |
 | C4 | Live pipeline state objects | driver memory | not in this code | while the title's pipeline or a list holds them | | counts only |
 
-### What no line reports
+### What is counted now
 
-The measured "before" that every change needs does not exist yet for most
-of the above. Counters to add first, each small:
+Since 2026-11-26 the runtime counts what it allocates, by owner
+(`crates/victory-gpu/src/account.rs`). Each owner is a column of the
+performance log holding its highest value in the period, and
+`cargo xtask perf-summary` reports each one's peak. **None of this has run:
+the counting sits in Windows-only code and is type-checked only.** The
+first run with the log is also the first check of these figures.
 
-* T1: pages allocated, freed, mapped, and sections alive (the first counter
-  the checkers name);
-* G1 to G5 and G7: bytes by kind for system-memory GPU allocations, so
-  `video_shared_mb` can be split by owner;
-* G4, G5: the kept pools' sizes and high-water marks;
-* C1 to C3: the blob's size as a column, the save buffer's size and count,
-  the bytes held in the shader map;
-* T5: bytes in flight for all loading buffers, with the high-water mark;
-* the process's private working set beside the total, so section pages can
-  be told apart.
+| Column | Row | What it counts | Not in it |
+|---|---|---|---|
+| `own_title_pages_mb` | T1 | pages the title holds by number, 64 KiB each | a free returns no memory until the section closes |
+| `own_title_pages_mapped_mb` | T1 | distinct pages committed through any view, until their section closes | can exceed the column above after a free |
+| `own_title_sections` | T1 | sections whose handle is open (a count) | |
+| `own_loading_mb` | T5 | source, intermediate, BCPack records and fallback buffers of requests in flight | the decoder's small history tables |
+| `own_buffer_copies_mb` | G1 | whole-buffer host copies | a copy kept alive only by a view heap slot after its record is gone: a lower figure |
+| `own_windows_mb` | G2 | mapping windows | |
+| `own_view_chunks_mb` | G3 | whole view-copy chunks | |
+| `own_snapshots_mb` | G4 | snapshot buffers handed out, and pages saved when the title writes an armed page | |
+| `own_snapshot_pool_mb` | G4 | snapshot buffers kept for reuse | |
+| `own_staging_mb` | G5 | staging chunks and larger buffers, in use or kept | |
+| `own_heap_tables_mb` | G6 | stride, mark, page and address tables of view heaps | the descriptor heaps themselves; a table a list still names after its heap is gone |
+| `own_list_buffers_mb` | G7 | scratch, upload, readback, argument and budget buffers of host lists | command allocators and lists |
+| `own_pipeline_library_mb` | C1 | the pipeline library's bytes held for the library | |
+| `own_pipeline_save_mb` | C2 | the buffer a save serialises into, while it lives | |
+| `own_shaders_mb` | C3 | container and DXIL bytes kept in the shader map | the translations' other tables |
+| `private_working_set_mb` | | the process's working set without section and mapped-file pages | not given before Windows 10 22H2 |
+
+A release of more than was counted leaves the gauge at zero and is noted;
+a run then logs which owners are wrong. What a run has to show before a
+figure is believed: `own_loading_mb` is 0 whenever streaming is idle;
+`own_snapshot_pool_mb` never exceeds 537 (512 MiB); `own_pipeline_save_mb`
+is 0 except during a save; `own_title_pages_mb` rises by exactly 64 KiB a
+page allocated; no owner is reported as miscounted. With the diagnostics
+switch that puts buffer copies in video memory, the owners marked as GPU
+memory in system RAM are on the card instead, and their figures are not
+comparable with other runs.
+
+Still not counted: T2 and T3 (the title's own pools and heap: a walk of the
+address space would be needed), T4, T6 and T7, G10's tables, the per-list
+written-pages bitmaps (up to about 17 MB pooled), the descriptor heaps,
+the swap chain and what the upscaler library makes (V4, V5), and live
+pipeline state objects (C4).
 
 Also recorded: the runtime's commit-refusal message advises a larger
 paging file (`xmem.rs`); there is no check of commit or RAM at start; the
@@ -292,7 +320,7 @@ neither the title's use nor the whole process's.
 ## Candidates
 
 Not ranked by measurement and **none approved**. Each becomes a change only
-through a case, after its counter exists and a run has shown the size.
+through a case, after a run has shown the size its counter reports.
 Ordered by the preferred means.
 
 | # | Candidate | Kind | Quantity it would lower | Open questions of the case | Validated where |

@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::*;
 
+use crate::account::{Held, Owner};
 use crate::host::{HostList, host};
 use crate::object::This;
 use windows::core::Interface;
@@ -96,12 +97,17 @@ fn spans(layout: &victory_formats::texture::Layout, count: u32, mips: u32) -> Ve
 /// `Host::execute`, which waits for each submission, so the buffers of one
 /// submission are free from the next on.
 struct Buffers {
-    /// (bytes, buffer, mapping), oldest first.
-    free: std::collections::VecDeque<(u64, ID3D12Resource, usize)>,
+    /// (bytes, buffer, mapping, the count of its bytes), oldest first.
+    free: std::collections::VecDeque<StagingBuffer>,
     free_bytes: u64,
     /// Taken by the submission being prepared.
-    used: Vec<(u64, ID3D12Resource, usize)>,
+    used: Vec<StagingBuffer>,
 }
+
+/// A staging buffer of its own: its bytes, the buffer, its mapping, and the
+/// count of those bytes, which lasts as long as the pool has the buffer (in
+/// use or free).
+type StagingBuffer = (u64, ID3D12Resource, usize, Held);
 
 // SAFETY: the mappings are persistent mappings of the upload buffers.
 unsafe impl Send for Buffers {}
@@ -152,8 +158,9 @@ fn staging_buffer(size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         Some(e) => e,
         None => {
             let (buffer, data) = host()?.upload_buffer(class)?;
+            let held = Held::new(Owner::Staging, class);
             crate::host::name(&buffer, || "texture staging".into());
-            (class, buffer, data as usize)
+            (class, buffer, data as usize, held)
         }
     };
     let made = (e.1.clone(), e.2 as *mut u8);
@@ -166,8 +173,9 @@ fn staging_buffer(size: u64) -> Option<(ID3D12Resource, *mut u8)> {
 /// upload buffers was 10 % of the submitting thread in a new shot, run
 /// evict5). Rewound at each submission ([`recycle`]): the last one has run.
 struct Chunks {
-    /// (buffer, mapping), [`CHUNK`] bytes each.
-    all: Vec<(ID3D12Resource, usize)>,
+    /// (buffer, mapping, the count of its bytes), [`CHUNK`] bytes each.
+    /// A chunk is counted from when it is made until [`recycle`] drops it.
+    all: Vec<(ID3D12Resource, usize, Held)>,
     /// The chunk being carved and the bytes taken from it.
     current: usize,
     used: u64,
@@ -191,7 +199,7 @@ fn staging_space(size: u64) -> Option<(ID3D12Resource, u64, *mut u8)> {
     }
     let mut c = CHUNKS.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        if let Some((buffer, data)) = c.all.get(c.current) {
+        if let Some((buffer, data, _)) = c.all.get(c.current) {
             let at = c.used.next_multiple_of(512);
             if at + size <= CHUNK {
                 let made = (buffer.clone(), at, (*data + at as usize) as *mut u8);
@@ -202,8 +210,9 @@ fn staging_space(size: u64) -> Option<(ID3D12Resource, u64, *mut u8)> {
             continue;
         }
         let (buffer, data) = host()?.upload_buffer(CHUNK)?;
+        let held = Held::new(Owner::Staging, CHUNK);
         crate::host::name(&buffer, || "texture staging chunk".into());
-        c.all.push((buffer, data as usize));
+        c.all.push((buffer, data as usize, held));
     }
 }
 

@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
 
+use crate::account::{Held, Owner, gauge};
 use crate::host::{HostList, host};
 use crate::watch::PAGE;
 
@@ -90,43 +91,33 @@ pub(crate) struct Shadow {
     /// goes.
     base: u64,
     slice: Option<Slice>,
+    /// The bytes asked for `buffer`, counted for its owner while this lives
+    /// (none for a run of a shared buffer: the [`Arena`] counts its chunks).
+    _held: Option<Held>,
 }
 
-/// Snapshot segments (offset, bytes) and the pieces compared.
-type Snapshot = (Vec<(usize, Vec<u8>)>, std::collections::HashSet<usize>);
+/// Snapshot segments (offset, bytes) and the pieces compared. Each segment's
+/// buffer carries its count as a live snapshot, which ends where the buffer
+/// does: given back to the pool, or dropped with the copy.
+type Snapshot = (Vec<(usize, crate::snapshot::Taken)>, std::collections::HashSet<usize>);
 
 /// Snapshot memory kept for reuse (already touched, so no page faults).
-static POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+static POOL: Mutex<crate::snapshot::Pool> = Mutex::new(crate::snapshot::Pool::new());
 
 /// An empty buffer with room for `n` bytes, from the pool if it has one.
-fn pooled(n: usize) -> Vec<u8> {
+/// Counted as a live snapshot until [`give_back`] (or its drop with the copy
+/// that still holds it).
+fn pooled(n: usize) -> crate::snapshot::Taken {
     let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    let fit = pool
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| v.capacity() >= n)
-        .min_by_key(|(_, v)| v.capacity())
-        .map(|(i, _)| i);
-    let mut v = match fit {
-        Some(i) => pool.swap_remove(i),
-        None => Vec::with_capacity(n),
-    };
-    v.clear();
-    v
+    pool.take(n, gauge(Owner::Snapshots), gauge(Owner::SnapshotPool))
 }
 
 /// Returns a snapshot buffer to the pool, which keeps the largest up to
 /// [`POOL_BYTES`] in all: a world submission snapshots several copies, and
 /// fresh buffers cost a page fault per 4 KiB touched (millions per frame).
-fn give_back(v: Vec<u8>) {
+fn give_back(v: crate::snapshot::Taken) {
     let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
-    pool.push(v);
-    pool.sort_by_key(|v| std::cmp::Reverse(v.capacity()));
-    let mut total = 0;
-    pool.retain(|v| {
-        total += v.capacity();
-        total <= POOL_BYTES
-    });
+    pool.give_back(v, POOL_BYTES, gauge(Owner::SnapshotPool));
 }
 
 /// Snapshot memory kept for reuse.
@@ -243,13 +234,22 @@ impl Shadow {
         list.defer_refresh(self, address as usize, len as usize);
     }
 
-    fn new(buffer: ID3D12Resource, data: *mut u8, gpu: u64, start: u64, len: u64) -> Arc<Shadow> {
-        Shadow::new_at(buffer, data, gpu, start, len, None)
+    /// A copy with a buffer of its own, whose bytes `held` counts.
+    fn new(buffer: ID3D12Resource, data: *mut u8, gpu: u64, start: u64, len: u64, held: Held) -> Arc<Shadow> {
+        Shadow::new_at(buffer, data, gpu, start, len, None, Some(held))
     }
 
     /// [`Shadow::new`] of a copy in a run of a shared buffer (`data` and
     /// `gpu` are the run's).
-    fn new_at(buffer: ID3D12Resource, data: *mut u8, gpu: u64, start: u64, len: u64, slice: Option<Slice>) -> Arc<Shadow> {
+    fn new_at(
+        buffer: ID3D12Resource,
+        data: *mut u8,
+        gpu: u64,
+        start: u64,
+        len: u64,
+        slice: Option<Slice>,
+        held: Option<Held>,
+    ) -> Arc<Shadow> {
         let tracked = crate::watch::track_copy(start as usize, len as usize, true);
         let marks = tracked.as_ref().and_then(|_| marks().take(pages(start, len)));
         let shadow = Arc::new(Shadow {
@@ -264,6 +264,7 @@ impl Shadow {
             marks,
             base: slice.map_or(0, |s| s.offset),
             slice,
+            _held: held,
         });
         if let Some(base) = marks {
             self::marks().owners.insert(base, Arc::downgrade(&shadow));
@@ -1027,7 +1028,9 @@ pub(crate) fn find(address: u64, len: u64) -> Option<Arc<Shadow>> {
         let len = entry.end - key.0;
         // Rounded up so that views ending in the buffer's last 256 bytes fit.
         // Shaders write some buffers (unordered access), so not upload memory.
-        let (buffer, data) = host()?.shared_buffer(len.next_multiple_of(1 << 16))?;
+        let bytes = len.next_multiple_of(1 << 16);
+        let (buffer, data) = host()?.shared_buffer(bytes)?;
+        let held = Held::new(Owner::BufferCopies, bytes);
         crate::host::name(&buffer, || format!("title buffer {:#x}+{len:#x}", key.0));
         // SAFETY: a live buffer.
         let gpu = unsafe { buffer.GetGPUVirtualAddress() };
@@ -1044,7 +1047,7 @@ pub(crate) fn find(address: u64, len: u64) -> Option<Arc<Shadow>> {
                 "buffer copied to the host"
             );
         }
-        entry.shadow = Some(Shadow::new(buffer, data, gpu, key.0, len));
+        entry.shadow = Some(Shadow::new(buffer, data, gpu, key.0, len, held));
         changed();
     }
     entry.shadow.clone()
@@ -1068,6 +1071,7 @@ fn loose(address: u64, end: u64) -> Option<Arc<Shadow>> {
         return Some(shadow.clone());
     }
     let (buffer, data) = host()?.shared_buffer(len)?;
+    let held = Held::new(Owner::Windows, len);
     crate::host::name(&buffer, || format!("title memory {start:#x}+{len:#x}"));
     // SAFETY: a live buffer.
     let gpu = unsafe { buffer.GetGPUVirtualAddress() };
@@ -1076,7 +1080,7 @@ fn loose(address: u64, end: u64) -> Option<Arc<Shadow>> {
         len,
         "loose memory copied to the host"
     );
-    let shadow = Shadow::new(buffer, data, gpu, start, len);
+    let shadow = Shadow::new(buffer, data, gpu, start, len, held);
     map.insert((start, len), shadow.clone());
     changed();
     Some(shadow)
@@ -1122,7 +1126,7 @@ pub(crate) fn log_views(frames: f64) {
     let (chunks, held) = {
         let a = arena();
         // SAFETY: live buffers.
-        let size = |c: &(ID3D12Resource, usize, u64, BTreeMap<u64, u64>)| unsafe { c.0.GetDesc() }.Width;
+        let size = |c: &Chunk| unsafe { c.0.GetDesc() }.Width;
         let held: u64 = a.chunks.iter().map(|c| size(c) - c.3.values().sum::<u64>()).sum();
         (a.chunks.len(), held)
     };
@@ -1159,7 +1163,7 @@ fn exact(address: u64, len: u64, element: u64) -> Option<Arc<Shadow>> {
     }
     // A run of a shared buffer, its start a whole number of elements in.
     let (buffer, data, gpu, slice) = arena().take(len, element)?;
-    let shadow = Shadow::new_at(buffer, data, gpu, address, len, Some(slice));
+    let shadow = Shadow::new_at(buffer, data, gpu, address, len, Some(slice), None);
     map.insert((address, len, element), Arc::downgrade(&shadow));
     #[cfg(feature = "diagnostics")]
     {
@@ -1187,10 +1191,13 @@ struct Slice {
 /// of memory each (~5,000 live).
 #[derive(Default)]
 struct Arena {
-    /// Each buffer, its mapping and host address, and its free runs
-    /// (offset → bytes).
-    chunks: Vec<(ID3D12Resource, usize, u64, BTreeMap<u64, u64>)>,
+    /// Each buffer, its mapping and host address, its free runs
+    /// (offset → bytes), and the count of its bytes: the whole buffer for as
+    /// long as the arena has it, whatever its runs hold.
+    chunks: Vec<Chunk>,
 }
+
+type Chunk = (ID3D12Resource, usize, u64, BTreeMap<u64, u64>, Held);
 
 /// Bytes of each arena buffer (a larger copy gets one of its size).
 const CHUNK: u64 = 16 << 20;
@@ -1229,12 +1236,13 @@ impl Arena {
                 // SAFETY: a live buffer.
                 let gpu = unsafe { buffer.GetGPUVirtualAddress() };
                 let free = BTreeMap::from([(0, size)]);
-                self.chunks.push((buffer, data as usize, gpu, free));
+                let held = Held::new(Owner::ViewChunks, size);
+                self.chunks.push((buffer, data as usize, gpu, free, held));
                 let c = self.chunks.len() - 1;
                 (c, fits(&self.chunks[c].3)?)
             }
         };
-        let (buffer, data, gpu, free) = &mut self.chunks[chunk];
+        let (buffer, data, gpu, free, _) = &mut self.chunks[chunk];
         free.remove(&at);
         if start > at {
             free.insert(at, start - at);
@@ -1248,7 +1256,7 @@ impl Arena {
 
     /// A run goes back, joined to its free neighbours.
     fn give_back(&mut self, slice: Slice) {
-        let Some((_, _, _, free)) = self.chunks.get_mut(slice.chunk) else { return };
+        let Some((_, _, _, free, _)) = self.chunks.get_mut(slice.chunk) else { return };
         let (mut at, mut n) = (slice.offset, slice.len);
         if let Some((&before, &m)) = free.range(..at).next_back()
             && before + m == at
@@ -1438,6 +1446,13 @@ pub(crate) mod tests {
         // Larger than a buffer: one of its own.
         let (_, _, _, d) = arena.take(CHUNK + 1, 4).unwrap();
         assert_eq!((arena.chunks.len(), d.chunk), (2, 1));
+        // Each chunk is counted at the size of its buffer, the larger one
+        // at its own.
+        for (buffer, _, _, _, held) in &arena.chunks {
+            // SAFETY: a plain query on a live buffer.
+            assert_eq!(held.bytes(), unsafe { buffer.GetDesc() }.Width);
+        }
+        assert!(arena.chunks[1].4.bytes() > arena.chunks[0].4.bytes());
     }
 
     /// Ranges shaders write far apart are kept apart (not the copy between
