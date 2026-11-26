@@ -125,9 +125,15 @@ fn limit(typed: &str, max: u32) -> String {
 }
 
 /// Asks the user in a modal host dialog; `None` if dismissed.
-#[cfg(not(test))]
+#[cfg(all(windows, not(test)))]
 fn ask(title: &str, description: &str, default: &str, max: u32, password: bool) -> Option<String> {
     dialog::ask(title, description, default, max, password)
+}
+
+/// No host dialog off Windows: as if dismissed.
+#[cfg(all(not(windows), not(test)))]
+fn ask(_: &str, _: &str, _: &str, _: u32, _: bool) -> Option<String> {
+    None
 }
 
 /// Tests answer for the user: "typed" for a title starting with "Type",
@@ -138,6 +144,7 @@ fn ask(title: &str, _: &str, default: &str, _: u32, password: bool) -> Option<St
     title.starts_with("Type").then(|| format!("{default}typed"))
 }
 
+#[cfg(windows)]
 mod dialog {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -432,6 +439,7 @@ mod tests {
             .map(|(_, p)| *p)
     }
 
+    #[cfg(windows)]
     #[test]
     fn password_scope_masks_the_edit_control() {
         use windows_sys::Win32::UI::WindowsAndMessaging as wm;

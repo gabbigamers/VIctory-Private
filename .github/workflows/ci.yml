@@ -31,3 +31,16 @@ jobs:
       # Includes xtask's repository_passes_policy, the asset-policy check.
       - name: Tests
         run: cargo test --workspace --locked
+
+  # The tests that need neither Windows nor a GPU (docs/progress.md,
+  # "Validation tiers"), so the platform-independent code stays buildable
+  # off Windows.
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests, Linux host
+        run: scripts/check-linux.sh tests
