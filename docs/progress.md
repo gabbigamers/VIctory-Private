@@ -116,7 +116,7 @@ Tracks are worked in this order where they compete.
 | C3 | Ray-tracing structures built: ray-traced shadows and indirect light | open |
 | C4 | Known picture defects gone: the local-light shadow mask, the pink band over nearer bodies, the stand-in head | open |
 | C5 | Map completeness at fixed places | not started |
-| C7 | No loop-limit stop in a run. A translated loop cut short by the iteration limit is a correctness failure to be investigated (why does the loop not end: data with no host copy, a mistranslation, a loop that really is longer), never an accepted way to render. Stops are counted and reported by shader and stage, and a stopped lane ends in a defined, stage-appropriate way with no output left undefined | fix for conditional back edges committed, host-tested, not yet run on Windows; counters and defined termination planned (owner's decisions of 2026-11-26) |
+| C7 | No loop-limit stop in a run. A translated loop cut short by the iteration limit is a correctness failure to be investigated (why does the loop not end: data with no host copy, a mistranslation, a loop that really is longer), never an accepted way to render. Stops are counted and reported by shader and stage, and a stopped lane ends in a defined, stage-appropriate way with no output left undefined | fix for conditional back edges committed, host-tested, not yet run on Windows. Next, after `lower.rs` is split and as changes of their own (owner's decisions of 2026-11-26, in the session log): a count per loop with an overall safeguard kept, stopped pixel lanes kept on as helpers where that is bounded and free of side effects, a defined end for the other stages, stops counted and reported by shader and stage |
 | C6 | Host independence: the wave-size, heap-size, fused multiply-add and float-behaviour dependencies removed (G2 to G5 in [gpu-compatibility.md](gpu-compatibility.md)) | open; G1 (one capability record) started |
 
 Ledger (measured runs only):
@@ -419,4 +419,24 @@ Only what cannot be done from a cloud session.
   added to the runtime crate's Windows tests was taken out before commit:
   it could not be run here and would have sat under every test of that
   crate. None of the counting has run.
+* Owner's decisions on what a loop-limit stop does, to be made after the
+  split of `lower.rs` and apart from it:
+  - **Helper lanes.** A stopped pixel lane stays on as a helper where that
+    keeps derivatives right for the other pixels of its quad, as the
+    title's own discard does, provided its further execution is bounded
+    and it can have no effect of its own: no store, no export, no write
+    through a view, no atomic, and no loop it could spin in.
+  - **A count per loop.** Each loop has its own iteration count, reset on
+    entry to that loop, in place of one count per header block that nested
+    loops sharing a header also share. A genuine nest is then not stopped
+    because inner times outer passes the limit.
+  - **An overall safeguard stays.** Per-loop counts alone would let a nest
+    run for the product of its limits, so a bound on a lane's total work
+    is kept against pathological shaders and against hanging the GPU.
+  - **Tests.** Regression tests for nested loops, divergent control flow
+    (lanes leaving a loop at different times and by different exits),
+    helper-lane behaviour and termination.
+  - **A stop is a defect.** A loop-limit stop that was not expected is a
+    correctness defect to be reported and investigated, never counted as
+    the shader having run (C7).
 
