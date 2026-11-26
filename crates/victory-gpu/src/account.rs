@@ -102,6 +102,49 @@ impl Default for Gauge {
     }
 }
 
+/// Bytes counted for as long as this lives: added to a gauge when made and
+/// taken from it when dropped. Kept as a field of whatever owns the memory,
+/// so the count cannot outlive the allocation or be released twice, on any
+/// path, without the owner needing a `Drop` of its own.
+pub struct Held {
+    gauge: &'static Gauge,
+    bytes: u64,
+}
+
+impl Held {
+    /// `bytes` held by `owner` from now until this is dropped.
+    pub fn new(owner: Owner, bytes: u64) -> Self {
+        Self::on(gauge(owner), bytes)
+    }
+
+    /// As [`Held::new`], on a gauge given.
+    pub fn on(gauge: &'static Gauge, bytes: u64) -> Self {
+        gauge.add(bytes);
+        Self { gauge, bytes }
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// The memory this stands for is now `bytes` long (it grew or shrank in
+    /// place).
+    pub fn resize(&mut self, bytes: u64) {
+        if bytes >= self.bytes {
+            self.gauge.add(bytes - self.bytes);
+        } else {
+            self.gauge.sub(self.bytes - bytes);
+        }
+        self.bytes = bytes;
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.gauge.sub(self.bytes);
+    }
+}
+
 /// What the memory is: which of the four quantities of docs/memory.md its
 /// bytes are charged to. Whether touched pages are in RAM is the system's
 /// to say for all of them.
@@ -283,6 +326,25 @@ mod tests {
         g.add(3);
         g.sub(3);
         assert_eq!((g.now(), g.underflows()), (0, 2), "an exact release is not one");
+    }
+
+    #[test]
+    fn held_bytes_are_counted_while_they_live_and_once() {
+        static G: Gauge = Gauge::new();
+        let a = Held::on(&G, 100);
+        let mut b = Held::on(&G, 30);
+        assert_eq!((G.now(), a.bytes(), b.bytes()), (130, 100, 30));
+        b.resize(50);
+        assert_eq!(G.now(), 150);
+        b.resize(10);
+        assert_eq!((G.now(), b.bytes()), (110, 10));
+        // Moved, not counted again; dropped where it ends up.
+        let moved = vec![a];
+        assert_eq!(G.now(), 110);
+        drop(moved);
+        assert_eq!(G.now(), 10);
+        drop(b);
+        assert_eq!((G.now(), G.peak(), G.underflows()), (0, 150, 0));
     }
 
     #[test]
