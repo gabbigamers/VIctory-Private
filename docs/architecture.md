@@ -61,6 +61,21 @@ status of each tested device are in
 [gpu-compatibility.md](gpu-compatibility.md). `victory gpu-info` prints a
 device's report.
 
+## Memory
+
+The console's memory is unified: the title's GPU addresses are CPU
+addresses, and its textures and geometry sit in the memory it allocates.
+The host's is not, so data the GPU needs is also held in host resources.
+Those copies are not assumed redundant. The title may read, rewrite, remap
+or reuse its memory at any time, lists recorded now run later, and a copy
+that is given up has to be restorable exactly. An allocation is removed,
+shared or made evictable only through the written case
+[memory.md](memory.md) sets out, with regression tests and a measured
+before and after, and never at the cost of shader correctness, texture
+integrity, geometry accuracy or streaming reliability. Commit, working set,
+video memory and paging-file use are four quantities and are measured
+apart.
+
 ## Import resolution
 
 For every `dll!function` the title imports, in order:

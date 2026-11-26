@@ -7,16 +7,109 @@ picture quality the title asks for.
 
 Rules for this track:
 
-* **Measured before and after.** Every change made for memory is entered in
-  the ledger below with a run before it and a run after it, peak and
-  sustained. A change with no measured gain is taken out again.
-* **No picture traded for memory.** Lower texture resolution, dropped mips,
-  smaller targets or skipped work are not optimisations here.
+* **The same bytes in two places are not, by that fact, a duplicate.** The
+  title's memory, a host copy in system RAM and a texture in video memory
+  can each hold the same data and each be needed: by a different reader, at
+  a different time, or as the only way back to the data when another copy
+  is given up. A copy is redundant only when the case below shows it.
+* **Nothing is traded for memory.** Not shader correctness, not the
+  integrity of a texture, not the accuracy of geometry, not the reliability
+  of world streaming. Lower texture resolution, dropped mips, smaller
+  targets or skipped work are not optimisations here.
+* **Measured before and after, and tested.** Every change made for memory
+  has a run before it and a run after it in the ledger, peak and sustained,
+  and regression tests that fail if the behaviour it relies on changes. A
+  change with no measured gain is taken out again.
 * **No paging file as a fix.** A larger paging file raises the commit limit
   and changes nothing about what must be in RAM. A run that only works
   with one has not met A5.
 * Host independence as everywhere ([gpu-compatibility.md](gpu-compatibility.md)):
   budgets follow what the machine and the device report.
+
+## Before an allocation is removed or consolidated
+
+Each of these is answered in writing, from the code and from tests, before
+any allocation is removed, shared, shrunk, freed earlier or made
+reclaimable. An answer of "not known" stops the change until it is known.
+
+1. **Ownership, lifetime, purpose.** Who makes it, who frees it and when,
+   and what it is for. A copy made for one purpose may have picked up
+   others.
+2. **Every consumer.** Each CPU reader and writer (the title's code, our
+   runtime, other threads) and each GPU reader and writer (draws,
+   dispatches, copies, shaders that compute an address or a heap index
+   themselves), found by search and not by recollection.
+3. **Can the guest touch it again?** The title's memory is the title's: it
+   may read back what it wrote, rewrite it in place, map the same pages at
+   a second address, move them, or hand them to a later request. If the
+   title can read or write a range again, its bytes must be there and
+   current when it does.
+4. **Coherency and synchronisation.** Which copy is the truth at each
+   moment, how a write to one reaches the other, and what order the code
+   relies on. Where both the title and the GPU write, both directions.
+5. **Asynchronous execution.** A command list recorded now runs later, and
+   the GPU may still be reading a resource after the call that used it has
+   returned. Nothing is freed, moved or rewritten while a submitted list,
+   a list held back for another queue, an in-flight copy-back or a
+   presented frame can still refer to it. The lifetime that counts is the
+   last use on the GPU, not the last call.
+6. **The way back.** If the allocation is given up, how exactly its
+   contents are restored when wanted again, from what source, at what
+   cost, and what happens if that source has changed or gone in the
+   meantime. Data that cannot be reconstructed is not given up.
+7. **Identical rendering.** The frames are the same with and without the
+   change: the shader probes and tests pass, captures of the reference
+   scenes match, and no draw is dropped or delayed that was not before.
+
+## How memory is reduced, in order of preference
+
+1. **Remove what is demonstrably redundant.** A copy that the case above
+   shows has no reader, no writer and no role in restoring anything.
+2. **Reuse temporary buffers.** Scratch, staging and decode buffers made
+   and dropped per request, or held at a high-water mark that one request
+   set.
+3. **Evict safely.** Give up what can be restored exactly, least recently
+   used first, under a budget the machine reports, and only when it is not
+   in use on the GPU (rule 5). Host textures are already given up this way
+   against the video-memory budget.
+4. **Do not hold caches in RAM that the system can hold for us.** A file
+   read whole into private memory can be a mapping the system pages from
+   the file.
+
+Not done: reclaiming memory on the expectation that it will not be wanted
+(discarding title pages, trimming the working set by force, shrinking
+pools below what the title asked for). Where the answer to question 3 is
+"it can", the memory stays.
+
+## Tracking this needs
+
+Reducing copies safely means knowing things about a range or a resource
+that the runtime may not record today. Where a case needs one of these and
+it is missing, the tracking is built first, with tests, as its own change:
+
+* **Ownership**: which allocation a range belongs to, what the title asked
+  for it (its flags, protection and memory type), and which host resources
+  were made from it.
+* **Residency**: whether a host copy exists, where it lives (system RAM,
+  the card), and whether it is in use by a list that has not finished.
+* **Dirty state**: which side wrote last and what has not yet reached the
+  other, for writes by the title and for writes by the GPU, and for reads
+  where a read is what makes a copy needed.
+
+## What a memory change comes with
+
+* The case above, written in the "Cases" section below, with every
+  consumer cited as file and line.
+* Regression tests: for the behaviour the change relies on (the lifetime,
+  the ordering, the restore path), and for the picture where a test can
+  show it. Logic tests run on any host; anything that needs a device is
+  listed as unverified until it has run on one.
+* A before and an after in the ledger: peak and sustained working set,
+  peak commit, paging-file growth, lowest free RAM and video memory, from
+  `cargo xtask perf-summary after.csv --against before.csv`, on the same
+  scene, with nothing worse on the correctness or stability tracks.
+* A way to turn it off for one run, so a suspected regression can be
+  bisected to it.
 
 ## Four quantities
 
@@ -112,16 +205,40 @@ established, as mechanisms and without sums
   gives about 1.7 GB for it on NVIDIA.
 * Video memory follows the device's budget and is not the constraint.
 
-The question the inventory is to answer for each of these: is the second
-copy needed while the first exists, and if not, which one can go without
-changing what is drawn.
+These are mechanisms, not findings of waste. The inventory records, for
+each site, the facts the case in "Before an allocation is removed or
+consolidated" needs; whether any copy is redundant is decided there and
+nowhere else.
 
 ## Candidates
 
-Not yet ranked by measurement. Each is entered with what it would remove,
-which quantity that is, and what could go wrong; none is implemented
-without a before and an after.
+Not yet ranked by measurement, and none approved. A candidate becomes a
+change only through a case.
 
-| # | Candidate | Removes | Quantity | Risk | Validated where |
+| # | Candidate | Kind (1 remove, 2 reuse, 3 evict, 4 map) | Quantity it would lower | Open questions of the case | Validated where |
 |---|---|---|---|---|---|
 | | | | | | to be filled from the inventory |
+
+## Cases
+
+One per change, written before the change is made. Template:
+
+```
+### <allocation> : <what is proposed>
+
+Kind: remove / reuse / evict / map
+1. Ownership, lifetime, purpose:
+2. Consumers (CPU, GPU), each with file:line:
+3. Can the guest read or write it again, and how do we know:
+4. Coherency and synchronisation relied on:
+5. Asynchronous use: what can still refer to it after the call returns:
+6. The way back: restored from what, when, and if that source changed:
+7. Identical rendering: which tests and captures show it:
+Tracking needed that does not exist yet:
+Regression tests added:
+Switch to turn it off:
+Before / after: (ledger rows)
+Decision:
+```
+
+No case has been written yet.

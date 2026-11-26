@@ -16,6 +16,12 @@ Rules that do not change between sessions:
 * Code is reused only under a licence compatible with GPL-3.0-or-later, with
   attribution, as a module or dependency. No licence file means no code
   reuse (documented facts only).
+* Every change made for memory follows [memory.md](memory.md): the same
+  bytes in two places are not a duplicate until a written case shows it
+  (owner, every consumer, whether the title can touch it again, coherency,
+  in-flight GPU use, the way back, identical rendering); it comes with
+  regression tests and a measured before and after; correctness and
+  streaming reliability are never traded for it.
 * Every GPU-related change follows [gpu-compatibility.md](gpu-compatibility.md):
   NVIDIA-first, across generations, by capability and never by model.
 * A number in this document says where it comes from: **measured** (a run,
@@ -135,15 +141,20 @@ Ledger:
 ### Memory
 
 Worked from [memory.md](memory.md): commit, working set, video memory and
-paging file are four quantities and are recorded apart. Every change made
-for memory has a measured run before it and after it; nothing is traded
-from the picture; a larger paging file is not a fix.
+paging file are four quantities and are recorded apart. Identical data in
+the title's memory, host RAM and video memory is not assumed to be
+duplication: an allocation is removed or consolidated only through a
+written case, in the order remove what is shown redundant, reuse temporary
+buffers, evict what can be restored exactly; never by reclaiming memory the
+title can still touch. Every change has regression tests and a measured run
+before and after; a larger paging file is not a fix.
 
 | Milestone | State |
 |---|---|
 | M0 | A memory profile of a world run on the target machine (performance log, `cargo xtask perf-summary`): all four quantities, peak and sustained | instrumentation written; not started (needs the owner's machine) |
 | M1 | Where it goes, by owner (title memory, host copies, caches, video memory): an allocation inventory from the code, then the profile's figures against it | inventory in progress |
-| M1a | Redundant allocations removed one at a time, each with a before and an after in memory.md's ledger | not started |
+| M1a | Ownership, residency and dirty-state tracking where a case needs it and it is missing, built and tested as its own change | not started |
+| M1b | Allocations removed, reused or made evictable one at a time, each through a case, with tests and a before and an after in memory.md's ledger | not started |
 | M2 | A5 met | not started |
 
 The ledger is in [memory.md](memory.md).
@@ -321,3 +332,9 @@ Only what cannot be done from a cloud session.
   two (15 tests at tier 1; the Windows queries are type-checked only). An
   allocation inventory by owner and kind, verified against the code, is in
   progress.
+* Memory rules extended on the owner's instruction: no copy is treated as
+  redundant on the ground of identical data; the seven questions a case
+  must answer, the order of preferred means, the tracking a case may need,
+  and what every memory change comes with are in [memory.md](memory.md)
+  and in the standing rules above.
+
