@@ -92,31 +92,58 @@ pub(crate) struct Row {
     /// the GPU, in milliseconds.
     pub preparing: f64,
     pub gpu: f64,
-    /// Our process's private commit and working set.
+    pub memory: Memory,
+}
+
+/// Where memory stands at the end of a period, in MB; `None` where the host
+/// gave no answer. Four different things, never to be added up or mistaken
+/// for one another:
+///
+/// * **commit** is what the process has been promised, touched or not. It
+///   counts against RAM plus paging files, and a figure of tens of GB says
+///   nothing by itself about the RAM in use;
+/// * the **working set** is what is in physical RAM now. This is what a
+///   machine's RAM limits;
+/// * **video** memory is on the card, or (shared) in system RAM that the
+///   GPU reads;
+/// * the **paging file** in use is what the machine as a whole has had to
+///   put out of RAM.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Memory {
+    /// Our process's private commit now, and its highest since the start.
     pub commit: Option<f64>,
+    pub peak_commit: Option<f64>,
+    /// Our process's working set now, and its highest since the start.
     pub working_set: Option<f64>,
+    pub peak_working_set: Option<f64>,
+    /// Page faults a second over the period, soft ones included: a rate
+    /// that stays high while the working set is flat is the machine paging.
+    pub page_faults: Option<f64>,
     /// The machine's commit charge and its limit (RAM and paging files).
     pub system_commit: Option<f64>,
     pub commit_limit: Option<f64>,
+    /// The machine's RAM, and what of it is free for use now.
+    pub physical: Option<f64>,
+    pub physical_free: Option<f64>,
+    /// The machine's paging files: in use now, and their size.
+    pub pagefile: Option<f64>,
+    pub pagefile_size: Option<f64>,
     /// Video memory on the card: used and the budget the system gives us.
     pub video: Option<f64>,
     pub video_budget: Option<f64>,
     /// Video memory in system RAM (shared): used.
     pub video_shared: Option<f64>,
+    /// What we hold ourselves, by our own count: host textures, the heaps
+    /// they are placed in (used and free), and list upload memory.
+    pub host_textures: Option<f64>,
+    pub texture_heaps: Option<f64>,
+    pub uploads: Option<f64>,
 }
 
-/// The first line of the file: [`Row::line`]'s columns.
-pub(crate) const HEADER: &str = "seconds,frame,frames,fps,mean_ms,p50_ms,p95_ms,p99_ms,max_ms,late_share,jitter_ms,\
-draws_per_frame,dropped_per_frame,preparing_ms,gpu_ms,commit_mb,working_set_mb,system_commit_mb,\
-commit_limit_mb,video_mb,video_budget_mb,video_shared_mb";
-
-impl Row {
-    /// The row as a line of comma-separated values (no newline); an unknown
-    /// value is an empty field.
-    pub(crate) fn line(&self) -> String {
-        let p = &self.pacing;
-        let fps = if p.mean > 0.0 { 1000.0 / p.mean } else { 0.0 };
-        let known = [
+impl Memory {
+    /// The columns, in [`MEMORY_COLUMNS`]' order.
+    fn values(&self) -> [Option<f64>; 17] {
+        [
             self.commit,
             self.working_set,
             self.system_commit,
@@ -124,9 +151,40 @@ impl Row {
             self.video,
             self.video_budget,
             self.video_shared,
+            self.peak_commit,
+            self.peak_working_set,
+            self.page_faults,
+            self.physical,
+            self.physical_free,
+            self.pagefile,
+            self.pagefile_size,
+            self.host_textures,
+            self.texture_heaps,
+            self.uploads,
         ]
-        .map(|v| v.map_or(String::new(), |v| format!("{v:.0}")))
-        .join(",");
+    }
+}
+
+const FRAME_COLUMNS: &str = "seconds,frame,frames,fps,mean_ms,p50_ms,p95_ms,p99_ms,max_ms,late_share,jitter_ms,\
+draws_per_frame,dropped_per_frame,preparing_ms,gpu_ms";
+
+const MEMORY_COLUMNS: &str = "commit_mb,working_set_mb,system_commit_mb,commit_limit_mb,video_mb,video_budget_mb,\
+video_shared_mb,peak_commit_mb,peak_working_set_mb,page_faults_per_s,physical_mb,physical_free_mb,pagefile_mb,\
+pagefile_size_mb,host_textures_mb,texture_heaps_mb,uploads_mb";
+
+/// The first line of the file: [`Row::line`]'s columns. Readers find
+/// columns by name (`cargo xtask perf-summary`), so columns are only added.
+pub(crate) fn header() -> String {
+    format!("{FRAME_COLUMNS},{MEMORY_COLUMNS}")
+}
+
+impl Row {
+    /// The row as a line of comma-separated values (no newline); an unknown
+    /// value is an empty field.
+    pub(crate) fn line(&self) -> String {
+        let p = &self.pacing;
+        let fps = if p.mean > 0.0 { 1000.0 / p.mean } else { 0.0 };
+        let known = self.memory.values().map(|v| v.map_or(String::new(), |v| format!("{v:.0}"))).join(",");
         format!(
             "{:.1},{},{},{fps:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.2},{:.0},{:.1},{:.2},{:.2},{known}",
             self.seconds,
@@ -158,7 +216,7 @@ fn path() -> Option<&'static std::ffi::OsString> {
 }
 
 /// Appends `row` to the `VICTORY_PERF_LOG` file, made anew by the run's
-/// first row, under [`HEADER`]. Written a row at a time, so a run that ends
+/// first row, under [`header`]. Written a row at a time, so a run that ends
 /// in a crash keeps what it measured.
 pub(crate) fn log(row: &Row) {
     static FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
@@ -177,7 +235,7 @@ pub(crate) fn log(row: &Row) {
 fn create(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::io::Write;
     let mut file = std::fs::File::create(path)?;
-    writeln!(file, "{HEADER}")?;
+    writeln!(file, "{}", header())?;
     Ok(file)
 }
 
@@ -270,13 +328,7 @@ mod tests {
             dropped: 0.0,
             preparing: 0.0,
             gpu: 0.0,
-            commit: None,
-            working_set: None,
-            system_commit: None,
-            commit_limit: None,
-            video: None,
-            video_budget: None,
-            video_shared: None,
+            memory: Memory::default(),
         };
         let mut file = create(&path).unwrap();
         append(&mut file, &row).unwrap();
@@ -284,7 +336,7 @@ mod tests {
         drop(file);
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines, [HEADER, &row.line(), &row.line()]);
+        assert_eq!(lines, [header().as_str(), &row.line(), &row.line()]);
     }
 
     #[test]
@@ -297,24 +349,91 @@ mod tests {
             dropped: 0.25,
             preparing: 12.345,
             gpu: 6.5,
-            commit: Some(20_480.4),
-            working_set: Some(9_000.0),
-            system_commit: Some(28_000.0),
-            commit_limit: Some(40_000.0),
-            video: Some(9_500.0),
-            video_budget: Some(15_000.0),
-            video_shared: Some(120.0),
+            memory: Memory {
+                commit: Some(20_480.4),
+                peak_commit: Some(21_000.0),
+                working_set: Some(9_000.0),
+                peak_working_set: Some(9_500.0),
+                page_faults: Some(1_234.4),
+                system_commit: Some(28_000.0),
+                commit_limit: Some(40_000.0),
+                physical: Some(16_300.0),
+                physical_free: Some(2_100.0),
+                pagefile: Some(3_000.0),
+                pagefile_size: Some(24_000.0),
+                video: Some(9_500.0),
+                video_budget: Some(15_000.0),
+                video_shared: Some(120.0),
+                host_textures: Some(8_000.0),
+                texture_heaps: Some(8_600.0),
+                uploads: Some(64.0),
+            },
         };
-        let line = row.line();
-        assert_eq!(line.split(',').count(), HEADER.split(',').count());
+        let (line, columns) = (row.line(), header());
+        assert_eq!(line.split(',').count(), columns.split(',').count());
         assert_eq!(
             line,
             "12.3,370,150,30.00,33.33,33.33,33.33,33.33,33.33,0.0000,0.00,5123,0.2,12.35,6.50,\
-             20480,9000,28000,40000,9500,15000,120"
+             20480,9000,28000,40000,9500,15000,120,21000,9500,1234,16300,2100,3000,24000,8000,8600,64"
         );
-        (row.commit, row.video_budget) = (None, None);
+        (row.memory.commit, row.memory.video_budget, row.memory.uploads) = (None, None, None);
         let line = row.line();
-        assert_eq!(line.split(',').count(), HEADER.split(',').count());
-        assert!(line.ends_with(",,9000,28000,40000,9500,,120"), "{line}");
+        assert_eq!(line.split(',').count(), columns.split(',').count());
+        assert!(line.contains(",6.50,,9000,28000,40000,9500,,120,"), "{line}");
+        assert!(line.ends_with(",8600,"), "{line}");
+    }
+
+    /// Each value under the column that names it: the reader goes by name.
+    #[test]
+    fn every_memory_value_sits_under_its_own_column() {
+        let memory = Memory {
+            commit: Some(1.0),
+            working_set: Some(2.0),
+            system_commit: Some(3.0),
+            commit_limit: Some(4.0),
+            video: Some(5.0),
+            video_budget: Some(6.0),
+            video_shared: Some(7.0),
+            peak_commit: Some(8.0),
+            peak_working_set: Some(9.0),
+            page_faults: Some(10.0),
+            physical: Some(11.0),
+            physical_free: Some(12.0),
+            pagefile: Some(13.0),
+            pagefile_size: Some(14.0),
+            host_textures: Some(15.0),
+            texture_heaps: Some(16.0),
+            uploads: Some(17.0),
+        };
+        let names: Vec<&str> = MEMORY_COLUMNS.split(',').collect();
+        assert_eq!(names.len(), memory.values().len());
+        let at = |name: &str| memory.values()[names.iter().position(|n| *n == name).unwrap()];
+        for (name, value) in [
+            ("commit_mb", 1.0),
+            ("working_set_mb", 2.0),
+            ("system_commit_mb", 3.0),
+            ("commit_limit_mb", 4.0),
+            ("video_mb", 5.0),
+            ("video_budget_mb", 6.0),
+            ("video_shared_mb", 7.0),
+            ("peak_commit_mb", 8.0),
+            ("peak_working_set_mb", 9.0),
+            ("page_faults_per_s", 10.0),
+            ("physical_mb", 11.0),
+            ("physical_free_mb", 12.0),
+            ("pagefile_mb", 13.0),
+            ("pagefile_size_mb", 14.0),
+            ("host_textures_mb", 15.0),
+            ("texture_heaps_mb", 16.0),
+            ("uploads_mb", 17.0),
+        ] {
+            assert_eq!(at(name), Some(value), "{name}");
+        }
+        // The columns the first version of the file had keep their places.
+        assert!(header().starts_with(
+            "seconds,frame,frames,fps,mean_ms,p50_ms,p95_ms,p99_ms,max_ms,late_share,jitter_ms,\
+             draws_per_frame,dropped_per_frame,preparing_ms,gpu_ms,commit_mb,working_set_mb,\
+             system_commit_mb,commit_limit_mb,video_mb,video_budget_mb,video_shared_mb,"
+        ));
     }
 }

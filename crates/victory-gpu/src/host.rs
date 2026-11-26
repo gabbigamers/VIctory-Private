@@ -281,8 +281,18 @@ fn create() -> windows::core::Result<Host> {
     }
 }
 
-/// Our process's private commit and working set, bytes.
-fn process_memory() -> (u64, u64) {
+/// Our process's memory counters, bytes: private commit and working set,
+/// each now and at its highest, and the page faults taken so far.
+#[derive(Clone, Copy, Default)]
+struct ProcessMemory {
+    commit: u64,
+    peak_commit: u64,
+    working_set: u64,
+    peak_working_set: u64,
+    page_faults: u64,
+}
+
+fn process_memory() -> ProcessMemory {
     use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let mut c = PROCESS_MEMORY_COUNTERS {
@@ -291,19 +301,74 @@ fn process_memory() -> (u64, u64) {
     };
     // SAFETY: our own process and a sized structure.
     unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
-    (c.PagefileUsage as u64, c.WorkingSetSize as u64)
+    ProcessMemory {
+        commit: c.PagefileUsage as u64,
+        peak_commit: c.PeakPagefileUsage as u64,
+        working_set: c.WorkingSetSize as u64,
+        peak_working_set: c.PeakWorkingSetSize as u64,
+        page_faults: u64::from(c.PageFaultCount),
+    }
 }
 
-/// The machine's commit charge and its limit (RAM and paging files), bytes.
-fn system_commit() -> Option<(u64, u64)> {
+/// The machine's memory, bytes: the commit charge and its limit (RAM and
+/// paging files), and physical memory in all and free for use.
+#[derive(Clone, Copy)]
+struct SystemMemory {
+    commit: u64,
+    commit_limit: u64,
+    physical: u64,
+    physical_free: u64,
+}
+
+fn system_memory() -> Option<SystemMemory> {
     use windows_sys::Win32::System::ProcessStatus::{K32GetPerformanceInfo, PERFORMANCE_INFORMATION};
     let mut info = PERFORMANCE_INFORMATION {
         cb: size_of::<PERFORMANCE_INFORMATION>() as u32,
         ..Default::default()
     };
     // SAFETY: a sized structure of ours.
-    (unsafe { K32GetPerformanceInfo(&mut info, info.cb) } != 0)
-        .then(|| ((info.CommitTotal * info.PageSize) as u64, (info.CommitLimit * info.PageSize) as u64))
+    (unsafe { K32GetPerformanceInfo(&mut info, info.cb) } != 0).then(|| {
+        let bytes = |pages: usize| (pages * info.PageSize) as u64;
+        SystemMemory {
+            commit: bytes(info.CommitTotal),
+            commit_limit: bytes(info.CommitLimit),
+            physical: bytes(info.PhysicalTotal),
+            physical_free: bytes(info.PhysicalAvailable),
+        }
+    })
+}
+
+/// The machine's paging files, bytes: in use now and their size, over all
+/// of them. `None` if the system does not list them.
+fn paging_files() -> Option<(u64, u64)> {
+    use windows_sys::Win32::System::ProcessStatus::{ENUM_PAGE_FILE_INFORMATION, K32EnumPageFilesW};
+    use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+
+    /// Adds one paging file's pages (in use, size) to the totals at `context`.
+    unsafe extern "system" fn add(
+        context: *mut core::ffi::c_void,
+        info: *mut ENUM_PAGE_FILE_INFORMATION,
+        _name: windows_sys::core::PCWSTR,
+    ) -> windows_sys::core::BOOL {
+        // SAFETY: `context` is the pair `paging_files` passes, alive for the
+        // enumeration; `info` is the system's record for this call.
+        unsafe {
+            let totals = &mut *context.cast::<(u64, u64)>();
+            totals.0 += (*info).TotalInUse as u64;
+            totals.1 += (*info).TotalSize as u64;
+        }
+        1
+    }
+
+    let mut pages = (0u64, 0u64);
+    // SAFETY: the callback gets the address of `pages`, which outlives the
+    // call; the enumeration is synchronous.
+    let listed = unsafe { K32EnumPageFilesW(Some(add), (&raw mut pages).cast()) } != 0;
+    let mut system = SYSTEM_INFO::default();
+    // SAFETY: writes the structure given.
+    unsafe { GetSystemInfo(&mut system) };
+    let page = u64::from(system.dwPageSize);
+    listed.then_some((pages.0 * page, pages.1 * page))
 }
 
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
@@ -3149,6 +3214,8 @@ struct Meter {
     pacing: crate::pacing::Pacing,
     period_us: [u64; 2],
     period_drawn: u64,
+    /// The process's page faults at the last performance-log row, and when.
+    faults: Option<(u64, std::time::Instant)>,
 }
 
 impl Meter {
@@ -3167,6 +3234,7 @@ impl Meter {
             pacing: crate::pacing::Pacing::default(),
             period_us: [0; 2],
             period_drawn: crate::draw::drawn(),
+            faults: None,
         }
     }
 
@@ -3236,10 +3304,17 @@ impl Meter {
                     pacing.jitter
                 );
                 if crate::pacing::logging() {
-                    const MB: f64 = 1e6;
-                    let (commit, working_set) = process_memory();
-                    let system = system_commit();
-                    let video = video_memory();
+                    let mb = |bytes: u64| bytes as f64 / 1e6;
+                    let process = process_memory();
+                    let (system, paging, video) = (system_memory(), paging_files(), video_memory());
+                    // Faults a second since the last row.
+                    let (faults_before, since) = self.faults.replace((process.page_faults, presented)).unzip();
+                    let page_faults = faults_before.zip(since).map(|(before, since)| {
+                        let seconds = presented.duration_since(since).as_secs_f64().max(1e-3);
+                        process.page_faults.saturating_sub(before) as f64 / seconds
+                    });
+                    let (_, texture_bytes, ..) = crate::resource::texture_counts();
+                    let (_, heap_used, heap_free) = crate::placement::stats();
                     crate::pacing::log(&crate::pacing::Row {
                         seconds: self.first.map_or(0.0, |first| first.elapsed().as_secs_f64()),
                         frame: self.presented,
@@ -3248,13 +3323,25 @@ impl Meter {
                         dropped,
                         preparing: period_us[0] as f64 / 1000.0 / report_frames,
                         gpu: period_us[1] as f64 / 1000.0 / report_frames,
-                        commit: Some(commit as f64 / MB),
-                        working_set: Some(working_set as f64 / MB),
-                        system_commit: system.map(|(total, _)| total as f64 / MB),
-                        commit_limit: system.map(|(_, limit)| limit as f64 / MB),
-                        video: video.map(|[(local, _), _]| local),
-                        video_budget: video.map(|[(_, budget), _]| budget),
-                        video_shared: video.map(|[_, (shared, _)]| shared),
+                        memory: crate::pacing::Memory {
+                            commit: Some(mb(process.commit)),
+                            peak_commit: Some(mb(process.peak_commit)),
+                            working_set: Some(mb(process.working_set)),
+                            peak_working_set: Some(mb(process.peak_working_set)),
+                            page_faults,
+                            system_commit: system.map(|s| mb(s.commit)),
+                            commit_limit: system.map(|s| mb(s.commit_limit)),
+                            physical: system.map(|s| mb(s.physical)),
+                            physical_free: system.map(|s| mb(s.physical_free)),
+                            pagefile: paging.map(|(used, _)| mb(used)),
+                            pagefile_size: paging.map(|(_, size)| mb(size)),
+                            video: video.map(|[(local, _), _]| local),
+                            video_budget: video.map(|[(_, budget), _]| budget),
+                            video_shared: video.map(|[_, (shared, _)]| shared),
+                            host_textures: Some(mb(texture_bytes)),
+                            texture_heaps: Some(mb(heap_used + heap_free)),
+                            uploads: Some(mb(crate::list::UPLOADS[1].load(Ordering::Relaxed))),
+                        },
                     });
                 }
             }
@@ -3275,7 +3362,7 @@ impl Meter {
             #[cfg(feature = "diagnostics")]
             {
                 if let Some([(local, budget), (system, system_budget)]) = video_memory() {
-                    let (commit, working_set) = process_memory();
+                    let ProcessMemory { commit, working_set, .. } = process_memory();
                     tracing::info!(
                         "video memory: {local:.0} MB of a {budget:.0} MB budget on the card, \
                          {system:.0} MB of {system_budget:.0} MB in system memory; process commit {:.0} MB, \

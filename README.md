@@ -238,11 +238,16 @@ time and the next one's).
 
 `VICTORY_PERF_LOG=<file.csv>` (any build; a file outside the repository)
 also writes those five-second periods as rows, with draws and dropped draws
-a frame, the process's commit and working set, the machine's commit charge
-and limit, and video memory used and budgeted. The file is made anew by each
+a frame and memory as four separate things: the process's commit and its
+working set (what is in RAM), each with its peak, and the page-fault rate;
+the machine's commit, RAM, free RAM and paging files; video memory on the
+card and shared. The file is made anew by each
 run and written a row at a time, so a run that crashes keeps what it
 measured. It holds measurements only, nothing of the title's.
-[docs/progress.md](docs/progress.md) says how runs are compared.
+`cargo xtask perf-summary run.csv` summarises a run and
+`cargo xtask perf-summary after.csv --against before.csv` compares two, on
+any machine. [docs/progress.md](docs/progress.md) says how runs are
+compared and [docs/memory.md](docs/memory.md) what the memory figures mean.
 
 For a startup breakpoint (`0x80000003`), run the diagnostics build with
 `VICTORY_CRASH_BREAKPOINTS=1`. Keep the console output along with the new

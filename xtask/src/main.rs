@@ -1,5 +1,6 @@
 //! Repository maintenance. Run with `cargo xtask <command>`.
 
+mod perf;
 mod policy;
 
 use std::path::{Path, PathBuf};
@@ -26,12 +27,24 @@ enum Cmd {
     },
     /// Point git at .githooks/ so every commit runs the policy check.
     InstallHooks,
+    /// Summarise a run's `VICTORY_PERF_LOG` as the figures docs/progress.md
+    /// records: frame times over the world's periods, and memory as working
+    /// set, commit, paging file and video memory, each with its peak.
+    PerfSummary {
+        /// The run's log.
+        log: PathBuf,
+        /// An earlier run's log to compare with: each figure before and
+        /// after, and whether the change is better or worse.
+        #[arg(long)]
+        against: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
     let root = workspace_root();
     match Cli::parse().command {
         Cmd::Policy { staged } => policy::run(&root, staged),
+        Cmd::PerfSummary { log, against } => perf::run(&log, against.as_deref()),
         Cmd::InstallHooks => {
             let status = Command::new("git")
                 .args(["config", "core.hooksPath", ".githooks"])

@@ -83,7 +83,7 @@ least 30 minutes, in every five-second period after loading:
 | Date | Source | Machine | Build | Scene | Result |
 |---|---|---|---|---|---|
 | 2026-11-25 | project-reported (README) | RX 6700 XT 12 GB, 32 GB RAM | not recorded | intro cutscene and prologue | about 1 fps (0.9 to 1.0 s a frame, warm cache); about 33 GB of commit, about 10 GB of video memory |
-| before 2026-11-26 | owner-reported | target machine | not recorded | not recorded | about 15 fps |
+| before 2026-11-26 | owner-reported | target machine | not recorded | not recorded | about 15 fps; about 27 GB of "reported memory" (which counter is not recorded: see [memory.md](memory.md)) |
 
 The owner-reported 15 fps is the preliminary baseline for the target
 machine: it shows the machine runs the title, at about half the target
@@ -134,17 +134,19 @@ Ledger:
 
 ### Memory
 
+Worked from [memory.md](memory.md): commit, working set, video memory and
+paging file are four quantities and are recorded apart. Every change made
+for memory has a measured run before it and after it; nothing is traded
+from the picture; a larger paging file is not a fix.
+
 | Milestone | State |
 |---|---|
-| M0 | A memory profile of a world run on the target machine (performance log) | not started (needs the owner's machine) |
-| M1 | Where the commit comes from, by owner (title memory, host copies, caches, video memory in system RAM), from the profile and the diagnostics build's memory lines | not started |
+| M0 | A memory profile of a world run on the target machine (performance log, `cargo xtask perf-summary`): all four quantities, peak and sustained | instrumentation written; not started (needs the owner's machine) |
+| M1 | Where it goes, by owner (title memory, host copies, caches, video memory): an allocation inventory from the code, then the profile's figures against it | inventory in progress |
+| M1a | Redundant allocations removed one at a time, each with a before and an after in memory.md's ledger | not started |
 | M2 | A5 met | not started |
 
-Ledger (peaks over the run, MB):
-
-| Date | Commit | Scene | Process commit | Working set | System commit / limit | Video used / budget | Video in system RAM | Notes |
-|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | no measured run yet |
+The ledger is in [memory.md](memory.md).
 
 ### Performance
 
@@ -208,14 +210,19 @@ One procedure, so rows are comparable.
 5. Keep the CSV, the console log and any new `crashes.log` entries. The CSV
    holds measurements only; it can be shared as it is.
 
-The CSV has one row per five-second period:
-`seconds, frame, frames, fps, mean_ms, p50_ms, p95_ms, p99_ms, max_ms,
-late_share, jitter_ms, draws_per_frame, dropped_per_frame, preparing_ms,
-gpu_ms, commit_mb, working_set_mb, system_commit_mb, commit_limit_mb,
-video_mb, video_budget_mb, video_shared_mb`
-(`crates/victory-gpu/src/pacing.rs`). A ledger row is entered from it with
-the commit; a later row that is worse on any track is recorded as a
-regression in that track's notes, not left out.
+The CSV has one row per five-second period: the frame times, draws and
+dropped draws, the preparing and GPU split, and memory as four separate
+things (process commit and working set with their peaks, page faults a
+second, the machine's commit, RAM, free RAM and paging files, video memory
+on the card and shared, and our own count of host textures and upload
+memory). The columns are in `crates/victory-gpu/src/pacing.rs`.
+
+`cargo xtask perf-summary run.csv` turns it into ledger figures (sustained
+values as medians over the world's periods, peaks over the whole run), and
+`--against before.csv` sets two runs side by side and names what got worse.
+It runs anywhere. A ledger row is entered from it with the commit; a later
+row that is worse on any track is recorded as a regression in that track's
+notes, not left out.
 
 For the breakdown by owner (M1, P1), repeat with the diagnostics build
 (`cargo build --profile diag -p victory --features diagnostics`) and
@@ -244,6 +251,9 @@ Written at tier 2, not yet run on Windows:
 * the frame-time line and `VICTORY_PERF_LOG` wiring in
   `crates/victory-gpu/src/host.rs` (`Meter::frame`). The statistics and the
   file format themselves are tested at tier 1.
+* the memory queries behind the performance log's memory columns (process
+  counters, the machine's memory, paging files) in `host.rs`. The row
+  format and `cargo xtask perf-summary` are tested at tier 1.
 * `Host::caps` (the device and adapter queries, the heap-size probe) and
   `victory gpu-info`. The record, its assessment and the report text are
   tested at tier 1.
@@ -262,9 +272,12 @@ Only what cannot be done from a cloud session.
    capability code.
 3. One run with `VICTORY_PERF_LOG` on the target machine at the current
    commit, following "Measuring", and the CSV. This is P0, M0 and S0 at
-   once, and the first check of the new instrumentation.
-4. For the 15 fps report: the build or commit, where in the game, the
-   console mode, and how the rate was read.
+   once, and the first check of the new instrumentation. It is also what
+   turns the 27 GB report into four separate figures.
+4. For the 15 fps and 27 GB report: the build or commit, where in the
+   game, the console mode, how the rate was read, and which tool and
+   column showed the 27 GB (Task Manager's "Memory" or "Commit size",
+   Resource Monitor, an overlay).
 5. `cargo test --workspace --locked` on the target machine (C2): the shader
    probes have no recorded full run on an NVIDIA card.
 6. The design decision records (0001, 0003, 0005, 0007) and the named
@@ -301,3 +314,10 @@ Only what cannot be done from a cloud session.
   corrected, 1 unverifiable. "Blockers" above is its prioritised result;
   the reuse table and licence findings are in the audit file. It raised
   the provenance of the title's files as an open question for the owner.
+* Memory investigation started on the owner's report of about 27 GB at
+  about 15 fps ([memory.md](memory.md)). The performance log now records
+  commit, working set, paging file and video memory apart, with peaks and
+  the fault rate; `cargo xtask perf-summary` summarises a run and compares
+  two (15 tests at tier 1; the Windows queries are type-checked only). An
+  allocation inventory by owner and kind, verified against the code, is in
+  progress.
