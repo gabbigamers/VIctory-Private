@@ -50,7 +50,7 @@ All seven, on the target machine, in the default console mode
 
 | # | Criterion | Track | Measured by |
 |---|---|---|---|
-| A1 | Graphics render visually correct | Correctness | captured frames reviewed against the console's picture; no draw dropped for want of a host pipeline (`dropped_per_frame` is 0) |
+| A1 | Graphics render visually correct | Correctness | captured frames reviewed against the console's picture; no draw dropped for want of a host pipeline (`dropped_per_frame` is 0); no translated loop cut short by the iteration limit |
 | A2 | The map renders accurately and completely | Correctness | captures at fixed places and times of day; no missing or stand-in geometry |
 | A3 | Textures, geometry, materials, lighting and shaders are correct | Correctness | every shader program translated; shader reference tests pass on the target GPU; ray-traced shadows and indirect light present |
 | A4 | The world streams reliably, nothing missing or corrupted | Stability | a long traversal with no missing draws, no stand-in assets and nothing in `crashes.log` |
@@ -116,6 +116,7 @@ Tracks are worked in this order where they compete.
 | C3 | Ray-tracing structures built: ray-traced shadows and indirect light | open |
 | C4 | Known picture defects gone: the local-light shadow mask, the pink band over nearer bodies, the stand-in head | open |
 | C5 | Map completeness at fixed places | not started |
+| C7 | No loop-limit stop in a run. A translated loop cut short by the iteration limit is a correctness failure to be investigated (why does the loop not end: data with no host copy, a mistranslation, a loop that really is longer), never an accepted way to render. Stops are counted and reported by shader and stage, and a stopped lane ends in a defined, stage-appropriate way with no output left undefined | fix for conditional back edges in review; counters and defined termination planned (owner's decisions of 2026-11-26) |
 | C6 | Host independence: the wave-size, heap-size, fused multiply-add and float-behaviour dependencies removed (G2 to G5 in [gpu-compatibility.md](gpu-compatibility.md)) | open; G1 (one capability record) started |
 
 Ledger (measured runs only):
@@ -337,4 +338,11 @@ Only what cannot be done from a cloud session.
   must answer, the order of preferred means, the tracking a case may need,
   and what every memory change comes with are in [memory.md](memory.md)
   and in the standing rules above.
+* Owner's decisions on the loop limit: stops are counted and logged by
+  shader and stage, aggregated so normal rendering pays nothing for it; a
+  stopped lane must not leave outputs undefined, so each stage gets a
+  defined termination; any stop is a correctness failure to investigate
+  (C7); the regression tests that run full-length loops stay in the default
+  test run. `lower.rs` is to be split into modules as a change of its own
+  that alters no behaviour, apart from functional changes.
 
