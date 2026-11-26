@@ -601,3 +601,44 @@ and a reading of both show different code for the same rule (row #5).
 Added beyond the findings: the two scratch experiments of section 5, the
 1.98.1 head-to-head runs, per-component reasons where rows had been
 isolated or set aside as a group.
+
+## Addendum, 2026-11-26: what VIctory's full history settles
+
+Two of the open questions above needed VIctory's whole history, which the
+local clone (shallow) did not hold. `main` was fetched in full into a
+scratch clone (692 commits, read-only) and searched.
+
+**Which side wrote the shared rebuild code first.** By author timestamp,
+VIctory's:
+
+| Event | Commit | Author time | UTC |
+|---|---|---|---|
+| VIctory's decoder first committed (1,398 lines, with its table file) | VIctory `2849477` | 2026-11-23 23:10:01 +01:00 | 23 Nov, 22:10 |
+| `bcpack-rs` `src/bc7.rs` and `src/bcn.rs` first committed | bcpack-rs `8b86a5e` | 2026-11-24 05:24:10 +03:00 | 24 Nov, 02:24 |
+| `bcpack-rs` imports tables "as a reference decoder (VIctory) carries them" | bcpack-rs `c55c5fa` | 2026-11-24 05:43:33 +03:00 | 24 Nov, 02:43 |
+
+VIctory's file at `2849477` already holds the shapes the two projects
+share (the `Bits` writer, the `field` closures, `common`, and the row
+choice `if row < common { row } else { 0 }`). The `bcpack-rs` files follow
+about four hours later, and its next commit names VIctory as its
+reference.
+
+What this does and does not show. Author timestamps are set by the
+author's machine and are not proof by themselves; and two files that share
+code could both descend from a third source that neither repository
+names. With those limits, the evidence available points one way: the
+shared code was in VIctory first. VIctory is GPL-3.0-or-later; `bcpack-rs`
+labels the two files MIT OR Apache-2.0.
+
+Consequence here, unchanged from section 2 but now on firmer ground:
+`bc7.rs` and `bcn.rs` are not vendored into VIctory's test-only reference
+crate, because doing so would repeat a licence statement the evidence does
+not support, and because agreement with them is agreement with code that
+appears to come from VIctory itself.
+
+**Where VIctory's tables came from.** Not settled. `bcpack-tables.bin`
+arrives whole in the same commit `2849477`, whose message calls BCPack
+"our own decoder" and the file "the format's constant tables" under the
+asset policy's exception. No source is named there or in any later commit
+touching the file. It remains the owner's question (audit A-B6).
+

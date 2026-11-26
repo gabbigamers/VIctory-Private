@@ -368,4 +368,20 @@ Only what cannot be done from a cloud session.
 * Memory counters (M1c): the accounting module and its log columns are in
   (`crates/victory-gpu/src/account.rs`); putting the counting in at each
   allocation and release is in review.
+* Committed after review: the component-by-component evaluation of
+  `bcpack-rs` ([bcpack-rs-evaluation.md](bcpack-rs-evaluation.md)) and the
+  reconstructed decision records ([decisions/](decisions/README.md)).
+  VIctory's full history (692 commits) was searched for both: no decision
+  record was ever a file; and VIctory's decoder with the code the two
+  projects share was committed about four hours before `bcpack-rs`'s
+  rebuild files, by author timestamp. The origin of VIctory's own table
+  file is still not recorded anywhere.
+* Owner's decision on the two lane-decoder corrections: adopt both if
+  validation shows they handle valid synthetic streams correctly, as a
+  separate, reversible commit with their regression tests enabled, and
+  with accuracy, throughput, memory and error handling compared against
+  the existing code; agreement between related implementations is not
+  proof. Validation uses Microsoft's published decoder module simulated
+  unmodified (Verilator) as the oracle for a single lane; how several
+  lanes share one stream is not published and cannot be checked that way.
 
