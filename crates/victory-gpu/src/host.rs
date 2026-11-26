@@ -269,8 +269,7 @@ fn create() -> windows::core::Result<Host> {
     }
 }
 
-/// Diagnostics: our process's private commit and working set, bytes.
-#[cfg(feature = "diagnostics")]
+/// Our process's private commit and working set, bytes.
 fn process_memory() -> (u64, u64) {
     use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
@@ -281,6 +280,18 @@ fn process_memory() -> (u64, u64) {
     // SAFETY: our own process and a sized structure.
     unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
     (c.PagefileUsage as u64, c.WorkingSetSize as u64)
+}
+
+/// The machine's commit charge and its limit (RAM and paging files), bytes.
+fn system_commit() -> Option<(u64, u64)> {
+    use windows_sys::Win32::System::ProcessStatus::{K32GetPerformanceInfo, PERFORMANCE_INFORMATION};
+    let mut info = PERFORMANCE_INFORMATION {
+        cb: size_of::<PERFORMANCE_INFORMATION>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: a sized structure of ours.
+    (unsafe { K32GetPerformanceInfo(&mut info, info.cb) } != 0)
+        .then(|| ((info.CommitTotal * info.PageSize) as u64, (info.CommitLimit * info.PageSize) as u64))
 }
 
 /// DXGI may return hardware for `EnumWarpAdapter` (notably under Proton).
@@ -3022,6 +3033,15 @@ struct Meter {
     logged: std::time::Instant,
     /// The caption the window had, once read.
     caption: Option<Vec<u16>>,
+    /// When the first and the latest frame were presented, and how many.
+    first: Option<std::time::Instant>,
+    latest: Option<std::time::Instant>,
+    presented: u64,
+    /// The report period's frame times, its microseconds preparing
+    /// submissions and waiting for the GPU, and the draws before it.
+    pacing: crate::pacing::Pacing,
+    period_us: [u64; 2],
+    period_drawn: u64,
 }
 
 impl Meter {
@@ -3034,6 +3054,12 @@ impl Meter {
             drawn: crate::draw::drawn(),
             logged: now,
             caption: None,
+            first: None,
+            latest: None,
+            presented: 0,
+            pacing: crate::pacing::Pacing::default(),
+            period_us: [0; 2],
+            period_drawn: crate::draw::drawn(),
         }
     }
 
@@ -3042,6 +3068,12 @@ impl Meter {
         #[cfg(feature = "diagnostics")]
         tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
         self.frames += 1;
+        let presented = std::time::Instant::now();
+        if let Some(latest) = self.latest.replace(presented) {
+            self.pacing.record(presented.duration_since(latest).as_micros() as u64);
+        }
+        self.first.get_or_insert(presented);
+        self.presented += 1;
         crate::memory::log_frame();
         #[cfg(feature = "diagnostics")]
         crate::watch::frame_done();
@@ -3057,9 +3089,10 @@ impl Meter {
         let draws = (drawn - self.drawn) as f64 / frames;
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
         // Of a frame, ms preparing submissions and ms waiting for the GPU.
-        let [cpu, gpu] = [0, 1].map(|i| {
-            SUBMISSION_US[i].swap(0, Ordering::Relaxed) as f64 / 1000.0 / frames
-        });
+        let submission_us = [0, 1].map(|i| SUBMISSION_US[i].swap(0, Ordering::Relaxed));
+        self.period_us[0] += submission_us[0];
+        self.period_us[1] += submission_us[1];
+        let [cpu, gpu] = submission_us.map(|us| us as f64 / 1000.0 / frames);
         let [copy_ms, copy_mb, texture_ms, texture_mb] = [0, 1, 2, 3].map(|i| {
             let scale = if i % 2 == 0 { 1e3 } else { 1e6 };
             PREPARING[i].swap(0, Ordering::Relaxed) as f64 / scale / frames
@@ -3081,6 +3114,43 @@ impl Meter {
                  {indirect:.0} indirect; {root_views:.0} root-view slots/frame",
                 making = crate::pipeline::making()
             );
+            let period_us = std::mem::take(&mut self.period_us);
+            let period_draws = drawn - std::mem::replace(&mut self.period_drawn, drawn);
+            if let Some(pacing) = self.pacing.take() {
+                tracing::info!(
+                    "frame times: median {:.1} ms, 95% under {:.1}, 99% under {:.1}, longest {:.1}; \
+                     {:.1}% late (over {:.0} ms); {:.1} ms between one frame's time and the next",
+                    pacing.p50,
+                    pacing.p95,
+                    pacing.p99,
+                    pacing.max,
+                    pacing.late * 100.0,
+                    crate::pacing::LATE_US as f64 / 1000.0,
+                    pacing.jitter
+                );
+                if crate::pacing::logging() {
+                    const MB: f64 = 1e6;
+                    let (commit, working_set) = process_memory();
+                    let system = system_commit();
+                    let video = video_memory();
+                    crate::pacing::log(&crate::pacing::Row {
+                        seconds: self.first.map_or(0.0, |first| first.elapsed().as_secs_f64()),
+                        frame: self.presented,
+                        pacing,
+                        draws: period_draws as f64 / report_frames,
+                        dropped,
+                        preparing: period_us[0] as f64 / 1000.0 / report_frames,
+                        gpu: period_us[1] as f64 / 1000.0 / report_frames,
+                        commit: Some(commit as f64 / MB),
+                        working_set: Some(working_set as f64 / MB),
+                        system_commit: system.map(|(total, _)| total as f64 / MB),
+                        commit_limit: system.map(|(_, limit)| limit as f64 / MB),
+                        video: video.map(|[(local, _), _]| local),
+                        video_budget: video.map(|[(_, budget), _]| budget),
+                        video_shared: video.map(|[_, (shared, _)]| shared),
+                    });
+                }
+            }
             let (textures, bytes, used, shared, saved, replaced) = crate::resource::texture_counts();
             let (heaps, heap_used, heap_free) = crate::placement::stats();
             tracing::info!(

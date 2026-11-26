@@ -221,6 +221,22 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 Every build appends unhandled exceptions, panics, and host GPU failures to
 `crashes.log` in the title's data folder.
 
+### Measuring a run
+
+Every build logs, every five seconds, the frame rate with where a frame's
+time went, and the frame times as a distribution: median, 95th and 99th
+percentile, longest, the share of late frames (over 50 ms, a frame and a
+half at 30 fps) and the jitter (the mean difference between one frame's
+time and the next one's).
+
+`VICTORY_PERF_LOG=<file.csv>` (any build; a file outside the repository)
+also writes those five-second periods as rows, with draws and dropped draws
+a frame, the process's commit and working set, the machine's commit charge
+and limit, and video memory used and budgeted. The file is made anew by each
+run and written a row at a time, so a run that crashes keeps what it
+measured. It holds measurements only, nothing of the title's.
+[docs/progress.md](docs/progress.md) says how runs are compared.
+
 For a startup breakpoint (`0x80000003`), run the diagnostics build with
 `VICTORY_CRASH_BREAKPOINTS=1`. Keep the console output along with the new
 `crashes.log` entries. A host DLL refusal includes the caller stack in the
