@@ -34,8 +34,31 @@ pub mod hit_kind {
     pub const MISS: u32 = 0;
     pub const FRONT: u32 = 1;
     pub const BACK: u32 = 2;
-    /// Reserved for procedural primitives; nothing here produces it.
+    /// A hit a shader committed on a procedural primitive: the hybrid form,
+    /// which lets the device enumerate one box a triangle and tests the
+    /// triangle of the same instance, geometry and primitive index in the
+    /// shader (docs/dxr-shader-emission.md). It names a triangle like any
+    /// hit; the record has no place for the face, so none is compared.
+    /// Nothing in this crate produces it.
     pub const PROCEDURAL: u32 = 3;
+    /// With this bit the record is a refusal: the shader could not decide
+    /// the ray, the reasons ([`super::refusal`]) are in the low bits and the
+    /// other seven words are 0. A refusal is neither a miss nor a hit: the
+    /// ray is traced another way, and the comparison counts it by reason.
+    pub const REFUSED: u32 = 0x8000_0000;
+}
+
+/// Why a shader refused a ray: the low bits of a refused record's kind
+/// (`victory-shader`'s `emit::rayquery::REFUSED_*`).
+pub mod refusal {
+    /// The scene is not the form's: a candidate or a committed hit of the
+    /// other geometry type.
+    pub const GEOMETRY: u32 = 1;
+    /// The shader's own triangle test left single precision's range.
+    pub const RANGE: u32 = 2;
+    /// Every reason there is.
+    pub const ALL: u32 = 3;
+    pub const NAMES: [(u32, &str); 2] = [(GEOMETRY, "geometry"), (RANGE, "range")];
 }
 
 /// A ray. The direction need not be normalised: `t` counts in units of its
@@ -190,6 +213,33 @@ impl Hit {
         self.kind == hit_kind::MISS
     }
 
+    /// The record of a ray a shader refused for `reasons`
+    /// ([`refusal`] bits).
+    pub fn refused(reasons: u32) -> Hit {
+        Hit {
+            kind: hit_kind::REFUSED | reasons,
+            ..Hit::MISS
+        }
+    }
+
+    /// The kind has the refusal bit, whatever else the record holds.
+    pub fn is_refused(&self) -> bool {
+        self.kind & hit_kind::REFUSED != 0
+    }
+
+    /// The reasons of a well-formed refusal: the refusal bit, at least one
+    /// known reason and no other bit in the kind, and seven zero words.
+    /// `None` for every other record, a damaged refusal among them.
+    pub fn refusal_reasons(&self) -> Option<u32> {
+        let reasons = self.kind & !hit_kind::REFUSED;
+        let rest = Hit {
+            kind: hit_kind::MISS,
+            ..*self
+        };
+        (self.is_refused() && reasons != 0 && reasons & !refusal::ALL == 0 && rest == Hit::MISS)
+            .then_some(reasons)
+    }
+
     /// Instance index, instance id, geometry index and primitive index: what
     /// names the triangle.
     pub fn ids(&self) -> [u32; 4] {
@@ -293,6 +343,35 @@ mod tests {
         assert_eq!(&b[28..32], &77u32.to_le_bytes());
         assert_eq!(Hit::from_bytes(&b), hit);
         assert_eq!(Hit::MISS.to_bytes(), [0u8; 32]);
+    }
+
+    #[test]
+    fn a_refusal_is_its_own_record() {
+        let r = Hit::refused(refusal::RANGE);
+        assert_eq!(r.to_words(), [0, 0, 0, 0x8000_0002, 0, 0, 0, 0]);
+        assert!(r.is_refused() && !r.is_miss());
+        assert_eq!(r.refusal_reasons(), Some(refusal::RANGE));
+        assert_eq!(
+            Hit::refused(refusal::ALL).refusal_reasons(),
+            Some(refusal::GEOMETRY | refusal::RANGE)
+        );
+        // No reason, an unknown reason, a word that is not zero: refusals
+        // by their bit, and not well formed.
+        for bad in [
+            Hit::refused(0),
+            Hit::refused(4),
+            Hit {
+                primitive_index: 1,
+                ..Hit::refused(1)
+            },
+            Hit {
+                t: -0.0,
+                ..Hit::refused(1)
+            },
+        ] {
+            assert!(bad.is_refused() && bad.refusal_reasons().is_none());
+        }
+        assert!(!Hit::MISS.is_refused() && Hit::MISS.refusal_reasons().is_none());
     }
 
     #[test]

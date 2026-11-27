@@ -27,10 +27,41 @@ pub enum Class {
     HitOrdering,
     Precision,
     MasksAndFlags,
+    Single,
+    Closed,
+    Far,
+    Seam,
+    SurfaceRays,
+    Scale,
+    SeamEdge,
+    Edge,
+    Thin,
+    LargeThin,
+    CullEdge,
+    Extent,
+    Tie,
+    FarGraze,
+    Flat,
+    Degenerate,
+    ClosedEdge,
+}
+
+/// What a class is to the proposed rule (docs/dxr-validation.md,
+/// "Scenes").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassKind {
+    /// Rays that are not aimed at a difference: the bound on ambiguous
+    /// rays applies, and the tolerance constant is measured over these.
+    Random,
+    /// Rays aimed at edges, seams, ties, slivers, boundaries: judged by
+    /// admissibility, and never a validation alone.
+    Directed,
 }
 
 impl Class {
-    pub const ALL: [Class; 10] = [
+    /// The ten classes this crate had before the rule's were added, in
+    /// their order: the first ten of [`Class::ALL`].
+    pub const FIRST: [Class; 10] = [
         Class::StaticSoup,
         Class::DynamicRefit,
         Class::DynamicRebuild,
@@ -42,6 +73,55 @@ impl Class {
         Class::Precision,
         Class::MasksAndFlags,
     ];
+
+    pub const ALL: [Class; 27] = [
+        Class::StaticSoup,
+        Class::DynamicRefit,
+        Class::DynamicRebuild,
+        Class::Instancing,
+        Class::AlphaTested,
+        Class::Overlapping,
+        Class::Transformed,
+        Class::HitOrdering,
+        Class::Precision,
+        Class::MasksAndFlags,
+        Class::Single,
+        Class::Closed,
+        Class::Far,
+        Class::Seam,
+        Class::SurfaceRays,
+        Class::Scale,
+        Class::SeamEdge,
+        Class::Edge,
+        Class::Thin,
+        Class::LargeThin,
+        Class::CullEdge,
+        Class::Extent,
+        Class::Tie,
+        Class::FarGraze,
+        Class::Flat,
+        Class::Degenerate,
+        Class::ClosedEdge,
+    ];
+
+    pub fn kind(self) -> ClassKind {
+        match self {
+            Class::Overlapping
+            | Class::Precision
+            | Class::SeamEdge
+            | Class::Edge
+            | Class::Thin
+            | Class::LargeThin
+            | Class::CullEdge
+            | Class::Extent
+            | Class::Tie
+            | Class::FarGraze
+            | Class::Flat
+            | Class::Degenerate
+            | Class::ClosedEdge => ClassKind::Directed,
+            _ => ClassKind::Random,
+        }
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -55,6 +135,23 @@ impl Class {
             Class::HitOrdering => "hit-ordering",
             Class::Precision => "precision",
             Class::MasksAndFlags => "masks-and-flags",
+            Class::Single => "single",
+            Class::Closed => "closed",
+            Class::Far => "far",
+            Class::Seam => "seam",
+            Class::SurfaceRays => "surface-rays",
+            Class::Scale => "scale",
+            Class::SeamEdge => "seam-edge",
+            Class::Edge => "edge",
+            Class::Thin => "thin",
+            Class::LargeThin => "large-thin",
+            Class::CullEdge => "cull-edge",
+            Class::Extent => "extent",
+            Class::Tie => "tie",
+            Class::FarGraze => "far-graze",
+            Class::Flat => "flat",
+            Class::Degenerate => "degenerate",
+            Class::ClosedEdge => "closed-edge",
         }
     }
 
@@ -93,6 +190,55 @@ impl Class {
                 "rays exactly through edges and vertices of closed meshes, grazing rays, slivers, triangles of no area, coordinates near 2^20, tmin and tmax exactly on a hit"
             }
             Class::MasksAndFlags => "instance masks and flags against ray masks and every ray flag",
+            Class::Single => "one triangle",
+            Class::Closed => {
+                "closed meshes of several surfaces, moved and scaled; random rays from outside, and from inside, where none may escape"
+            }
+            Class::Far => {
+                "triangles with edges of 2^-4 to 2^4 units at 2^12, 2^14 and 2^16 from the origin, in the vertices and by an instance"
+            }
+            Class::Seam => {
+                "closed surfaces split across bottom levels under one transform, across instances with different transforms, across a geometry transform, and across geometries; random rays"
+            }
+            Class::SurfaceRays => {
+                "rays that leave a surface and rays whose extent ends on one, with biases of 0, 1, 16 and 256 units of 8 spacings"
+            }
+            Class::Scale => {
+                "2,048 triangles; incoherent rays and a coherent bundle from one origin"
+            }
+            Class::SeamEdge => {
+                "the seam class's scene; rays exactly on the seams and 1, 2 and 8 spacings either side"
+            }
+            Class::Edge => {
+                "two triangles sharing an edge, a fan, a closed mesh; rays exactly on edges and vertices and 1, 2 and 8 spacings either side"
+            }
+            Class::Thin => {
+                "slivers and needles to an aspect of 2^20; rays through their inside, edges and vertices"
+            }
+            Class::LargeThin => {
+                "triangles a few spacings across at 2^16, 2^20 and 2^24 from the origin"
+            }
+            Class::CullEdge => {
+                "an edge shared by a front and a back face, under each facing cull and none"
+            }
+            Class::Extent => {
+                "hits at exactly t = 0, exactly at tmin and tmax and one spacing either side; tmax infinite and the largest float; tmin of negative zero"
+            }
+            Class::Tie => {
+                "coplanar duplicates of one surface and of two; parallel layers 1, 2, 4 and 8 spacings apart"
+            }
+            Class::FarGraze => {
+                "the edge class's shapes at 2^18 from the origin, met at grazing angles"
+            }
+            Class::Flat => {
+                "triangles in axis planes; rays along an axis through grid lines and vertices, and rays lying in a face's plane"
+            }
+            Class::Degenerate => {
+                "triangles of no area (collinear, two vertices equal, a point), plain, under a turned geometry transform and in a turned instance"
+            }
+            Class::ClosedEdge => {
+                "the closed class's meshes; rays from inside one whose origins and directions are on a coarse lattice, so that many go exactly through an edge or a vertex of its faces"
+            }
         }
     }
 }
@@ -487,6 +633,23 @@ pub fn generate(class: Class, seed: u64) -> Case {
         Class::HitOrdering => hit_ordering(&mut g),
         Class::Precision => precision(&mut g),
         Class::MasksAndFlags => masks_and_flags(&mut g),
+        Class::Single => single(&mut g),
+        Class::Closed => closed(&mut g),
+        Class::Far => far(&mut g),
+        Class::Seam => seam(&mut g),
+        Class::SurfaceRays => surface_rays(&mut g),
+        Class::Scale => scale(&mut g),
+        Class::SeamEdge => seam_edge(&mut g),
+        Class::Edge => edge(&mut g, [2.0, 3.0, 1.0], false),
+        Class::Thin => thin(&mut g),
+        Class::LargeThin => large_thin(&mut g),
+        Class::CullEdge => cull_edge(&mut g),
+        Class::Extent => extent_class(&mut g),
+        Class::Tie => tie(&mut g),
+        Class::FarGraze => edge(&mut g, [262_144.0, -131_072.0, 65_536.0], true),
+        Class::Flat => flat(&mut g),
+        Class::Degenerate => degenerate(&mut g),
+        Class::ClosedEdge => closed_edge(&mut g),
     };
     let case = Case {
         class,
@@ -1268,6 +1431,867 @@ fn masks_and_flags(g: &mut Gen) -> Parts {
     (scene, Vec::new(), rays)
 }
 
+// ---- the classes of the proposed rule (docs/dxr-validation.md, "Scenes") ----
+
+/// `x` moved `k` representable numbers up, or down for a negative `k`: `k`
+/// spacings.
+fn stepped(mut x: f32, k: i32) -> f32 {
+    for _ in 0..k.abs() {
+        x = if k > 0 { x.next_up() } else { x.next_down() };
+    }
+    x
+}
+
+fn largest(p: P) -> f32 {
+    p[0].abs().max(p[1].abs()).max(p[2].abs())
+}
+
+fn cross(a: P, b: P) -> P {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn one_instance(geometries: Vec<Geometry>, id: u32) -> Scene {
+    top(
+        vec![instance(Transform::IDENTITY, id, 0)],
+        vec![bottom(geometries, false, Preference::FastTrace)],
+        false,
+    )
+}
+
+/// The offsets, in spacings, of the directed classes' rays from the edge
+/// they are aimed at.
+const SPACINGS: [i32; 7] = [0, 1, -1, 2, -2, 8, -8];
+
+/// The rays of the single class: twice the 1,024 the rule's bound counts
+/// in, so that the few with a sliver or grazing pair, which are taken out
+/// first, do not leave fewer than the bound can be counted on.
+const SINGLE_RAYS: usize = 2048;
+
+fn single(g: &mut Gen) -> Parts {
+    let scene = one_instance(vec![soup_geometry(g.soup(1, 16, 24, 3), true)], 1);
+    let rays = g.rays(&world_triangles(&scene), SINGLE_RAYS, 6);
+    (scene, Vec::new(), rays)
+}
+
+/// The six faces of a cube, each a geometry of its own: six surfaces around
+/// one closed mesh.
+fn cube_faces(n: u32, half: f32, center: P) -> Vec<Geometry> {
+    let mut out = Vec::new();
+    for k in 0..3 {
+        for sign in [1.0, -1.0] {
+            let (origin, du, dv, _) = face(k, sign, half, n, center);
+            out.push(Mesh::grid(n, n, origin, du, dv).geometry(Idx::U16, None, true));
+        }
+    }
+    out
+}
+
+/// Where the closed class's meshes are, each with its scale and bottom
+/// level; ray `700 + n` of the closed class and ray `n` of the closed-edge
+/// class start inside mesh `n % 4`.
+const CLOSED: [(P, f32, u32); 4] = [
+    ([-6.0, 0.0, 0.0], 1.0, 0),
+    ([7.0, 1.0, 0.0], 2.0, 0),
+    ([0.0, 9.0, 1.0], 1.0, 1),
+    ([0.0, -9.0, 2.0], 0.5, 1),
+];
+
+/// The rays of the closed class that start outside its meshes; the rest
+/// start inside one.
+pub const CLOSED_OUTSIDE: usize = 700;
+
+/// The rays that start inside a mesh, in the closed class after those from
+/// outside and in the closed-edge class alone.
+const CLOSED_INSIDE: usize = 700;
+
+/// Two cubes of six surfaces each and two octahedra, moved and scaled.
+fn closed_scene() -> Scene {
+    let boxes = bottom(cube_faces(3, 2.0, [0.0; 3]), false, Preference::FastTrace);
+    let ball = bottom(
+        vec![Mesh::octahedron(3.0).geometry(Idx::U16, None, true)],
+        false,
+        Preference::FastTrace,
+    );
+    let instances = CLOSED
+        .iter()
+        .enumerate()
+        .map(|(i, &(at, s, blas))| {
+            instance(
+                Transform::translation(at).after(&Transform::scale([s; 3])),
+                1 + i as u32,
+                blas,
+            )
+        })
+        .collect();
+    top(instances, vec![boxes, ball], false)
+}
+
+fn closed(g: &mut Gen) -> Parts {
+    let scene = closed_scene();
+    let mut rays = g.rays(&world_triangles(&scene), CLOSED_OUTSIDE, 7);
+    // From inside a mesh, any way: none may leave it unseen. Random as the
+    // rays from outside are: an origin within half a unit of the mesh's
+    // middle (times its scale) and a direction, each coordinate of 24
+    // random bits, so that no ray is aimed at an edge. The rays that are
+    // are the closed-edge class's.
+    for n in 0..CLOSED_INSIDE {
+        let (at, s, _) = CLOSED[n % 4];
+        let origin = add(at, mul(std::array::from_fn(|_| g.r.unit() - 0.5), s));
+        let mut dir: P = std::array::from_fn(|_| 2.0 * g.r.unit() - 1.0);
+        if dir == [0.0; 3] {
+            dir = [0.0, 0.0, 1.0];
+        }
+        rays.push(Ray::new(origin, dir, 0.0, 1000.0));
+    }
+    (scene, Vec::new(), rays)
+}
+
+/// The closed class's meshes, and rays from inside them on a lattice:
+/// origins on multiples of 1/8 (times the mesh's scale) within half a unit
+/// of its middle, directions on multiples of 1/4 up to 4. Many go exactly
+/// through an edge between two faces or through a vertex; a random class
+/// has no such rays, and these were the closed class's own until its
+/// count of ambiguous rays was seen to be theirs.
+fn closed_edge(g: &mut Gen) -> Parts {
+    let mut rays = Vec::new();
+    for n in 0..CLOSED_INSIDE {
+        let (at, s, _) = CLOSED[n % 4];
+        let origin = add(at, mul(g.point(4, 3), s));
+        let mut dir = g.point(16, 2);
+        if dir == [0.0; 3] {
+            dir = [0.0, 0.0, 1.0];
+        }
+        rays.push(Ray::new(origin, dir, 0.0, 1000.0));
+    }
+    (closed_scene(), Vec::new(), rays)
+}
+
+/// `count` triangles within 8 units of `center`, with edges whose largest
+/// component is 2^-4 to 2^4 units; every coordinate a multiple of 2^-7,
+/// which `f32` holds up to 2^17.
+fn far_soup(g: &mut Gen, center: P, count: usize) -> Vec<P> {
+    let mut out = Vec::new();
+    while out.len() < 3 * count {
+        let a = add(center, g.point(64, 3));
+        let mut t = [a; 3];
+        for v in t.iter_mut().skip(1) {
+            let size = (1u32 << g.r.range(0, 8)) as f32 / 16.0;
+            let mut e = g.point(8, 3);
+            let k = g.r.below(3) as usize;
+            e[k] = if g.r.chance(1, 2) { 1.0 } else { -1.0 };
+            *v = add(a, mul(e, size));
+        }
+        if !area_is_zero(&t) {
+            out.extend(t);
+        }
+    }
+    out
+}
+
+/// The far class's triangles a cluster, and its rays a cluster.
+const FAR_TRIANGLES: usize = 40;
+const FAR_RAYS: usize = 300;
+
+fn far(g: &mut Gen) -> Parts {
+    let clusters: [P; 4] = [
+        [4096.0, 0.0, 0.0],
+        [0.0, 16_384.0, 0.0],
+        [0.0, 0.0, 65_536.0],
+        [65_536.0, -65_536.0, 65_536.0],
+    ];
+    let geometries = clusters
+        .iter()
+        .map(|c| soup_geometry(far_soup(g, *c, FAR_TRIANGLES), true))
+        .collect();
+    // And a cluster about its own origin that an instance carries far.
+    let carried = soup_geometry(far_soup(g, [0.0; 3], FAR_TRIANGLES), true);
+    let scene = top(
+        vec![
+            instance(Transform::IDENTITY, 1, 0),
+            instance(Transform::translation([-16_384.0, 0.0, 0.0]), 2, 1),
+        ],
+        vec![
+            bottom(geometries, false, Preference::FastTrace),
+            bottom(vec![carried], false, Preference::FastTrace),
+        ],
+        false,
+    );
+    let mut rays = Vec::new();
+    for cluster in world_triangles(&scene).chunks(FAR_TRIANGLES) {
+        rays.extend(g.rays(cluster, FAR_RAYS, 7));
+    }
+    (scene, Vec::new(), rays)
+}
+
+/// One half of the cube of half-width 2 about the origin, two cells a face,
+/// cut by the plane x = 0: the triangles on the side of `sign`, moved by
+/// `shift` in their vertices. There is no wall at the cut.
+fn half_cube(sign: f32, shift: P) -> Mesh {
+    let cube = Mesh::cube(2, 2.0, [0.0; 3]);
+    let mut mesh = Mesh {
+        vertices: cube.vertices.iter().map(|v| add(*v, shift)).collect(),
+        indices: Vec::new(),
+    };
+    for t in cube.indices.chunks(3) {
+        if t.iter()
+            .all(|&i| cube.vertices[i as usize][0] * sign >= 0.0)
+        {
+            mesh.indices.extend(t);
+        }
+    }
+    mesh
+}
+
+/// The seam classes' scene: six cubes, each cut in two at its plane x = 0
+/// and put together again in another way, and for each the transform that
+/// carries the cube's own coordinates to the world. In order:
+///
+/// 0. two bottom levels under one transform (a translation);
+/// 1. two bottom levels under one transform (a rotation and a translation);
+/// 2. one bottom level twice, plain and mirrored: different transforms;
+/// 3. two bottom levels, one with its vertices 16 to the side and its
+///    instance 16 back: different transforms;
+/// 4. one bottom level, the second half 16 to the side in its vertices and
+///    back by a geometry transform;
+/// 5. one bottom level, the halves two geometries with no transform: no
+///    seam, the edge D3D12 promises closed, between two surfaces.
+///
+/// The halves of a cube have one instance id; in 0 to 3 they are one
+/// surface, in 4 and 5 two (two geometries).
+fn seam_scene() -> (Scene, [Transform; 6]) {
+    let geo = |m: &Mesh| m.geometry(Idx::None, None, true);
+    let (left, right) = (half_cube(-1.0, [0.0; 3]), half_cube(1.0, [0.0; 3]));
+    let aside = half_cube(-1.0, [16.0, 0.0, 0.0]);
+    let back = Transform::translation([-16.0, 0.0, 0.0]);
+    let one = |geometries| bottom(geometries, false, Preference::FastTrace);
+    let bottoms = vec![
+        one(vec![geo(&left)]),
+        one(vec![geo(&right)]),
+        one(vec![geo(&aside)]),
+        one(vec![geo(&right), geo(&aside).with(back)]),
+        one(vec![geo(&left), geo(&right)]),
+    ];
+    let at = |v: usize| {
+        Transform::translation([
+            [-24.0, -8.0, 8.0][v % 3],
+            if v < 3 { -8.0 } else { 8.0 },
+            4.0,
+        ])
+    };
+    let turned = at(1).after(&Transform::rotation(2, 0.5));
+    let mirrored = at(2).after(&Transform::scale([-1.0, 1.0, 1.0]));
+    let instances = vec![
+        instance(at(0), 10, 0),
+        instance(at(0), 10, 1),
+        instance(turned, 11, 0),
+        instance(turned, 11, 1),
+        instance(at(2), 12, 1),
+        instance(mirrored, 12, 1),
+        instance(at(3), 13, 1),
+        instance(at(3).after(&back), 13, 2),
+        instance(at(4), 14, 3),
+        instance(at(5), 15, 4),
+    ];
+    (
+        top(instances, bottoms, false),
+        [at(0), turned, at(2), at(3), at(4), at(5)],
+    )
+}
+
+fn seam(g: &mut Gen) -> Parts {
+    let (scene, _) = seam_scene();
+    let rays = g.rays(&world_triangles(&scene), 1536, 7);
+    (scene, Vec::new(), rays)
+}
+
+fn seam_edge(g: &mut Gen) -> Parts {
+    let (scene, frames) = seam_scene();
+    let mut rays = Vec::new();
+    for frame in &frames {
+        // The seam crosses the four faces that are not cut off: across y
+        // and across z, each way.
+        for (m, sign) in [(1usize, 1.0f32), (1, -1.0), (2, 1.0), (2, -1.0)] {
+            let q = 3 - m;
+            for k in SPACINGS {
+                for _ in 0..6 {
+                    // A point of the seam in the cube's own coordinates, one
+                    // time in six the vertex in the middle of the face; and
+                    // an origin off the face, slanted along the seam only.
+                    let mut p = [0.0; 3];
+                    p[m] = 2.0 * sign;
+                    p[q] = if g.r.chance(1, 6) {
+                        0.0
+                    } else {
+                        g.r.dyadic(-15, 15, 3)
+                    };
+                    let mut o = p;
+                    o[m] += sign * *g.r.pick(&[3.0, 4.0, 8.0]);
+                    o[q] += g.r.dyadic(-16, 16, 2);
+                    let (mut target, mut origin) = (frame.apply(p), frame.apply(o));
+                    // `k` spacings off the seam, the ray kept parallel.
+                    let moved = stepped(target[0], k);
+                    origin[0] += moved - target[0];
+                    target[0] = moved;
+                    rays.push(Ray::new(origin, sub(target, origin), 0.0, 1000.0));
+                }
+            }
+        }
+    }
+    (scene, Vec::new(), rays)
+}
+
+/// The unit of the surface-rays class's biases, as a share of the largest
+/// coordinate at the surface point: 8 spacings of `f32`. The proposed rule
+/// asks for biases in tolerances. The generator cannot take the rule's
+/// constant, which is measured on this class among others; the unit is
+/// fixed here at what that measurement gives, and a host test fails when
+/// the two part (`tests/rule.rs`).
+pub const BIAS_UNIT: f32 = 8.0 / 8_388_608.0;
+/// The biases, in units. Ray `n` has bias `BIASES[n % 4]`, and leaves a
+/// surface when `n / 4` is even and ends on one when it is odd.
+pub const BIASES: [f32; 4] = [0.0, 1.0, 16.0, 256.0];
+
+fn surface_rays(g: &mut Gen) -> Parts {
+    let ground = Mesh::grid(8, 8, [-8.0, -8.0, -9.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]);
+    let scene = one_instance(
+        vec![
+            soup_geometry(g.soup(96, 64, 24, 3), true),
+            ground.geometry(Idx::U16, None, true),
+            Mesh::cube(2, 2.0, [3.0, -2.0, 5.0]).geometry(Idx::U16, None, true),
+        ],
+        7,
+    );
+    let tris = world_triangles(&scene);
+    let (center, half) = extent(&tris);
+    let mut rays = Vec::new();
+    for n in 0..1600 {
+        let t = *g.r.pick(&tris);
+        let p = g.inside(&t);
+        // The normal with its largest component made 1: the bias is along
+        // it, and between 1 and 3^(1/2) times its nominal length.
+        let normal = cross(sub(t[1], t[0]), sub(t[2], t[0]));
+        let normal = mul(normal, 1.0 / largest(normal));
+        let m = t.iter().fold(largest(p), |m, v| m.max(largest(*v)));
+        let bias = BIASES[n % 4] * BIAS_UNIT * m;
+        let side = if g.r.chance(1, 2) { 1.0 } else { -1.0 };
+        if n / 4 % 2 == 0 {
+            // Leaves the surface: from the point lifted by the bias, on
+            // the side it is lifted to.
+            let origin = add(p, mul(normal, side * bias));
+            let mut dir = g.point(16, 2);
+            let along = dir[0] * normal[0] + dir[1] * normal[1] + dir[2] * normal[2];
+            if along * side < 0.0 {
+                dir = mul(dir, -1.0);
+            } else if along == 0.0 {
+                dir = mul(normal, 4.0 * side);
+            }
+            rays.push(Ray::new(origin, dir, 0.0, 1000.0));
+        } else {
+            // Ends on the surface: toward the point from outside, the
+            // extent the bias short of it or past it.
+            let origin = g.shell(center, 1.25 * half, 3.0 * half);
+            let dir = sub(p, origin);
+            rays.push(Ray::new(origin, dir, 0.0, 1.0 + side * bias / largest(dir)));
+        }
+    }
+    (scene, Vec::new(), rays)
+}
+
+fn scale(g: &mut Gen) -> Parts {
+    let scene = one_instance(vec![soup_geometry(g.soup(2048, 256, 16, 3), true)], 1);
+    let tris = world_triangles(&scene);
+    let mut rays = g.rays(&tris, 768, 6);
+    // A coherent bundle: one origin, a grid of targets across the scene.
+    let (center, half) = extent(&tris);
+    let origin = add(center, [2.5 * half, -2.0 * half, 3.0 * half]);
+    for n in 0..768u32 {
+        let (i, j) = ((n % 32) as f32, (n / 32) as f32);
+        let target = add(
+            center,
+            [
+                0.0,
+                half * (i / 16.0 - 0.96875),
+                half * (j / 12.0 - 0.96875),
+            ],
+        );
+        rays.push(Ray::new(origin, sub(target, origin), 0.0, 1000.0));
+    }
+    (scene, Vec::new(), rays)
+}
+
+/// The edge classes: about `at`, in the plane of its z, a square of two
+/// triangles that share its diagonal and a fan of six about a hub; and an
+/// octahedron 20 to the side, carried there by its instance. Rays through
+/// points of every edge and through every vertex, exactly and 1, 2 and 8
+/// spacings off; `grazing` makes them shallow.
+fn edge(g: &mut Gen, at: P, grazing: bool) -> Parts {
+    let flat = |x: f32, y: f32| add(at, [x, y, 0.0]);
+    let square = Mesh::grid(1, 1, at, [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]);
+    let hub = flat(10.0, 2.0);
+    let rim = [
+        flat(13.0, 2.0),
+        flat(12.0, 4.0),
+        flat(8.0, 4.0),
+        flat(7.0, 2.0),
+        flat(8.0, 0.0),
+        flat(12.0, 0.0),
+    ];
+    let mut fan = Mesh {
+        vertices: vec![hub],
+        indices: Vec::new(),
+    };
+    fan.vertices.extend(rim);
+    for i in 0..6u32 {
+        fan.indices.extend([0, 1 + i, 1 + (i + 1) % 6]);
+    }
+    let ball_at = add(at, [20.0, 0.0, 0.0]);
+    let scene = top(
+        vec![
+            instance(Transform::IDENTITY, 1, 0),
+            instance(Transform::translation(ball_at), 2, 1),
+        ],
+        vec![
+            bottom(
+                vec![
+                    square.geometry(Idx::U16, None, true),
+                    fan.geometry(Idx::U16, None, true),
+                ],
+                false,
+                Preference::FastTrace,
+            ),
+            bottom(
+                vec![Mesh::octahedron(2.0).geometry(Idx::U16, None, true)],
+                false,
+                Preference::FastTrace,
+            ),
+        ],
+        false,
+    );
+    // The flat shapes' edges, and their vertices as edges of no length.
+    let (a, b, c, d) = (
+        flat(0.0, 0.0),
+        flat(4.0, 0.0),
+        flat(0.0, 4.0),
+        flat(4.0, 4.0),
+    );
+    let mut edges = vec![(b, c), (a, b), (a, c), (b, d), (c, d)];
+    edges.extend([a, b, c, d, hub].map(|v| (v, v)));
+    for i in 0..6 {
+        edges.extend([(hub, rim[i]), (rim[i], rim[(i + 1) % 6]), (rim[i], rim[i])]);
+    }
+    let mut rays = Vec::new();
+    for (from, to) in edges {
+        // The ray is moved off the edge across it: along y for an edge
+        // along x, along x otherwise.
+        let across = usize::from(from[1] == to[1] && from[0] != to[0]);
+        for k in SPACINGS {
+            for _ in 0..3 {
+                let f = if from == to { 0.0 } else { g.r.dyadic(1, 3, 2) };
+                let mut target = add(from, mul(sub(to, from), f));
+                let offset = if grazing {
+                    let run = *g.r.pick(&[4.0, 6.0, 8.0, -4.0, -6.0, -8.0]);
+                    let rise = *g.r.pick(&[0.5, 0.25, 0.125, 0.0625]);
+                    if g.r.chance(1, 2) {
+                        [run, 0.5, rise]
+                    } else {
+                        [0.5, run, -rise]
+                    }
+                } else {
+                    let rise = *g.r.pick(&[3.0, 4.0, 8.0, -3.0, -4.0, -8.0]);
+                    [g.r.dyadic(-16, 16, 2), g.r.dyadic(-16, 16, 2), rise]
+                };
+                let mut origin = add(target, offset);
+                let moved = stepped(target[across], k);
+                origin[across] += moved - target[across];
+                target[across] = moved;
+                rays.push(Ray::new(origin, sub(target, origin), 0.0, 1000.0));
+            }
+        }
+    }
+    // The octahedron: its twelve edges and six vertices, from outside.
+    let corner = |k: usize| axis(k / 2, if k.is_multiple_of(2) { 2.0 } else { -2.0 });
+    let mut features = Vec::new();
+    for i in 0..6 {
+        features.push((corner(i), corner(i)));
+        for j in i + 1..6 {
+            if i / 2 != j / 2 {
+                features.push((corner(i), corner(j)));
+            }
+        }
+    }
+    for (from, to) in features {
+        // The edge lies in a coordinate plane: off it along that plane's
+        // normal; a vertex along x.
+        let across = (0..3)
+            .find(|&k| from != to && from[k] == 0.0 && to[k] == 0.0)
+            .unwrap_or(0);
+        for k in SPACINGS {
+            for _ in 0..3 {
+                let f = if from == to { 0.0 } else { g.r.dyadic(1, 3, 2) };
+                let local = add(from, mul(sub(to, from), f));
+                let out = if grazing {
+                    add(mul(local, 0.125), mul(sub(to, from), g.r.dyadic(4, 12, 2)))
+                } else {
+                    add(
+                        mul(local, *g.r.pick(&[1.0, 2.0])),
+                        mul(sub(to, from), g.r.dyadic(-4, 4, 2)),
+                    )
+                };
+                let mut target = add(ball_at, local);
+                let mut origin = add(target, out);
+                let moved = stepped(target[across], k);
+                origin[across] += moved - target[across];
+                target[across] = moved;
+                rays.push(Ray::new(origin, sub(target, origin), 0.0, 1000.0));
+            }
+        }
+    }
+    (scene, Vec::new(), rays)
+}
+
+fn thin(g: &mut Gen) -> Parts {
+    // A base of 8 and a height from 1 down to 2^-17, each in its own
+    // plane: a sliver (two long edges that nearly meet) and a needle (one
+    // short edge).
+    let mut tris = Vec::new();
+    for k in 0..18 {
+        let (y, z) = (k as f32 - 9.0, 0.25 * k as f32);
+        let height = 1.0 / (1u32 << k) as f32;
+        tris.extend([[16.0, y, z], [24.0, y, z], [20.0, y + height, z]]);
+        tris.extend([[28.0, y, z], [36.0, y, z], [36.0, y + height, z]]);
+    }
+    let scene = one_instance(vec![soup_geometry(tris.clone(), true)], 1);
+    let mut rays = Vec::new();
+    for n in 0..720 {
+        let k = g.r.below(36) as usize;
+        let t = [tris[3 * k], tris[3 * k + 1], tris[3 * k + 2]];
+        let target = match n % 3 {
+            // Exactly on the long edge, exactly through a vertex, inside.
+            0 => add(t[0], [g.r.dyadic(1, 31, 2), 0.0, 0.0]),
+            1 => *g.r.pick(&t),
+            _ => g.inside(&t),
+        };
+        let origin = add(
+            target,
+            [
+                g.r.dyadic(-8, 8, 2),
+                g.r.dyadic(-8, 8, 2),
+                if g.r.chance(1, 2) { 4.0 } else { -4.0 },
+            ],
+        );
+        rays.push(Ray::new(origin, sub(target, origin), 0.0, 1000.0));
+    }
+    (scene, Vec::new(), rays)
+}
+
+fn large_thin(g: &mut Gen) -> Parts {
+    // Each cluster's centre and the spacing of `f32` there: every
+    // coordinate is a whole number of spacings.
+    let clusters: [(P, f32); 3] = [
+        ([65_536.0, 0.0, 0.0], 1.0 / 128.0),
+        ([0.0, 1_048_576.0, 0.0], 0.125),
+        ([0.0, 0.0, 16_777_216.0], 2.0),
+    ];
+    let mut geometries = Vec::new();
+    let mut all = Vec::new();
+    for (center, sp) in clusters {
+        let mut tris = Vec::new();
+        while tris.len() < 3 * 32 {
+            let a = add(center, mul(g.point(256, 0), sp));
+            let t = [
+                a,
+                add(a, mul(g.point(16, 0), sp)),
+                add(a, mul(g.point(16, 0), sp)),
+            ];
+            if !area_is_zero(&t) {
+                tris.extend(t);
+            }
+        }
+        all.push((tris.clone(), sp));
+        geometries.push(soup_geometry(tris, true));
+    }
+    let scene = one_instance(geometries, 1);
+    let mut rays = Vec::new();
+    for (tris, sp) in all {
+        for _ in 0..240 {
+            let k = g.r.below(32) as usize;
+            let target = g.inside(&[tris[3 * k], tris[3 * k + 1], tris[3 * k + 2]]);
+            let rise = g.r.range(64, 256) as f32 * if g.r.chance(1, 2) { 1.0 } else { -1.0 };
+            let off = [g.r.dyadic(-64, 64, 0), g.r.dyadic(-64, 64, 0), rise];
+            let origin = add(target, mul(off, sp));
+            rays.push(Ray::new(origin, sub(target, origin), 0.0, 1000.0));
+        }
+    }
+    (scene, Vec::new(), rays)
+}
+
+fn cull_edge(g: &mut Gen) -> Parts {
+    // A square whose two triangles are wound against each other: from
+    // either side one is a front face and the other a back face.
+    let at = [2.0, 3.0, 1.0];
+    let mut square = Mesh::grid(1, 1, at, [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]);
+    square.indices.swap(4, 5);
+    let scene = one_instance(vec![square.geometry(Idx::U16, None, true)], 1);
+    let culls = [
+        0,
+        ray_flag::CULL_BACK_FACING_TRIANGLES,
+        ray_flag::CULL_FRONT_FACING_TRIANGLES,
+    ];
+    let from = |g: &mut Gen, target: P, up: f32| {
+        let rise = up * *g.r.pick(&[3.0, 4.0, 8.0]);
+        add(target, [g.r.dyadic(-8, 8, 2), g.r.dyadic(-8, 8, 2), rise])
+    };
+    let mut rays = Vec::new();
+    for flags in culls {
+        for up in [1.0, -1.0] {
+            for k in SPACINGS {
+                for _ in 0..6 {
+                    // On the diagonal the two share, and off it.
+                    let f = g.r.dyadic(1, 7, 3);
+                    let mut target = add(at, [4.0 - 4.0 * f, 4.0 * f, 0.0]);
+                    let mut origin = from(g, target, up);
+                    let moved = stepped(target[0], k);
+                    origin[0] += moved - target[0];
+                    target[0] = moved;
+                    let mut ray = Ray::new(origin, sub(target, origin), 0.0, 1000.0);
+                    ray.flags = flags;
+                    rays.push(ray);
+                }
+            }
+        }
+    }
+    let tris = world_triangles(&scene);
+    for n in 0..300 {
+        let t = *g.r.pick(&tris);
+        let target = g.inside(&t);
+        let origin = from(g, target, if n % 2 == 0 { 1.0 } else { -1.0 });
+        let mut ray = Ray::new(origin, sub(target, origin), 0.0, 1000.0);
+        ray.flags = culls[n % 3];
+        rays.push(ray);
+    }
+    (scene, Vec::new(), rays)
+}
+
+fn extent_class(g: &mut Gen) -> Parts {
+    let near = Mesh::grid(2, 2, [-4.0, -4.0, 2.0], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]);
+    let behind = Mesh::grid(1, 1, [-6.0, -6.0, 6.0], [12.0, 0.0, 0.0], [0.0, 12.0, 0.0]);
+    let scene = one_instance(
+        vec![
+            near.geometry(Idx::U16, None, true),
+            behind.geometry(Idx::None, None, true),
+        ],
+        1,
+    );
+    let mut rays = Vec::new();
+    for n in 0..600 {
+        // A point well inside a triangle of the near square, met at
+        // t = 1/k exactly: every number a small multiple of a power of two.
+        let (fx, fy) = *g.r.pick(&[(0.25, 0.25), (0.75, 0.5), (0.5, 0.75)]);
+        let cell = [g.r.range(0, 1) as f32, g.r.range(0, 1) as f32];
+        let target = [
+            -4.0 + 4.0 * (cell[0] + fx),
+            -4.0 + 4.0 * (cell[1] + fy),
+            2.0,
+        ];
+        // From the near square's side: the other is behind it.
+        let rise = -*g.r.pick(&[3.0, 4.0, 8.0]);
+        let mut origin = add(target, [g.r.dyadic(-8, 8, 2), g.r.dyadic(-8, 8, 2), rise]);
+        let k = *g.r.pick(&[1.0, 2.0, 0.5]);
+        let dir = mul(sub(target, origin), k);
+        let t: f32 = 1.0 / k;
+        let (mut tmin, mut tmax) = (0.0, 1000.0);
+        match n % 10 {
+            0 => tmax = t,
+            1 => tmax = t.next_up(),
+            2 => tmax = t.next_down(),
+            3 => tmin = t,
+            4 => tmin = t.next_down(),
+            5 => tmin = t.next_up(),
+            // From the surface itself: a hit at exactly t = 0.
+            6 => origin = target,
+            7 => (origin, tmin) = (target, -0.0),
+            8 => tmax = f32::INFINITY,
+            _ => tmax = f32::MAX,
+        }
+        rays.push(Ray::new(origin, dir, tmin, tmax));
+    }
+    (scene, Vec::new(), rays)
+}
+
+fn tie(g: &mut Gen) -> Parts {
+    // The same triangles twice in one geometry (one surface), and once in
+    // each of two geometries (two surfaces).
+    let twice: Vec<P> = g
+        .soup(8, 24, 16, 2)
+        .chunks(3)
+        .flat_map(|t| [t, t].concat())
+        .collect();
+    let shared = g.soup(8, 24, 16, 2);
+    // Squares in parallel planes 1, 2, 4 and 8 spacings apart: both of one
+    // geometry, and one of each of two.
+    let empty = || Mesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+    };
+    let (mut both, mut lower, mut upper) = (empty(), empty(), empty());
+    for (n, k) in [1, 2, 4, 8].into_iter().enumerate() {
+        let x = 16.0 + 6.0 * n as f32;
+        let layer = |y: f32, z: f32| Mesh::grid(1, 1, [x, y, z], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0]);
+        both.append(&layer(-10.0, 3.0));
+        both.append(&layer(-10.0, stepped(3.0, k)));
+        lower.append(&layer(2.0, 3.0));
+        upper.append(&layer(2.0, stepped(3.0, k)));
+    }
+    let scene = one_instance(
+        vec![
+            soup_geometry(twice, true),
+            soup_geometry(shared.clone(), true),
+            soup_geometry(shared, true),
+            both.geometry(Idx::U16, None, true),
+            lower.geometry(Idx::U16, None, true),
+            upper.geometry(Idx::U16, None, true),
+        ],
+        1,
+    );
+    let rays = g.rays(&world_triangles(&scene), 800, 7);
+    (scene, Vec::new(), rays)
+}
+
+fn flat(g: &mut Gen) -> Parts {
+    let center = [3.0, -5.0, 2.0];
+    let ground = Mesh::grid(4, 4, [-8.0, -16.0, -4.0], [6.0, 0.0, 0.0], [0.0, 6.0, 0.0]);
+    let scene = one_instance(
+        vec![
+            Mesh::cube(2, 2.0, center).geometry(Idx::U16, None, true),
+            ground.geometry(Idx::U16, None, true),
+        ],
+        1,
+    );
+    let mut rays = Vec::new();
+    // Along an axis, at a face, through a point on its quarter-cell grid:
+    // on a line of the mesh one time in four either way.
+    for _ in 0..500 {
+        let k = g.r.below(3) as usize;
+        let sign = if g.r.chance(1, 2) { 1.0 } else { -1.0 };
+        let mut origin = center;
+        origin[(k + 1) % 3] += g.r.dyadic(-4, 4, 1);
+        origin[(k + 2) % 3] += g.r.dyadic(-4, 4, 1);
+        origin[k] += sign * g.r.range(3, 9) as f32;
+        rays.push(Ray::new(origin, axis(k, -sign), 0.0, 1000.0));
+    }
+    // In a face's own plane, from outside the cube toward it.
+    for _ in 0..300 {
+        let k = g.r.below(3) as usize;
+        let (b, c) = ((k + 1) % 3, (k + 2) % 3);
+        let side = if g.r.chance(1, 2) { 1.0 } else { -1.0 };
+        let mut origin = center;
+        origin[k] += if g.r.chance(1, 2) { 2.0 } else { -2.0 };
+        origin[b] += side * g.r.range(3, 6) as f32;
+        origin[c] += g.r.dyadic(-8, 8, 2);
+        let mut dir = [0.0; 3];
+        dir[b] = -side * g.r.range(1, 4) as f32;
+        dir[c] = g.r.dyadic(-4, 4, 2);
+        rays.push(Ray::new(origin, dir, 0.0, 1000.0));
+    }
+    (scene, Vec::new(), rays)
+}
+
+fn degenerate(g: &mut Gen) -> Parts {
+    // No area: three points on a line, two the same, all the same.
+    let mut lines = Vec::new();
+    let mut none = Vec::new();
+    for k in 0..4 {
+        let a = [2.0 + 3.0 * k as f32, 1.0, 4.0];
+        lines.push(a);
+        none.extend([a, add(a, [1.0, 0.5, 0.25]), add(a, [2.0, 1.0, 0.5])]);
+        none.extend([a, a, add(a, [0.0, -1.0, 0.5])]);
+        none.extend([a, a, a]);
+    }
+    // The same under a geometry transform that is not a power of two: what
+    // a build makes of them need not be on a line any more.
+    let turned = Transform::translation([0.0, 9.0, 0.0]).after(&Transform::rotation(2, 0.375));
+    let backdrop = Mesh::grid(
+        2,
+        2,
+        [-24.0, -24.0, 8.0],
+        [24.0, 0.0, 0.0],
+        [0.0, 24.0, 0.0],
+    );
+    let tilted = Transform::translation([0.0, -30.0, 0.0]).after(&Transform::rotation(0, 0.25));
+    let scene = top(
+        vec![instance(Transform::IDENTITY, 1, 0), instance(tilted, 2, 0)],
+        vec![bottom(
+            vec![
+                soup_geometry(none.clone(), true),
+                soup_geometry(none, true).with(turned),
+                backdrop.geometry(Idx::U16, None, true),
+                soup_geometry(g.soup(12, 64, 24, 3), true),
+            ],
+            false,
+            Preference::FastTrace,
+        )],
+        false,
+    );
+    let mut rays = Vec::new();
+    for n in 0..520 {
+        // A point of a line, or a quarter beside it; through the geometry
+        // transform one time in two, the instance's one time in two.
+        let a = *g.r.pick(&lines);
+        let mut p = add(a, mul([1.0, 0.5, 0.25], g.r.dyadic(0, 16, 3)));
+        if n % 2 == 1 {
+            p[1] += 0.25;
+        }
+        if n / 2 % 2 == 1 {
+            p = turned.apply(p);
+        }
+        let mut o = add(p, [g.r.dyadic(-8, 8, 2), g.r.dyadic(-8, 8, 2), -4.0]);
+        if n / 4 % 2 == 1 {
+            (p, o) = (tilted.apply(p), tilted.apply(o));
+        }
+        rays.push(Ray::new(o, sub(p, o), 0.0, 1000.0));
+    }
+    (scene, Vec::new(), rays)
+}
+
+/// Rays D3D12 forbids or leaves undefined, each one change away from a
+/// legal ray, with what is wrong: for a screen in front of a device. No
+/// class holds one and nothing here traces one: [`Ray::validate`] refuses
+/// each (a test), and so must whatever hands rays to a device.
+pub fn illegal_rays() -> Vec<(Ray, &'static str)> {
+    let ok = Ray::new([1.0, 2.0, 3.0], [0.0, 0.5, 1.0], 0.0, 100.0);
+    let with = |f: &dyn Fn(&mut Ray)| {
+        let mut r = ok;
+        f(&mut r);
+        r
+    };
+    vec![
+        (with(&|r| r.tmax = f32::NAN), "a NaN extent"),
+        (with(&|r| r.tmin = f32::NAN), "a NaN start of the extent"),
+        (with(&|r| r.origin[1] = f32::NAN), "a NaN origin"),
+        (with(&|r| r.dir[2] = f32::NAN), "a NaN direction"),
+        (with(&|r| r.dir = [0.0; 3]), "a direction of no length"),
+        (with(&|r| r.dir = [-0.0; 3]), "a direction of no length"),
+        (with(&|r| r.dir[0] = f32::INFINITY), "an infinite direction"),
+        (
+            with(&|r| r.origin[2] = f32::NEG_INFINITY),
+            "an infinite origin",
+        ),
+        (with(&|r| r.tmin = -1.0), "a negative extent"),
+        (
+            with(&|r| (r.tmin, r.tmax) = (2.0, 1.0)),
+            "an extent that ends before it starts",
+        ),
+        (
+            with(&|r| r.tmin = f32::INFINITY),
+            "an extent that starts at infinity",
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1290,7 +2314,14 @@ mod tests {
             for ray in &a.rays {
                 ray.validate().unwrap();
             }
-            assert!(a.rays.len() >= 1000, "{}", class.name());
+            // A random class has the rays the rule's bound is counted on,
+            // and as many as the ten first classes always had; a directed
+            // class has those its aim gives.
+            let least = match class.kind() {
+                ClassKind::Random => 1024,
+                ClassKind::Directed => 500,
+            };
+            assert!(a.rays.len() >= least, "{}", class.name());
             assert_eq!(a.scenes().len(), a.frame_count());
             // Word for word, not just equal as floats.
             let b = generate(class, DEFAULT_SEED);
@@ -1316,8 +2347,14 @@ mod tests {
             .iter()
             .map(|c| (c.name(), generate(*c, DEFAULT_SEED).fingerprint()))
             .collect();
-        let pinned: [(&str, u64); 10] = PINNED;
-        assert_eq!(got, pinned);
+        let text: Vec<String> = got
+            .iter()
+            .map(|(name, f)| format!("(\"{name}\", {f:#018X}),"))
+            .collect();
+        assert_eq!(got, PINNED, "generated here:\n{}", text.join("\n"));
+        // The first ten are the ten the crate had: adding classes moved
+        // none of them.
+        assert_eq!(Class::ALL[..10], Class::FIRST);
         // Another seed, another fingerprint; one changed bit of one ray, too.
         let mut case = generate(Class::StaticSoup, DEFAULT_SEED);
         assert_ne!(
@@ -1328,7 +2365,7 @@ mod tests {
         assert_ne!(case.fingerprint(), PINNED[0].1);
     }
 
-    const PINNED: [(&str, u64); 10] = [
+    const PINNED: [(&str, u64); 27] = [
         ("static-soup", 0xE5B061FD030C2314),
         ("dynamic-refit", 0x0D57D80B6B50C22B),
         ("dynamic-rebuild", 0xF8C3D46628C84862),
@@ -1339,7 +2376,73 @@ mod tests {
         ("hit-ordering", 0x02D9976BC7F93DD9),
         ("precision", 0x518E2FFE3E2A4D97),
         ("masks-and-flags", 0xFDE7BA5F3A0E034B),
+        ("single", 0x3C3B9745FA2F418B),
+        ("closed", 0x616EBAAC8F1D5E61),
+        ("far", 0x9442AFE26EED39C3),
+        ("seam", 0xB30CCD2BD82D003C),
+        ("surface-rays", 0x85B3DAB343AAB451),
+        ("scale", 0x3E1D76B2E2CD90CA),
+        ("seam-edge", 0x22098AE9DB861CFF),
+        ("edge", 0xA6EAE8C0FA1AC5F8),
+        ("thin", 0xE1389433068063D2),
+        ("large-thin", 0x22FC27BF1524C94A),
+        ("cull-edge", 0x98E1E736EDB8B211),
+        ("extent", 0x3EC180E71D8C0425),
+        ("tie", 0xD9698B67D3DF14CE),
+        ("far-graze", 0x5E47CD4A2745806D),
+        ("flat", 0x10600EFF92DF1252),
+        ("degenerate", 0x1B7363EE1FB512E8),
+        ("closed-edge", 0x0E2EBB04EF874EB3),
     ];
+
+    #[test]
+    fn the_rule_s_classes_are_random_or_directed() {
+        let random: Vec<&str> = Class::ALL
+            .iter()
+            .filter(|c| c.kind() == ClassKind::Random)
+            .map(|c| c.name())
+            .collect();
+        assert_eq!(
+            random,
+            [
+                "static-soup",
+                "dynamic-refit",
+                "dynamic-rebuild",
+                "instancing",
+                "alpha-tested",
+                "transformed",
+                "hit-ordering",
+                "masks-and-flags",
+                "single",
+                "closed",
+                "far",
+                "seam",
+                "surface-rays",
+                "scale"
+            ]
+        );
+        assert_eq!(Class::ALL.len() - random.len(), 13);
+    }
+
+    #[test]
+    fn illegal_rays_are_refused_one_and_all() {
+        let rays = illegal_rays();
+        assert!(rays.len() >= 10);
+        for (ray, what) in rays {
+            assert!(ray.validate().is_err(), "{what}");
+        }
+    }
+
+    #[test]
+    fn spacings_are_steps_of_f32() {
+        assert_eq!(stepped(8.0, 0), 8.0);
+        assert_eq!(stepped(8.0, 1), 8.0f32.next_up());
+        assert_eq!(stepped(8.0, -2), 8.0 - 2.0 * (8.0 - 8.0f32.next_down()));
+        assert_eq!(stepped(-24.0, 8), -24.0 + 8.0 * (24.0f32.next_up() - 24.0));
+        // Moving a ray by the same steps keeps it parallel, exactly.
+        let (target, origin) = (stepped(8.0f32, 8), 8.0f32);
+        assert_eq!(origin + (target - origin), target);
+    }
 
     #[test]
     fn dynamic_classes_ask_for_refits_and_rebuilds() {

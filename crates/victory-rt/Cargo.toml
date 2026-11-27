@@ -1,6 +1,6 @@
 [package]
 name = "victory-rt"
-description = "Ray-tracing validation without a GPU: synthetic scenes at the level of DXR build descriptions, an exact CPU reference, a CPU model of the software BVH path, and the comparison policy."
+description = "Ray-tracing validation without a GPU: synthetic scenes at the level of DXR build descriptions, an exact CPU reference, a CPU model of the software BVH path, the proposed rule for functionally equivalent rendering as pure functions, and the older comparison policy."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

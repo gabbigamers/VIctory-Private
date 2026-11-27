@@ -3,8 +3,9 @@
 //! compares later or elsewhere. A header, then sections:
 //!
 //! ```text
-//! victory-rt results 1
+//! victory-rt results 2
 //! producer <one line of free text: which implementation, which machine>
+//! rule k <the tolerance constant of the writer's crate, a whole number>
 //! section <class> seed <hex> frame <n> rays <count> case <fingerprint, hex>
 //! <eight hex words of a hit>                      (one line per ray)
 //! end <FNV-1a 64 of the section's hit words as little-endian bytes, hex>
@@ -18,6 +19,15 @@
 //! a generator that differs between two machines shows as that and not as
 //! a list of defects.
 //!
+//! The `rule` line is the constant of the proposed rule's tolerance as the
+//! writer's build of this crate has it ([`crate::rule::K`]). It is not a
+//! setting: the constant is measured from the emulated triangle test over
+//! the generated scenes, so a file whose constant is not the reader's was
+//! written by a build whose generator or model differs: [`check_k`] says
+//! so, and [`ResultFile::parse`] refuses the file with that message
+//! ([`ResultFile::parse_with_k`] reads it and hands the constant over). A
+//! file of version 1 has no such line and reads as before.
+//!
 //! Numbers are digits only (hex ones in either case, no sign, no prefix).
 //! A file that is cut short, has a line that does not parse, a checksum
 //! that does not match or two sections for the same class, seed and frame
@@ -27,7 +37,21 @@
 use crate::generate::Case;
 use crate::record::Hit;
 
-pub const HEADER: &str = "victory-rt results 1";
+pub const HEADER: &str = "victory-rt results 2";
+/// The header of files written before the rule's constant was in them.
+pub const HEADER_V1: &str = "victory-rt results 1";
+
+/// Whether a file's constant ([`ResultFile::parse_with_k`]) is this
+/// build's. A file of version 1 has none and passes.
+pub fn check_k(k: Option<u64>) -> Result<(), String> {
+    match k {
+        Some(k) if k as f64 != crate::rule::K => Err(format!(
+            "the file was written with the rule's constant k = {k}; this build measures {}. The generator or the emulated test differs between the two builds, and verdicts under the rule cannot be compared",
+            crate::rule::K
+        )),
+        _ => Ok(()),
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Section {
@@ -155,7 +179,7 @@ impl ResultFile {
             ));
         }
         let mut out = String::new();
-        let _ = writeln!(out, "{HEADER}\nproducer {p}");
+        let _ = writeln!(out, "{HEADER}\nproducer {p}\nrule k {}", crate::rule::K);
         for s in &self.sections {
             let _ = writeln!(
                 out,
@@ -175,18 +199,41 @@ impl ResultFile {
         Ok(out)
     }
 
+    /// The file. One whose `rule` line carries another constant than this
+    /// build's is refused ([`check_k`]): it was written by a build whose
+    /// generator or model differs. [`ResultFile::parse_with_k`] reads such
+    /// a file all the same and hands the constant over.
     pub fn parse(text: &str) -> Result<ResultFile, String> {
+        let (file, k) = ResultFile::parse_with_k(text)?;
+        check_k(k)?;
+        Ok(file)
+    }
+
+    /// The file and the rule's constant its writer had, whatever it is;
+    /// `None` for a file of version 1, which has no such line.
+    pub fn parse_with_k(text: &str) -> Result<(ResultFile, Option<u64>), String> {
         let mut lines = text.lines().enumerate().map(|(n, l)| (n + 1, l.trim_end()));
         let bad = |n: usize, what: &str| format!("line {n}: {what}");
-        match lines.next() {
-            Some((_, HEADER)) => {}
+        let first = match lines.next() {
+            Some((_, HEADER)) => false,
+            Some((_, HEADER_V1)) => true,
             _ => return Err(format!("not a result file: no \"{HEADER}\" line")),
-        }
+        };
         let producer = match lines.next() {
             Some((_, l)) if l == "producer" || l.starts_with("producer ") => {
                 l[8..].trim().to_string()
             }
             _ => return Err(bad(2, "no producer line")),
+        };
+        let k = if first {
+            None
+        } else {
+            let k = lines
+                .next()
+                .and_then(|(_, l)| l.strip_prefix("rule k "))
+                .and_then(|k| digits(k, 10))
+                .ok_or_else(|| bad(3, "no rule line with a whole number"))?;
+            Some(k)
         };
         let mut file = ResultFile {
             producer,
@@ -256,7 +303,7 @@ impl ResultFile {
                 hits,
             });
         }
-        Ok(file)
+        Ok((file, k))
     }
 }
 
@@ -310,7 +357,46 @@ mod tests {
     fn a_file_reads_back_word_for_word() {
         let file = sample();
         let text = file.to_text().unwrap();
-        assert!(text.starts_with("victory-rt results 1\nproducer software traversal, CPU model\n"));
+        let head = format!(
+            "victory-rt results 2\nproducer software traversal, CPU model\nrule k {}\n",
+            crate::rule::K
+        );
+        assert!(text.starts_with(&head), "{text}");
+        // The writer's constant comes back, and is this build's.
+        let (again, k) = ResultFile::parse_with_k(&text).unwrap();
+        assert_eq!((again, k), (file.clone(), Some(crate::rule::K as u64)));
+        assert_eq!(check_k(k), Ok(()));
+        assert!(
+            check_k(Some(crate::rule::K as u64 * 2))
+                .unwrap_err()
+                .contains("differs")
+        );
+        // A file of version 1 has no rule line, and reads as it did.
+        let old = text.replacen(
+            &head,
+            "victory-rt results 1\nproducer software traversal, CPU model\n",
+            1,
+        );
+        assert_eq!(
+            ResultFile::parse_with_k(&old).unwrap(),
+            (file.clone(), None)
+        );
+        assert_eq!(check_k(None), Ok(()));
+        assert_eq!(ResultFile::parse(&old).unwrap(), file);
+        // A file with another constant is refused by the plain reader, with
+        // the reason, and read by the one that hands the constant over.
+        let other = text.replacen(
+            &format!("rule k {}\n", crate::rule::K),
+            &format!("rule k {}\n", crate::rule::K * 2.0),
+            1,
+        );
+        assert_ne!(other, text);
+        let e = ResultFile::parse(&other).unwrap_err();
+        assert!(e.contains("k = 16") && e.contains("differs"), "{e}");
+        assert_eq!(
+            ResultFile::parse_with_k(&other).unwrap(),
+            (file.clone(), Some(16))
+        );
         assert!(text.contains(
             "section static-soup seed feed000100020003 frame 0 rays 37 case 0123456789abcdef\n"
         ));
@@ -332,12 +418,20 @@ mod tests {
     fn a_damaged_file_is_refused() {
         let text = sample().to_text().unwrap();
         assert!(ResultFile::parse("").is_err());
-        assert!(ResultFile::parse(&text.replacen("results 1", "results 2", 1)).is_err());
+        assert!(ResultFile::parse(&text.replacen("results 2", "results 3", 1)).is_err());
+        // The rule line missing, or not a whole number; and a file that
+        // says version 1 and has one.
+        let line = format!("rule k {}\n", crate::rule::K);
+        for wrong in ["", "rule k\n", "rule k +16\n", "rule k 1.5\n", "rule 16\n"] {
+            let e = ResultFile::parse(&text.replacen(&line, wrong, 1)).unwrap_err();
+            assert!(e.starts_with("line 3: "), "{wrong:?}: {e}");
+        }
+        assert!(ResultFile::parse(&text.replacen("results 2", "results 1", 1)).is_err());
         // Cut short, inside a section and before its end line.
         let lines: Vec<&str> = text.lines().collect();
-        assert!(ResultFile::parse(&lines[..10].join("\n")).is_err());
-        assert!(ResultFile::parse(&lines[..40].join("\n")).is_err());
-        assert!(ResultFile::parse(&lines[..41].join("\n")).is_ok());
+        assert!(ResultFile::parse(&lines[..11].join("\n")).is_err());
+        assert!(ResultFile::parse(&lines[..41].join("\n")).is_err());
+        assert!(ResultFile::parse(&lines[..42].join("\n")).is_ok());
         // One digit of one hit changed.
         let at = text.find("\n00000000").unwrap() + 1;
         let mut changed = text.clone();
@@ -355,7 +449,7 @@ mod tests {
         let old = text.replacen(" case 0123456789abcdef", "", 1);
         assert_eq!(
             ResultFile::parse(&old).unwrap_err(),
-            "line 3: not a section line"
+            "line 4: not a section line"
         );
     }
 
@@ -420,12 +514,12 @@ mod tests {
         assert!(file.to_text().unwrap_err().contains("two sections"));
         let text = sample().to_text().unwrap();
         let from = text.find("section dynamic-refit").unwrap();
-        // The file has 49 lines; the section line that repeats is the next.
+        // The file has 50 lines; the section line that repeats is the next.
         let twice = format!("{text}{}", &text[from..]);
-        assert_eq!(text.lines().count(), 49);
+        assert_eq!(text.lines().count(), 50);
         assert_eq!(
             ResultFile::parse(&twice).unwrap_err(),
-            "line 50: a second section for this class, seed and frame"
+            "line 51: a second section for this class, seed and frame"
         );
         // The same class at another frame or seed is another section.
         let other = text[from..].replacen("frame 2", "frame 1", 1);

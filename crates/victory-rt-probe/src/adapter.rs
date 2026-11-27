@@ -4,14 +4,17 @@
 //! in this crate names that crate, so that a change to its comparison is
 //! met here and nowhere else.
 //!
-//! **The verdicts are the crate's, not the rule's.** `victory-rt` judges
-//! by its own tolerance and its own verdicts
-//! (docs/dxr-validation-reference.md, "Comparison policy"); the rule for
-//! functionally equivalent rendering (docs/dxr-compatibility.md) is a
-//! proposal the crate is not yet brought into line with, and the same
-//! document lists where the two differ. Every verdict this module returns
-//! is therefore "under the crate's policy, not yet the rule", and the
-//! result file's header says so ([`POLICY`]).
+//! **The verdicts are the crate's, not the rule's.** This module judges
+//! by `victory-rt`'s older comparison (`victory_rt::compare`), with that
+//! comparison's own tolerance and its own verdicts
+//! (docs/dxr-validation-reference.md, "The error model and the older
+//! comparison"). The rule for functionally equivalent rendering
+//! (docs/dxr-compatibility.md) is a proposal; the crate has since gained
+//! it as code beside the comparison (`victory_rt::rule`), and nothing
+//! here calls that: moving the probe to the rule is a change of its own.
+//! Every verdict this module returns is therefore "under the crate's
+//! policy, not yet the rule", and the result file's header says so
+//! ([`POLICY`]).
 
 use victory_rt::compare::{self, Outcome, Verdict};
 use victory_rt::console::{BuildOptions, SwScene};
@@ -37,14 +40,39 @@ pub const DEFECTS_LISTED: usize = 64;
 /// The kind a procedural shader writes for a hit: it reports no face.
 const PROCEDURAL: u32 = hit_kind::PROCEDURAL;
 
+/// A kind that is none of the crate's. Two kinds the crate's comparison
+/// did not know when the probe was written are handed to it as this one,
+/// so that it says of them what it said then (no record: a defect, but on
+/// a ray the reference excludes, where nothing is judged):
+///
+/// * kind 3 from a path that says it reports faces. The comparison now
+///   takes kind 3 from anyone as a hit whose face is not compared;
+/// * a kind with bit 31 that is no refusal (an unwritten record's poison
+///   among them; refusals never reach the comparison). The comparison now
+///   judges a kind with bit 31 before it looks at the ray, so that such a
+///   record would be a defect on an excluded ray too.
+const NO_KIND: u32 = 4;
+
+/// The scene classes the probe runs: the ten the crate had when the probe
+/// was written (`Class::FIRST`), in the generator's order. The seventeen
+/// the crate added for the rule (`Class::ALL` has 27) are not the probe's:
+/// they were made to be judged by the rule, which the probe does not yet
+/// judge by, and nothing here has been held against them. A name of one
+/// of them is no class of the probe's, as before.
+const PROBED: [Class; 10] = Class::FIRST;
+
+fn probed(class: &str) -> Option<Class> {
+    PROBED.into_iter().find(|c| c.name() == class)
+}
+
 /// The names of the scene classes, in the generator's order.
 pub fn classes() -> Vec<&'static str> {
-    Class::ALL.iter().map(|c| c.name()).collect()
+    PROBED.iter().map(|c| c.name()).collect()
 }
 
 /// What a class holds, in a line.
 pub fn describe(class: &str) -> Option<&'static str> {
-    Class::from_name(class).map(Class::describe)
+    probed(class).map(Class::describe)
 }
 
 /// The seed the reference half's documented tables were taken at.
@@ -140,7 +168,7 @@ fn frames_of(case: &generate::Case) -> Result<Vec<(rt::Scene, Option<rt::Actions
 
 /// The case of `class` at `seed`, generated here.
 pub fn case(class: &str, seed: u64) -> Result<Case, String> {
-    let known = Class::from_name(class)
+    let known = probed(class)
         .ok_or_else(|| format!("no scene class {class:?}; there are: {}", classes().join(", ")))?;
     let inner = generate::generate(known, seed);
     let frames = frames_of(&inner)?
@@ -304,10 +332,13 @@ fn outcome(outcome: Outcome) -> Option<&'static str> {
         Outcome::WrongFace => "wrong-face",
         Outcome::Numeric => "numeric",
         Outcome::Malformed => "malformed",
+        // `Refused` does not come back from here: a refusal is taken out
+        // before the comparison (`Answer::answered`).
         Outcome::Excluded
         | Outcome::Match
         | Outcome::PermittedPrimary
-        | Outcome::PermittedOther => return None,
+        | Outcome::PermittedOther
+        | Outcome::Refused => return None,
     })
 }
 
@@ -349,6 +380,10 @@ pub fn judge(
             judged.faces_not_reported += 1;
             let named = diag.permitted.iter().find(|p| p.hit.ids() == hit.ids());
             hit.kind = named.map_or(hit_kind::FRONT, |p| p.hit.kind);
+        } else if hit.kind == PROCEDURAL || hit.is_refused() {
+            // Bit 31 here is no refusal (those were taken out above): the
+            // poison of an unwritten record, or words that are no record.
+            hit.kind = NO_KIND;
         }
         rays.push(ray as u32);
         diags.push(diag.clone());
@@ -492,6 +527,14 @@ mod tests {
         assert_eq!(classes().len(), 10);
         assert!(describe("static-soup").is_some() && describe("no-such").is_none());
         assert!(case("no-such", 1).err().is_some_and(|e| e.contains("static-soup")));
+        // The probe's classes are the crate's first ten, in its order; the
+        // seventeen it added for the rule are no class of the probe's.
+        assert_eq!(classes(), Class::ALL[..10].iter().map(|c| c.name()).collect::<Vec<_>>());
+        assert_eq!(Class::ALL.len(), 27);
+        for added in &Class::ALL[10..] {
+            assert!(describe(added.name()).is_none(), "{}", added.name());
+            assert!(case(added.name(), 1).err().is_some_and(|e| e.contains("no scene class")), "{}", added.name());
+        }
 
         let soup = case("static-soup", default_seed()).unwrap();
         assert_eq!((soup.frames.len(), soup.rays.len()), (1, 2000));
@@ -616,6 +659,36 @@ mod tests {
         assert_eq!((judged.malformed, judged.faces_not_reported), (hits, 0));
     }
 
+    /// The crate's comparison came to know two kinds after the probe was
+    /// written: kind 3 from anyone as a hit with no face to compare, and
+    /// any kind with bit 31 as a refusal, judged before the ray is looked
+    /// at. The probe's counts are as they were: a record of either kind
+    /// that reaches the comparison is no record, and nothing is judged on
+    /// a ray the reference excludes.
+    #[test]
+    fn a_record_of_a_kind_that_is_none_is_judged_as_before_the_crate_knew_more_kinds() {
+        // `precision` has rays the reference excludes; `static-soup` none.
+        for (class, rays, excluded) in [("precision", 1735, 106), ("static-soup", 2000, 0)] {
+            let case = case(class, default_seed()).unwrap();
+            let truth = truth(&case).unwrap();
+            let (records, _) = cpu_records(&truth, 0);
+            // Unwritten records (the poison has bit 31 and is no refusal),
+            // a refusal with a reason no shader gives, and kind 3 on every
+            // ray from a path that reports faces.
+            let poison = vec![Answer::of([0xa5c3_f0f0; 8]); records.len()];
+            let unknown_reason = vec![Answer::of([0, 0, 0, HIT_REFUSED | 4, 0, 0, 0, 0]); records.len()];
+            let faceless: Vec<Answer> =
+                records.iter().map(|r| Answer::of([r[0], r[1], r[2], 3, r[4], r[5], r[6], r[7]])).collect();
+            for given in [&poison, &unknown_reason, &faceless] {
+                let judged = judge(&case, &truth, 0, given, true).unwrap();
+                assert_eq!((judged.judged, judged.excluded), (rays, excluded), "{class}");
+                assert_eq!(judged.malformed, rays - excluded, "{class}: {judged:?}");
+                assert_eq!((judged.defect_count(), judged.verdict), (rays - excluded, "fail"), "{class}");
+                assert_eq!(judged.defects.len(), DEFECTS_LISTED);
+            }
+        }
+    }
+
     #[test]
     fn hits_are_written_and_read_by_the_reference_crates_own_format() {
         let case = case("dynamic-refit", default_seed()).unwrap();
@@ -628,9 +701,22 @@ mod tests {
             frames.iter().map(|(f, records)| (&case, *f, records.as_slice())).collect();
         sections.push((&other, 0, &soup));
         let text = hits_text("a test", &sections).unwrap();
-        assert!(text.starts_with("victory-rt results 1\nproducer a test\n"));
+        // Version 2 of the format: the third line is the constant of the
+        // rule's tolerance as the writing build of `victory-rt` measures
+        // it. It is that crate's line; no verdict of the probe uses it.
+        assert!(text.starts_with("victory-rt results 2\nproducer a test\nrule k 8\nsection dynamic-refit "), "{text}");
         let back = read_hits(&text).unwrap();
         assert_eq!(back.len(), 5);
+        // A file as the probe wrote it before that line existed (version
+        // 1) reads as the same sections; one whose constant is another
+        // build's is refused, with the reason.
+        let old = text.replacen("victory-rt results 2\nproducer a test\nrule k 8\n", "victory-rt results 1\nproducer a test\n", 1);
+        assert_ne!(old, text);
+        assert_eq!(read_hits(&old).unwrap(), back);
+        let other_k = text.replacen("\nrule k 8\n", "\nrule k 4\n", 1);
+        let refused = read_hits(&other_k).unwrap_err();
+        assert!(refused.contains("k = 4") && refused.contains("differs"), "{refused}");
+        assert!(read_hits(&text.replacen("\nrule k 8\n", "\n", 1)).unwrap_err().starts_with("line 3: "));
         for (section, (frame, records)) in back.iter().zip(&frames) {
             assert_eq!((section.class.as_str(), section.seed), ("dynamic-refit", default_seed()));
             assert_eq!((section.frame, &section.records), (*frame, records));

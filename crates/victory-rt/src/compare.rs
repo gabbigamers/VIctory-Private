@@ -29,6 +29,19 @@
 //! kind: a hit missed, a hit that is not there, the wrong triangle, the
 //! wrong face, numbers out of tolerance, a malformed record.
 //!
+//! Two records are neither. A **refused** record (the kind's bit 31 with
+//! the reasons below it, seven zero words: docs/dxr-shader-emission.md) is
+//! a shader's statement that it could not decide the ray. It is its own
+//! outcome, counted by reason, never a miss and never malformed; its ray
+//! is traced another way and judged there. A **procedural** hit (kind 3)
+//! names a triangle like any hit and is judged like one, but for the face,
+//! which the record does not carry.
+//!
+//! This comparison judges by the reference's own error model. The proposed
+//! rule for functionally equivalent rendering, with its measured tolerance,
+//! its kinds of ambiguous ray and its levels 2 and 3, is [`crate::rule`];
+//! docs/dxr-validation-reference.md says how the two stand to each other.
+//!
 //! Two lists are compared at once, a baseline (the software path) and a
 //! candidate (the native path). Where both are right but name different
 //! results, the ray is **divergent**: D3D12 permits either and the title
@@ -52,7 +65,7 @@
 //! is a case for the software path, which the region's translator has to
 //! decide, not this comparison.
 
-use crate::record::{Hit, hit_kind};
+use crate::record::{Hit, hit_kind, refusal};
 use crate::reference::{Diag, Status, flag};
 
 /// A class with fewer rays than this proves nothing.
@@ -95,9 +108,12 @@ pub enum Outcome {
     WrongFace,
     /// The right triangle and face; `t`, `u` or `v` out of tolerance.
     Numeric,
-    /// Not a hit record: an unknown kind, a miss with other words set, a
-    /// hit with a number that is not finite.
+    /// Not a hit record: an unknown kind, a miss or a refusal with other
+    /// words set, a refusal without a known reason, a hit with a number
+    /// that is not finite.
     Malformed,
+    /// The shader refused the ray: not judged here, counted by reason.
+    Refused,
 }
 
 impl Outcome {
@@ -108,6 +124,7 @@ impl Outcome {
                 | Outcome::Match
                 | Outcome::PermittedPrimary
                 | Outcome::PermittedOther
+                | Outcome::Refused
         )
     }
 }
@@ -129,6 +146,10 @@ pub struct Judged {
     /// The larger of the `u` and `v` errors, and that over the tolerance.
     pub uv_error: f64,
     pub uv_ratio: f64,
+    /// The [`refusal`] bits of a refused record; 0 otherwise.
+    pub reasons: u32,
+    /// A right result of kind 3: its face was not compared.
+    pub procedural: bool,
 }
 
 impl Judged {
@@ -148,7 +169,19 @@ pub fn judge(diag: &Diag, got: &Hit) -> Judged {
         t_ratio: 0.0,
         uv_error: 0.0,
         uv_ratio: 0.0,
+        reasons: 0,
+        procedural: false,
     };
+    // A refusal says nothing of the ray, whatever the ray is.
+    if got.is_refused() {
+        return match got.refusal_reasons() {
+            Some(reasons) => Judged {
+                reasons,
+                ..plain(Outcome::Refused)
+            },
+            None => plain(Outcome::Malformed),
+        };
+    }
     if diag.status == Status::Excluded {
         return plain(Outcome::Excluded);
     }
@@ -167,8 +200,11 @@ pub fn judge(diag: &Diag, got: &Hit) -> Judged {
         });
     }
     let numbers = [got.t, got.u, got.v];
-    if !matches!(got.kind, hit_kind::FRONT | hit_kind::BACK)
-        || numbers.iter().any(|x| !x.is_finite())
+    let procedural = got.kind == hit_kind::PROCEDURAL;
+    if !matches!(
+        got.kind,
+        hit_kind::FRONT | hit_kind::BACK | hit_kind::PROCEDURAL
+    ) || numbers.iter().any(|x| !x.is_finite())
     {
         return plain(Outcome::Malformed);
     }
@@ -180,7 +216,8 @@ pub fn judge(diag: &Diag, got: &Hit) -> Judged {
         });
     };
     let p = &diag.permitted[at];
-    if p.hit.kind != got.kind {
+    // A procedural hit carries no face: there is none to compare.
+    if !procedural && p.hit.kind != got.kind {
         return plain(Outcome::WrongFace);
     }
     let right = if !ambiguous {
@@ -193,6 +230,7 @@ pub fn judge(diag: &Diag, got: &Hit) -> Judged {
     if p.wide {
         return Judged {
             ids_only: true,
+            procedural,
             ..plain(right)
         };
     }
@@ -212,6 +250,8 @@ pub fn judge(diag: &Diag, got: &Hit) -> Judged {
         t_ratio,
         uv_error,
         uv_ratio,
+        reasons: 0,
+        procedural,
     }
 }
 
@@ -227,6 +267,13 @@ pub struct Tally {
     pub wrong_face: u32,
     pub numeric: u32,
     pub malformed: u32,
+    /// Refused records, and how many of them give each reason
+    /// ([`refusal::NAMES`]: geometry, range; a record can give both).
+    pub refused: u32,
+    pub refused_by_reason: [u32; refusal::NAMES.len()],
+    /// Of the right results (the first three counts), those of kind 3,
+    /// whose face was not compared.
+    pub procedural: u32,
     /// Of the right results (the first three counts), those whose numbers
     /// were not compared: the tolerance was too wide.
     pub ids_only: u32,
@@ -265,8 +312,13 @@ impl Tally {
             Outcome::WrongFace => &mut self.wrong_face,
             Outcome::Numeric => &mut self.numeric,
             Outcome::Malformed => &mut self.malformed,
+            Outcome::Refused => &mut self.refused,
         };
         *count += 1;
+        for (k, (bit, _)) in refusal::NAMES.iter().enumerate() {
+            self.refused_by_reason[k] += u32::from(j.reasons & bit != 0);
+        }
+        self.procedural += u32::from(j.procedural && !j.outcome.is_defect());
         self.ids_only += u32::from(j.ids_only);
         self.beyond_band += u32::from(j.beyond_band());
         self.worst_t = self.worst_t.max(j.t_error);
@@ -419,14 +471,22 @@ pub fn compare(
         let (a, b) = (judge(diag, &baseline[k]), judge(diag, &candidate[k]));
         r.baseline.add(&a);
         r.candidate.add(&b);
-        if diag.status == Status::Excluded || a.outcome.is_defect() || b.outcome.is_defect() {
+        if diag.status == Status::Excluded
+            || a.outcome.is_defect()
+            || b.outcome.is_defect()
+            || a.outcome == Outcome::Refused
+            || b.outcome == Outcome::Refused
+        {
             continue;
         }
         let (x, y) = (&baseline[k], &candidate[k]);
         if x == y {
             r.identical += 1;
         }
-        if x.kind != y.kind || x.ids() != y.ids() {
+        // A hit with no face differs from one with a face by its triangle
+        // alone.
+        let faces = x.kind != hit_kind::PROCEDURAL && y.kind != hit_kind::PROCEDURAL;
+        if (faces && x.kind != y.kind) || x.is_miss() != y.is_miss() || x.ids() != y.ids() {
             if diag.flags & flag::FIRST_HIT != 0 {
                 r.divergent_first_hit += 1;
             } else {
@@ -442,7 +502,8 @@ pub fn compare(
     } else if is_useless(
         diags.len(),
         r.clear as usize,
-        r.excluded as usize,
+        // A refused ray is not judged either.
+        (r.excluded + r.candidate.refused.max(r.baseline.refused)) as usize,
         r.wide as usize,
     ) {
         Verdict::Useless
@@ -473,17 +534,21 @@ impl Report {
     pub fn to_text(&self) -> String {
         let tally = |name: &str, t: &Tally| {
             format!(
-                "  {name}: match {} permitted {}+{} (ids only {}) | missed {} phantom {} wrong-triangle {} wrong-face {} numeric {} malformed {} | beyond the band {} | worst t {:.3e} of its scale ({:.3} of tolerance) uv {:.3e} ({:.3})\n",
+                "  {name}: match {} permitted {}+{} (ids only {}, procedural {}) | missed {} phantom {} wrong-triangle {} wrong-face {} numeric {} malformed {} | refused {} (geometry {}, range {}) | beyond the band {} | worst t {:.3e} of its scale ({:.3} of tolerance) uv {:.3e} ({:.3})\n",
                 t.matched,
                 t.permitted_primary,
                 t.permitted_other,
                 t.ids_only,
+                t.procedural,
                 t.missed,
                 t.phantom,
                 t.wrong_triangle,
                 t.wrong_face,
                 t.numeric,
                 t.malformed,
+                t.refused,
+                t.refused_by_reason[0],
+                t.refused_by_reason[1],
                 t.beyond_band,
                 t.worst_t,
                 t.worst_t_ratio,
@@ -498,6 +563,9 @@ impl Report {
                 ", {} candidate results beyond the band",
                 self.candidate.beyond_band
             );
+        }
+        if self.candidate.refused > 0 {
+            notes += &format!(", {} candidate rays refused", self.candidate.refused);
         }
         if self.candidate.defects() == 0 && self.candidate.ids_only > 0 {
             notes += &format!(
@@ -701,8 +769,86 @@ mod tests {
         let mut nan = hit(f32::NAN, 5);
         assert_eq!(judge(&d, &nan).outcome, Outcome::Malformed);
         nan = hit(2.0, 5);
-        nan.kind = 3;
+        nan.kind = 4;
         assert_eq!(judge(&d, &nan).outcome, Outcome::Malformed);
+    }
+
+    #[test]
+    fn a_refusal_is_counted_by_reason_and_is_neither_a_miss_nor_malformed() {
+        let (hit_ray, miss_ray) = (diag(&[hit(2.0, 5)], false, 0), diag(&[], true, 0));
+        for d in [
+            &hit_ray,
+            &miss_ray,
+            &diag(&[hit(2.0, 5)], false, flag::UNSTABLE),
+        ] {
+            let j = judge(d, &Hit::refused(refusal::RANGE));
+            assert_eq!((j.outcome, j.reasons), (Outcome::Refused, refusal::RANGE));
+            assert!(!j.outcome.is_defect());
+        }
+        // A refusal that is not well formed is malformed, not a refusal.
+        assert_eq!(
+            judge(&hit_ray, &Hit::refused(0)).outcome,
+            Outcome::Malformed
+        );
+        assert_eq!(
+            judge(&hit_ray, &Hit::refused(8)).outcome,
+            Outcome::Malformed
+        );
+        let mut dirty = Hit::refused(1);
+        dirty.instance_id = 7;
+        assert_eq!(judge(&miss_ray, &dirty).outcome, Outcome::Malformed);
+        // Over a class: counted, by reason, on the verdict's line; not a
+        // defect, not a divergence, not identical.
+        let (diags, a, mut b) = class(300, &[]);
+        b[3] = Hit::refused(refusal::GEOMETRY);
+        b[4] = Hit::refused(refusal::RANGE);
+        b[5] = Hit::refused(refusal::GEOMETRY | refusal::RANGE);
+        let r = compare("test", &diags, &a, &b).unwrap();
+        assert_eq!((r.verdict, r.candidate.defects()), (Verdict::Pass, 0));
+        assert_eq!(
+            (r.candidate.refused, r.candidate.refused_by_reason),
+            (3, [2, 2])
+        );
+        assert_eq!(
+            (r.identical, r.divergent, r.candidate.matched),
+            (297, 0, 297)
+        );
+        assert!(
+            r.to_text()
+                .starts_with("test: Pass, 3 candidate rays refused\n"),
+            "{}",
+            r.to_text()
+        );
+        assert!(r.to_text().contains("refused 3 (geometry 2, range 2)"));
+        // More refused rays than may go unjudged: the class says nothing.
+        for h in b.iter_mut().take(31) {
+            *h = Hit::refused(refusal::RANGE);
+        }
+        let r = compare("test", &diags, &a, &b).unwrap();
+        assert_eq!((r.verdict, r.candidate.refused), (Verdict::Useless, 31));
+    }
+
+    #[test]
+    fn a_procedural_hit_is_the_hit_of_its_triangle_without_a_face() {
+        let d = diag(&[hit(2.0, 5)], false, 0);
+        let mut got = hit(2.0, 5);
+        got.kind = hit_kind::PROCEDURAL;
+        let j = judge(&d, &got);
+        assert_eq!((j.outcome, j.procedural), (Outcome::Match, true));
+        // The triangle and the numbers are judged as ever.
+        got.primitive_index = 6;
+        assert_eq!(judge(&d, &got).outcome, Outcome::WrongTriangle);
+        got = hit(2.0002, 5);
+        got.kind = hit_kind::PROCEDURAL;
+        assert_eq!(judge(&d, &got).outcome, Outcome::Numeric);
+        // Against the same triangle with a face it is the same answer.
+        let (diags, a, mut b) = class(300, &[]);
+        for h in &mut b {
+            h.kind = hit_kind::PROCEDURAL;
+        }
+        let r = compare("test", &diags, &a, &b).unwrap();
+        assert_eq!((r.verdict, r.divergent, r.identical), (Verdict::Pass, 0, 0));
+        assert_eq!((r.candidate.procedural, r.candidate.matched), (300, 300));
     }
 
     #[test]

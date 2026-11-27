@@ -1,5 +1,7 @@
-//! The reference against the CPU model of the software path, on every scene
-//! class, on this host. Nothing here touches a GPU: what these tests show is
+//! The reference against the CPU model of the software path, by the older
+//! comparison (the reference's own error model), on the ten first scene
+//! classes, on this host; `tests/rule.rs` has all 26 under the proposed
+//! rule. Nothing here touches a GPU: what these tests show is
 //! that the two CPU implementations, written apart and working differently
 //! (exact arithmetic over every triangle in world space; `f32` node tests
 //! over a BVH in object space), agree under the comparison policy, and that
@@ -94,7 +96,7 @@ fn the_software_path_agrees_with_the_reference_on_every_class() {
     );
     let mut reasons = String::new();
     let mut total = 0;
-    for class in Class::ALL {
+    for class in Class::FIRST {
         let case = generate(class, DEFAULT_SEED);
         let all = frames(&case, BuildOptions::for_rays(&case.rays));
         let mut others = Others::default();
@@ -225,7 +227,7 @@ fn other_seeds_agree_inside_the_band_too() {
     // The table is of one seed. Three more, every class and frame: no
     // defect, nothing beyond the band, no class without meaning.
     for seed in 1..=3 {
-        for class in Class::ALL {
+        for class in Class::FIRST {
             let case = generate(class, DEFAULT_SEED + seed);
             for (f, frame) in frames(&case, BuildOptions::for_rays(&case.rays))
                 .iter()
@@ -359,7 +361,7 @@ fn plain(scene: &Scene, ray: &Ray) -> Hit {
 
 #[test]
 fn a_plain_f64_tracer_gives_the_reference_s_answer_on_clear_rays() {
-    for class in Class::ALL {
+    for class in Class::FIRST {
         let case = generate(class, DEFAULT_SEED);
         for (f, scene) in case.scenes().iter().enumerate() {
             let diags = Reference::new(scene).trace_all(&case.rays);
@@ -399,7 +401,7 @@ fn what_the_model_rules_out_is_not_a_hit_when_evaluated_exactly() {
     // Every pair of the first rays of each class goes through the exact
     // arithmetic, the ones the error model ruled out included. A pair ruled
     // out and yet inside would be counted, and the answers must not change.
-    for class in Class::ALL {
+    for class in Class::FIRST {
         let case = generate(class, DEFAULT_SEED);
         let rays = &case.rays[..300];
         let mut quick = Reference::new(&case.scene);
@@ -577,7 +579,7 @@ fn what_size_of_error_the_comparison_sees() {
         names.join(" | "),
         "---|".repeat(shifts.len())
     );
-    for class in Class::ALL {
+    for class in Class::FIRST {
         let case = generate(class, DEFAULT_SEED);
         let frame = &frames(&case, BuildOptions::for_rays(&case.rays))[0];
         let mut hits = 0;
@@ -786,7 +788,7 @@ fn tight_boxes_leak_through_shared_edges_and_padded_ones_do_not() {
         "| class | tight boxes: defects | triangle tests | padded boxes: defects | triangle tests | with every box visited |"
     );
     println!("|---|---|---|---|---|---|");
-    for class in Class::ALL {
+    for class in Class::FIRST {
         let case = generate(class, DEFAULT_SEED);
         let diags = Reference::new(&case.scene).trace_all(&case.rays);
         let tight = boxes(&case, &diags, BuildOptions::tight());

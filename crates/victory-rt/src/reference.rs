@@ -237,6 +237,22 @@ pub struct Stats {
     pub inconsistent: u64,
 }
 
+/// [`Reference::exact_pair`]: where a ray's line meets a triangle's plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExactPair {
+    /// The sign of `S = d . n` in world space; 0 for a ray in the plane and
+    /// for a triangle of no area, and then the numbers are NaN.
+    pub sign: i32,
+    /// No weight is negative: an edge or a vertex counts.
+    pub inside: bool,
+    pub zero_area: bool,
+    /// `t`, any sign, rounded to `f64`.
+    pub t: f64,
+    /// The weights of vertices 0, 1 and 2, each from its own exact
+    /// numerator.
+    pub w: [f64; 3],
+}
+
 /// Three numbers and a bound on the error of each, as the modelled `f32`
 /// implementation holds them.
 #[derive(Clone, Copy)]
@@ -605,6 +621,51 @@ impl<'a> Reference<'a> {
                     },
                 }
             }
+        }
+    }
+
+    /// The sign of the determinant of instance `i`'s transform, exact.
+    pub fn det_sign(&self, i: usize) -> i32 {
+        self.insts[i].det_sign
+    }
+
+    /// The exact world-space vertices of triangle `k` of instance `i`: `k`
+    /// counts through the bottom level's geometries in order and each one's
+    /// primitives in order.
+    pub fn world_vertices(&mut self, i: usize, k: usize) -> &[V3; 3] {
+        self.world_tri(i, k)
+    }
+
+    /// One ray against one triangle in exact arithmetic, whatever the
+    /// error model says of the pair and with no flag, mask, range or alpha
+    /// test: the numbers the rule's tolerance constant is measured against
+    /// ([`crate::rule::measure_k`]).
+    pub fn exact_pair(&mut self, i: usize, k: usize, ray: &Ray) -> ExactPair {
+        let (o, d) = (v3(ray.origin), v3(ray.dir));
+        let p = self.world_tri(i, k);
+        let a = sub3(&p[0], &o);
+        let (e1, e2) = (sub3(&p[1], &p[0]), sub3(&p[2], &p[0]));
+        let n = cross3(&e1, &e2);
+        let ex1 = dot3(&a, &cross3(&d, &e2));
+        let ex2 = dot3(&a, &cross3(&e1, &d));
+        let s = dot3(&d, &n);
+        let dd = dot3(&a, &n);
+        let ex0 = &(&s - &ex1) - &ex2;
+        let sign = s.sign();
+        let inside = sign != 0 && [&ex0, &ex1, &ex2].iter().all(|e| e.sign() * sign >= 0);
+        let ratio = |x: &Dy| {
+            if sign == 0 {
+                f64::NAN
+            } else {
+                Dy::ratio(x, &s)
+            }
+        };
+        ExactPair {
+            sign,
+            inside,
+            zero_area: n.iter().all(Dy::is_zero),
+            t: ratio(&dd),
+            w: [ratio(&ex0), ratio(&ex1), ratio(&ex2)],
         }
     }
 

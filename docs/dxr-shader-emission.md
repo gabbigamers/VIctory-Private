@@ -83,7 +83,11 @@ it; `triangle_test` reports `clockwise` by the same rule.
 A shader that cannot decide a ray does not write a miss. The record's kind
 is `HIT_REFUSED` (bit 31) with the reasons in the low bits and the other
 seven words 0. The host counts these records and traces their rays another
-way.
+way. The reference crate judges them the same way: a refusal is an outcome
+of its own, counted by reason, never a miss and never malformed; and a hit
+of kind 3 is judged as the hit of its triangle with no face to compare
+(`victory_rt::rule::judge`, `victory_rt::compare::judge`;
+dxr-validation-reference.md, "Records").
 
 * `REFUSED_GEOMETRY` (1): the scene is not the form's. The device offered a
   candidate or committed a hit of the other geometry type: a procedural

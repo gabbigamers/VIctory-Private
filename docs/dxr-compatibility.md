@@ -28,52 +28,109 @@ required where functionally equivalent rendering can be demonstrated,
 and what "demonstrated" means is to be written down before measuring
 (`progress.md`, session log). This section is that writing. **It is a
 proposal made on 2026-11-27, before any measurement, and not yet
-accepted by the owner; every number in it is proposed.** Once accepted,
+accepted by the owner; every number in it is proposed.** Building its
+reference on the CPU (`crates/victory-rt`, dxr-validation-reference.md)
+and reviewing it showed seven places where the first wording did not
+hold. They are changed below, each marked **[C1]** to **[C7]** and listed
+with its reason at the end of this section: **changes proposed to the
+owner with the rest, none accepted.** No device has run. Once accepted,
 a change is a dated revision made before the results it affects are
 read. **Demonstrated** means: for one workload class, on one device and
 driver, a recorded test passes all three levels below. The rule is
 written for the native path; the hybrid's bar follows it. The software
 path keeps the old bar: equal to its CPU reference bit for bit.
 
-**The reference.** On synthetic scenes: a CPU reference in double
-precision from the same single-precision inputs, which knows each
-triangle's neighbours, bottom level, instance, surface and material, and
-the class's filter. Only the host's error is under test. On the title:
-the software path on the same device, on the same rays.
+**The reference.** On synthetic scenes: a CPU reference from the same
+single-precision inputs, its own answer in exact arithmetic and its
+tolerances and classes in double precision **[C1]**. It knows each
+triangle's neighbours (two triangles share an edge when two of their
+world-space vertices are the same points, exactly, whatever structures
+they are in), bottom level, instance, surface (the instance's id and the
+geometry's index; a material belongs to a surface) and the class's
+filter. Only the host's error is under test. On the title: the software
+path on the same device, on the same rays.
 
 **Tolerance.** For a ray (origin o, direction d of length L) and a
 triangle at reference distance t: M is the largest magnitude among the
 coordinates of o and of the vertices, in world and in object space, and
-t times L; c is the cosine between the ray and the triangle's normal, as
-a magnitude; h is the triangle's smallest altitude.
+t times L (t no further than the extent); c is the cosine between the
+ray and the triangle's normal, as a magnitude; h is the triangle's
+smallest altitude. L, c and h are taken in the instance's object space,
+where the guest's test, the hybrid's shader and a device's intersector
+work and t is the same number **[C2]**.
 
 | Quantity | Tolerance |
 |---|---|
 | a position in space | `x_tol = k * 2^-23 * M` |
-| the distance t | `t_tol = x_tol / (L * c)` |
 | a barycentric weight | `b_tol = 2 * x_tol / (h * c)` |
+| the distance t | `t_tol = x_tol / (L * c) + b_tol * D` **[C3]** |
+
+D is how far the depths of the triangle's vertices along the ray lie
+from t, the farthest of the three, the depth taken along the direction
+and along its largest axis. The emulated test, like any watertight one,
+forms t as the mean of those depths weighted by the barycentrics, so a
+weight off by e moves its t by up to e times D. For a triangle that lies
+across the ray D is 0 and the first wording stands.
 
 **k is computed, not chosen here.** A host test, on the CPU and before
 any device, takes the random scene classes and, over pairs with c at
 least 2^-6 and h times c at least 2^-10 times M, finds the largest error
 of the emulated test's single-precision model (every triangle tested)
-against the reference, as a position error in units of 2^-23 times M. k
-is twice that, rounded up to a power of two, written into the probe's
-output and the record. The bar asked of the host is the emulation's own
+against the reference, in units of 2^-23 times M. The error of a pair is
+the smallest x_tol at which its answer is inside the tolerances of the
+table as they stand, t's with its term b_tol D **[C3]**. k is twice the
+largest, rounded up to a power of two, written into the probe's output
+and the record. The bar asked of the host is the emulation's own
 accuracy with a stated margin. A count of roundings is not used: the
 test rounds products of order M^2 and M^3 (`emit/lower/bvh.rs:457-480`),
 and a count does not bound a difference of products. **A larger
 tolerance is a weaker test**: more triangles near, more rays ambiguous,
 larger errors passed. So k is never raised to fit a host; the host's
-largest errors are reported against it and a host outside it fails. A
-pair with c below 2^-6 is **grazing**, one with b_tol above 2^-4 a
-**sliver pair**; neither has stable numbers on either side.
+largest errors are reported against it and a host outside it fails.
+
+**Measured on the CPU, 2026-11-27: k = 8**, over the fourteen random
+classes at the documented seed and the 200 seeds that follow it
+(1.83 billion pairs in range; run by hand). The largest error is 2.37
+units, an error of t, at seed + 105 in the class of transformed
+instances. **The sample decides the value, so the rule names it.** The
+largest error of a sample grows with the sample, and here it crosses a
+power of two inside it: the documented seed alone measures 1.41 units,
+which gives 4, and so do 192 of the 201 seeds; 9 measure over 2 units
+and give 8. The constant is the whole sample's. With 4 the margin over
+the emulation's own largest error would be 1.7, not the stated 2. The
+host test measures the documented seed and seed + 105 and fails unless
+the two give 8 and the first alone 4. **k is a property of these
+classes' triangles and rays** (their shapes, sizes, magnitudes and
+slants), not a bound for every shape; what the same measurement gives on
+a shape no class holds is under [C3] below. The table by class, the test
+that pins the value and the result file's line that carries it are in
+dxr-validation-reference.md.
+
+A pair with c below 2^-6 is **grazing**, one with b_tol above 2^-4 a
+**sliver pair**; neither has stable numbers on either side. b_tol is
+unbounded as c or h goes to zero and says nothing of such a pair, nor of
+a triangle of no area, so these are placed by distance **[C4]**: out
+when the ray, inside its extents, passes the triangle (as a set of
+points) by more than 2 x_tol, which is where a weight of -b_tol puts the
+ray of an ordinary pair; otherwise near, never in. A hit on one must lie
+along the ray between the nearest and the farthest of the triangle's
+vertices, widened by x_tol / (L 2^-6); its weights are not compared.
+**The face** a pair shows the ray is a fact, compared and culled by, for
+a pair that is neither grazing nor a sliver pair, and for a sliver pair
+while its b_tol is at most 1/2 (h c at least 4 x_tol). Moving each
+vertex by x_tol changes d . n by at most x_tol times L times the
+perimeter, which is at most three longest edges, against L h c times the
+longest edge: the face cannot turn while h c is above 3 x_tol, which is
+b_tol under 2/3, and 1/2 is the power of two below that. A thinner
+sliver pair has no stable face, as a grazing pair has none: it is not
+culled by a facing flag and its face is not compared **[C4]**.
 
 **Level 1: rays.** The reference classes every ray and triangle as **in**
 (each weight above b_tol, t inside the extents by more than t_tol),
 **out** (a weight below -b_tol, t outside the extents by more than t_tol,
-zero area, a NaN vertex) or **near** (the rest, and every grazing or
-sliver pair that is not out). A ray is **unambiguous** when no near
+a NaN vertex; a grazing, sliver or zero-area pair by its distance, above)
+or **near** (the rest, and every grazing, sliver or zero-area pair that
+is not out). A ray is **unambiguous** when no near
 triangle and no filter decision can change the workload's answer: for
 yes or no, there is an in-hit or nothing is near; for a nearest hit,
 nothing near lies at or in front of the nearest in-hit within tolerance,
@@ -82,9 +139,10 @@ other ray is **ambiguous**, by kind: shared edge or vertex; **seam** (an
 edge shared across bottom levels, instances, or geometries with
 different transforms); boundary or silhouette edge; extent boundary (t
 within t_tol of TMin or TMax, t = 0 included); coplanar tie; **filter
-threshold** (the reference evaluates the class's filter at the corners
-of the tolerance box of its inputs, and the decisions differ);
-degenerate.
+threshold** (the reference evaluates the class's filter at the corners,
+edge midpoints and centre of the tolerance box of its inputs, and the
+decisions differ; a box as wide as a cell of the filter is at a
+threshold whatever they say); degenerate.
 
 * Unambiguous rays: hit or miss, instance, primitive and facing agree
   exactly; t within t_tol; each weight within b_tol.
@@ -96,28 +154,59 @@ degenerate.
   extent boundary, a filter threshold, a degenerate case, an edge with
   one triangle or two facing opposite ways for this ray, or a seam whose
   sides have different transforms. A miss is **never** admissible at an
-  edge shared by like-facing triangles of one bottom level, nor at a
-  seam whose sides see one object-space ray in the guest (the same
-  instance transform, no geometry transform): the guest's test closes
-  both (`emit/lower/bvh.rs:41-44`, per triangle, whatever structure it
-  is in), the specification promises only the first (`spec:2404-2409`),
-  so a device must show the second.
+  edge shared by like-facing triangles of one instance under matching
+  geometry transforms (the scope of the specification's promise: two
+  instances of one bottom level are a seam), nor at a seam whose sides
+  see one object-space ray in the guest (the same instance transform, no
+  geometry transform): the guest's test closes both
+  (`emit/lower/bvh.rs:41-44`, per triangle, whatever structure it is
+  in), the specification promises only the first (`spec:2404-2409`), so
+  a device must show the second. **Nor is a hit behind such an edge
+  admissible [C5]**: two near triangles that each are near through that
+  edge alone, lie on opposite sides of it as the ray sees them and show
+  it the same face (the face the path reports: object space, the
+  instance's flag applied) cover the ray between them, and count as a
+  certain hit like a triangle that is in. A fan closes a shared vertex
+  the same way. So does **one** near triangle whose neighbour across
+  such an edge is out by its own tolerance (the two tolerances differ
+  with the triangles' sizes; the neighbour is an ordinary pair that no
+  flag or mask takes away, out by a weight alone), where the ray is
+  inside the near triangle, exactly: the neighbour cannot be hit, the
+  near triangle is the one answer, and a miss beside that edge is a
+  hole. Where the ray is not inside the near triangle it passes beyond
+  the neighbour's reach, and the edge is a boundary for it. A fan with
+  such members closes its vertex likewise, where the ray is inside one
+  of its near members.
+* Two records are neither **[C6]**: one a shader refused, which is
+  counted by reason and is no miss and no failure, its ray being traced
+  by the next path and judged there; and a hit that carries no face (the
+  hybrid's), which is the hit of its triangle with the face not compared.
 * The bound: in a class of random rays, among rays with no sliver or
   grazing pair, at most one in 1,024 is ambiguous, all kinds together,
   each kind in its own column. A class over the bound is "not decidable
   at this tolerance", which is not a pass. Rays with a sliver or grazing
   pair are judged by admissibility and counted apart; a random class
-  where more than one ray in 16 has one validates nothing. Classes aimed
-  at edges, seams, ties, slivers and boundaries are judged by
-  admissibility and never validate a workload class alone.
+  where more than one ray in 16 has one or was refused, the two together
+  **[C6]**, validates nothing. **So does a random class that judges too
+  little [C7]**: one with fewer than 1,024 rays without a sliver or
+  grazing pair, on which a bound of one in 1,024 cannot be counted (no
+  ray, three rays), and one in which fewer than one ray in 4 is an
+  unambiguous hit whose record agreed (rays that meet nothing hold a
+  path to nothing). A list that holds a ray D3D12 forbids, or a scene
+  that is not valid, is not judged: it gets an error and no verdict.
+  Classes aimed at edges, seams, ties, slivers and boundaries are judged
+  by admissibility and never validate a workload class alone.
 
 **Level 2: what shading consumes.** What the program stores after the
 region is compared. Integers and booleans are equal on unambiguous rays
 and admissible on the others; floats are within the tolerance carried
 through that code's arithmetic (for the synthetic programs a hit point
-within x_tol / c, an interpolated attribute within b_tol times its range
-over the triangle). **On the title the same rays are compared, never two
-runs**: in a comparison run each trace dispatch of the class executes
+on the ray within t_tol of the reference's, which is x_tol / c in space
+where the triangle lies across the ray and the instance does not scale;
+an interpolated attribute within b_tol times its range over the
+triangle, each of the three weights being within b_tol). The synthetic
+function is fixed in dxr-validation-reference.md ("Level 2"). **On the
+title the same rays are compared, never two runs**: in a comparison run each trace dispatch of the class executes
 twice in one submission on the same inputs, the candidate first with its
 stores redirected to scratch copies of the pages it writes, then the
 software variant as always (unbuilt; dxr-validation.md). Output layouts
@@ -129,12 +218,15 @@ and the largest group are reported: **title level 2 does not bound
 those workloads**; the verdict says so and level 3 carries it.
 
 **Level 3: pictures.** Synthetic: each scene is drawn at 1,024 by 1,024
-from the hit data alone by a fixed function: the material colour of the
-surface hit, darkened on a back face, with a ramp of the distance and an
-attribute interpolated by the weights, 8 bits a channel. A pixel differs
+from the hit data alone by a fixed function (dxr-validation-reference.md,
+"Level 3"): the material colour of the surface hit, darkened on a back
+face, with a ramp of the distance and an attribute interpolated by the
+weights, 8 bits a channel. A pixel differs
 when a channel differs by more than 2 of 255. Pass: at most one pixel in
 1,024 differs, each from a ray the reference flagged, and no group of
-touching pixels (8 neighbours) is larger than 2. Title: the owner's
+touching pixels (8 neighbours) is larger than 2. A picture of no pixels,
+or one whose reference drawing shows no surface, is refused, not passed
+**[C7]**. Title: the owner's
 paired captures, same place, time of day and settings, software against
 the candidate, at least three pairs a scene and three software pairs as
 noise. In tiles of 16 by 16 pixels each tile is compared with **its
@@ -149,9 +241,14 @@ at by the owner and either named in the ledger as an accepted class or
 counted.
 
 **The constants** (the factor 2 in k, 2^-6, 2^-4, one in 1,024, one in
-16, 2 and 8 of 255, groups of 2, 16-pixel tiles) are arbitrary: none is
-derived. Each verdict is recomputed with each constant halved and
-doubled, and one that changes is flagged `sensitive`.
+16, one in 4 **[C7]**, 2 and 8 of 255, groups of 2, 16-pixel tiles) are
+arbitrary: none is derived. Each verdict is recomputed with each
+constant halved and doubled, and one that changes is flagged
+`sensitive`. Not varied: the range of the measurement of k (c at least
+2^-6, h times c at least 2^-10 times M), which is this section's own;
+the 2 in 2 x_tol **[C4]**, which follows from b_tol; and the 1/2 past
+which a pair has no face **[C4]**, which follows from x_tol. The floor
+of 1,024 rays **[C7]** is the bound's own number and moves with it.
 
 | Accepted | Not accepted |
 |---|---|
@@ -160,7 +257,7 @@ doubled, and one that changes is flagged `sensitive`.
 | either answer at a boundary or silhouette edge, at an extent boundary (a hit at exactly t = 0 included), or at a seam with different transforms, within the bound | a different surface at a tie or an edge where the two shade differently, in more rays than the bound or in a group |
 | either decision of a filter on a candidate at a filter threshold, within the bound | a filter decision that differs on a candidate not at a threshold |
 | either of two coplanar triangles of one surface and material | a whole surface wrong: facing, mask, flag or instance mapped wrongly |
-| the facing of a grazing ray | two identical runs that differ (`spec:2053-2056`) |
+| the facing of a grazing ray, and of a triangle thinner than the tolerance (b_tol over 1/2) | two identical runs that differ (`spec:2053-2056`) |
 
 **The hybrid's bar.** The hybrid exists for the guest's own intersection
 semantics, so it is asked for them. Unambiguous rays are judged as
@@ -175,6 +272,122 @@ for that path on that device and driver, and every region of that class
 runs the next path: the hybrid where its conditions hold and it has
 passed, otherwise software. The change is counted and logged. No effect
 is switched off, shortened or replaced by an estimate.
+
+**Changes to the first wording, proposed to the owner (2026-11-27; none
+accepted).** Each came from building the rule's reference and judging
+the CPU model of the software path under it, or from the review of that
+reference by a second implementation written for it (host tests; no
+device). Where the review corrected what was first built, the item says
+so.
+
+* **[C1] The reference's own answer is exact, not double precision.** An
+  input is an integer times a power of two, so which triangle is nearest,
+  whether a hit is on an edge and whether t is exactly an extent can be
+  decided without rounding, and are. The tolerances and the classes stay
+  in double precision: a threshold is not sharper than the constants
+  behind it.
+* **[C2] L, c and h are those of object space.** The first wording did
+  not say. Under an instance that scales unevenly the cosine and the
+  altitude differ between the spaces; the tests under judgement work in
+  object space.
+* **[C3] t_tol carries the weights' tolerance times the spread of the
+  vertices' depths.** Without the term the emulated test itself is out
+  of tolerance on thin triangles met at a slant: host test, `precision`
+  class, the documented seed + 3, ray 1661, a sliver with a weight
+  tolerance of 0.04: its t is 2.1 tolerances off with its weights within
+  0.004 of theirs (six such rays in 12 seeds). The rule's bar is the
+  emulation's own accuracy with a margin, so the tolerance has to hold
+  what the emulation's formulation does with weights that are within
+  theirs. With the term: none in 201 seeds (8.36 million rays), and
+  the model's largest error in t is 0.27 of the tolerance.
+  **k is measured against this tolerance** (corrected in review: as
+  first built the measurement still read t against the first wording's
+  x_tol / (L c), a tolerance the rule no longer had, and that t part
+  carried all of it: 2.16 units at the documented seed, where the
+  tolerance as it stands measures 1.41). How much the reading matters
+  shows on a shape no class holds, a needle 384 to 512 times as long as
+  it is high, met at a slant and wholly inside the measured range: 4.3
+  to 4.7 units by the first wording, which would have made k 16, and
+  0.01 by the tolerance as it stands (a host test).
+* **[C4] Grazing, sliver and zero-area pairs are placed by distance.**
+  By the first wording a grazing pair was out only by a weight below
+  -b_tol, and b_tol is unbounded there: every triangle whose plane the
+  ray nearly parallels, anywhere in the scene, was near, and every ray a
+  grazing ray. A zero-area triangle was out by definition and yet a kind
+  of ambiguity: the emulated test can report a hit on one (its
+  determinant rounds to zero only sometimes; 14 of 210 rays that pass
+  one in the `degenerate` class), and a device that transforms the
+  vertices first may no longer see it as one. **The face of a triangle
+  thinner than the tolerance is not a fact either** (corrected in
+  review: as first built the face of every sliver pair was compared and
+  culled by). A path with each vertex moved by an eighth of the position
+  tolerance then failed, on faces alone: 81 rays in 12 seeds of the
+  classes at an eighth, 231 at a quarter, and no failure of another
+  kind. With the face compared only while b_tol is at most 1/2: none.
+* **[C5] Nothing behind a closed edge is admissible.** The first wording
+  forbade a miss there and, read literally, admitted a hit on what is
+  behind: the two triangles are near, so neither is an in-hit that
+  hides it. That is the hole the rule exists to refuse, showing the
+  surface behind instead of nothing. **And the neighbour that closes an
+  edge need not itself be near** (corrected in review: as first built
+  the neighbour was looked for among the in and near triangles only).
+  Of two triangles of unequal size the larger one's weight tolerance
+  reaches further from their edge than the smaller one's, so a ray
+  inside the larger one, up to 1.5 units from the edge in the case
+  tried, was beside a "boundary" and a miss was admissible there.
+* **[C6] A refused record and a hit without a face are outcomes of their
+  own.** A shader that cannot decide a ray writes a refusal
+  (dxr-shader-emission.md); it is counted by reason, is neither a miss
+  nor a failure, and leaves its ray unjudged for that path. Refused rays
+  and rays with a sliver or grazing pair are the rays a path was not
+  held to by numbers, and **the share of one ray in 16 is for the two
+  together**, a ray that is both counted once (corrected in review: as
+  first built each was held to one in 16 apart, which is one ray in 8).
+  The hybrid's records carry no face; its hits are judged as the
+  triangle's, the face not compared.
+* **[C7] A class that judges nothing validates nothing** (from the
+  review). The first wording gave a random class a pass for no failure
+  and few ambiguous rays, and so gave one to an empty list, to three
+  rays, and to 1,600 rays aimed past every triangle and answered with
+  misses: what a broken harness produces. Two floors. At least 1,024
+  rays without a sliver or grazing pair: the bound's own number, since
+  one in 1,024 cannot be counted on fewer; no new constant. At least one
+  ray in 4 an unambiguous hit whose record agreed: a new arbitrary
+  constant, halved and doubled with the others. A class over the bound
+  stays "not decidable" whatever its size. The largest magnitude a pass
+  covers (`m_max`, dxr-validation.md) is that of those unambiguous hits
+  alone; rays with a sliver or grazing pair, whose numbers are not
+  compared, add nothing to it and their magnitudes are reported apart
+  (as first built they counted, and a class could pass and report a
+  reach of 2^20 on triangles it had checked near the origin). A list
+  with an illegal ray or a scene that is not valid, and a picture of no
+  pixels or of no surface, get an error and no verdict.
+
+**What the host tests say of the bound, for the owner's decision.** A
+ray that meets a triangle is within b_tol of one of its edges about six
+times b_tol of the time (three edges, both sides), so with k = 8 the
+bound of one ambiguous ray in 1,024 holds only where b_tol stays under
+about 1/6,000: h times c above about M / 85. Over 201 seeds of each
+random class (run by hand; CPU only) the reference counts, among rays
+without a sliver or grazing pair, one ambiguous ray in 1,028 to 6,787
+for seven classes (one triangle; soups a few units across within 60
+units of the origin; layered sheets; the closed meshes; the seam cubes),
+which is inside the bound on average though one seed of 1,400 to 2,000
+rays falls either side of it; one in 330 to 500 behind rotated and
+scaled instances, with instance masks and in a soup of 2,048 triangles;
+one in 127 with a filter of 64 cells a triangle; and at 2^12 and beyond
+59 % of the rays have a sliver pair (dxr-validation-reference.md, "What
+the bound comes to"). By the rule six of the fourteen random classes are
+"not decidable at this tolerance" on average or validate nothing, and a
+seventh, `surface-rays`, is over the bound by what it is made to count;
+this on the CPU, with a model that makes no error the rule refuses,
+before any device is asked. (As first built the closed meshes were among
+them, at one ray in 80: that number was the generator's, whose rays from
+inside a mesh lay on a lattice and went exactly through edges. Those
+rays are a directed class now, and the closed meshes are at one in
+1,975.) Whether the bound, the shares or the classes' triangle sizes
+should move is the owner's decision; nothing was moved to make a class
+pass.
 
 ## Semantics, from the native path's side
 

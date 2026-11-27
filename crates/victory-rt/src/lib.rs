@@ -14,26 +14,39 @@
 //!   software path. The per-node test as `victory-shader` emulates it, a
 //!   builder that writes a scene as console-format nodes, and a traversal
 //!   over those bytes.
-//! * [`compare`], [`results`]: the tolerance policy, the comparison and the
-//!   result file a Windows run writes.
+//! * [`compare`], [`results`]: the comparison by the reference's own error
+//!   model, and the result file a Windows run writes.
+//! * [`rule`], [`shade`], [`picture`]: the proposed rule for functionally
+//!   equivalent rendering (docs/dxr-compatibility.md): its tolerance and
+//!   the measurement of its constant, the kinds of ambiguous ray and what
+//!   is admissible for each (level 1), what shading consumes (level 2),
+//!   pictures (level 3), and each verdict recomputed with each arbitrary
+//!   constant halved and doubled.
 //!
 //! `victory-shader`'s Windows tests hold the reference the node test here
 //! was written beside; one of them compares the two word for word, so a
 //! change to the lowering cannot leave [`node`] behind unnoticed.
 //!
 //! Everything is `f32` and `f64` arithmetic from the four basic operations,
-//! and integers: the same inputs give the same bytes on every platform.
+//! and integers; the rule's tolerances and one distance in the reference's
+//! error model also take square roots, which IEEE 754 rounds as it does
+//! those. No other function of the standard library's floats is used (none
+//! whose rounding a platform may choose). The same inputs give the same
+//! bytes on every platform.
 
 pub mod compare;
 pub mod console;
 pub mod exact;
 pub mod generate;
 pub mod node;
+pub mod picture;
 pub mod record;
 pub mod reference;
 pub mod results;
 pub mod rng;
+pub mod rule;
 pub mod scene;
+pub mod shade;
 pub mod traverse;
 
 pub use record::{Hit, Ray};

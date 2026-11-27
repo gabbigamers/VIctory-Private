@@ -1574,3 +1574,52 @@ Only what cannot be done from a cloud session.
   on the integrated commit in a fresh build directory (1,043 host tests;
   877 containers, none rejected; the Windows type-check; the asset
   policy) and found all 877 containers byte-identical to the head's.
+* `victory-rt`: the proposed rule for functionally equivalent rendering
+  as pure functions (`rule.rs`; level 2 in `shade.rs`, level 3 in
+  `picture.rs`), beside the older comparison, which is kept. Implemented.
+  Tested (host tests). Type-checked for Windows only: the same code and
+  nothing more. Hardware-validated: nothing; it ran on no device and no
+  verdict is a hardware result. The rule, its corrections [C1] to [C7],
+  k and "one ray in 4" are proposals the owner has not accepted; `auto`
+  still selects nothing.
+  * Found, on the CPU only: k is measured, not chosen. Read against the
+    tolerance as it stands, the emulated test's largest error over the
+    14 random classes is 1.407 units of 2^-23 M at the documented seed
+    (k = 4, as on 192 of 201 seeds) and 2.369 over that seed and the
+    200 after it (seed + 105, `transformed`; 1.83 billion pairs, by
+    hand), so `rule::K` = 8, the sample's value. A test measures seeds
+    0 and + 105. k is a property of these classes' triangles.
+  * Found: with k = 8 the bound of one ambiguous ray in 1,024 holds in
+    seven random classes (1 in 1,028 to 6,787 over 201 seeds); five are
+    over it by 2 to 8 times, `surface-rays` by construction, and `far`
+    validates nothing. At the documented seed: 4 `Pass`, 9
+    `NotDecidable`, 1 `ValidatesNothing`. Nothing was moved to make a
+    class pass. Speculative as to any host: this is the CPU model.
+  * The software model under the rule (27 classes, 41,607 rays; 201
+    seeds by hand): no record not accepted. A third tracer with vertices
+    moved by 1/8 and 1/4 of the position tolerance is accepted; planted
+    defects, a seam leak and a one-pixel seam fail.
+  * By default nothing in a run changes: no switch, log line or column;
+    the crate is used by tests and the `rt-probe` command only. 17 scene
+    classes added (27; the first ten byte for byte as before). Result
+    files are version 2 with a line `rule k 8`; another k is refused,
+    version 1 still reads.
+  * The review found (10 findings, all reproduced and corrected): k read
+    against the first wording's t tolerance; `closed`'s "1 in 80" was the
+    generator's lattice rays (now the directed class `closed-edge`;
+    `closed` is 1 in 1,975); faces of slivers thinner than the tolerance
+    compared; a neighbour sought among candidates only; a pass on no
+    rays; `m_max` over pairs not compared; illegal rays judged; `parse`
+    dropping the k line.
+  * Where it meets the probe: the probe keeps its ten classes and still
+    judges by the older comparison, not the rule; its default run is as
+    it was (10 classes, 1470 dispatches). `rt-summary` could not read a
+    version 2 hit file and now does.
+  * Checked on the integrated commit: 1090 host tests (`victory-rt`: 97
+    unit, 13 `agreement`, 17 `rule`); the validator, 877 containers, 0
+    rejected (the shader crate is untouched); the Windows type-check;
+    the asset policy. The 201-seed sweep and the corrector's 18
+    deliberate faults were not repeated.
+  * For the owner: the rule with [C1] to [C7]; k = 8 or 4; the bound;
+    the hybrid's bar. On Windows, `cargo test -p victory-rt`: the 27
+    fingerprints and the measured k must hold there.

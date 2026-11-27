@@ -654,6 +654,9 @@ fn hit_sections(text: &str) -> Result<Vec<(String, Vec<&str>)>> {
             open = false;
         } else if open {
             sections.last_mut().expect("a section is open").1.push(line.trim());
+        } else if n == 2 && line.starts_with("rule k ") {
+            // Version 2 of the format: the third line is the constant of
+            // the rule's tolerance as the writing build has it. No record.
         } else if !line.trim().is_empty() {
             bail!("line {}: a record outside a section", n + 1);
         }
@@ -1359,6 +1362,22 @@ mod tests {
         let compared = compare_hits(&text, &text).unwrap();
         assert_eq!(compared.identical, [("static-soup".to_string(), "0".to_string())]);
         assert_eq!((compared.records, compared.differing.len()), (case.rays.len() as u64, 0));
+        // The file is version 2 of the format, with the rule's constant on
+        // its third line; that line is no record and belongs to no section.
+        let head = "victory-rt results 2\nproducer a test\nrule k 8\n";
+        assert!(text.starts_with(head), "{}", &text[..text.len().min(120)]);
+        // A file of version 1, as the probe wrote before that line was
+        // there, holds the same sections and compares as identical.
+        let old = text.replacen(head, "victory-rt results 1\nproducer a test\n", 1);
+        assert_eq!(hit_sections(&old).unwrap(), sections);
+        let compared = compare_hits(&old, &text).unwrap();
+        assert_eq!((compared.records, compared.differing.len()), (case.rays.len() as u64, 0));
+        // And what the probe wrote, the probe's own reader reads back.
+        let back = adapter::read_hits(&text).unwrap();
+        assert_eq!((back.len(), back[0].records.as_slice()), (1, misses.as_slice()));
+        // The line anywhere else is still a record outside a section.
+        let late = format!("{text}rule k 8\n");
+        assert!(compare_hits(&late, &text).unwrap_err().to_string().contains("a record outside a section"));
     }
 
     /// What the comparison of two runs goes by to know which sections the
