@@ -615,3 +615,24 @@ Only what cannot be done from a cloud session.
   The documents give the order of work inside the owner's decision to
   build, the evidence that would change it, the probe's paths and
   pass rules fixed before measuring, and what is needed from the owner.
+* Ray tracing: the owner's revised priorities of 2026-11-27, which
+  answer the two questions the feasibility record left for the owner.
+  Full native traversal and triangle intersection on the host (host
+  bottom- and top-level structures, inline RayQuery) is the primary,
+  performance-oriented architecture, not the hybrid. Bit-identical
+  numbers between the console's hardware and the host's are not
+  required where functionally equivalent rendering can be demonstrated;
+  what "demonstrated" means is to be written down before measuring. The
+  original shader's material processing and everything that depends on
+  a hit must be preserved. The hybrid (host boxes, the title's triangle
+  test in the shader) is kept as a compatibility option for work that
+  needs the guest's own intersection semantics, and software traversal
+  as the reference and the fallback. To be investigated: not building
+  the guest's structures at all where the native path can safely stand
+  in and no other consumer is affected. Measured independently: the
+  card's execution time, the processor's translation overhead, video
+  memory, system memory, and rendering correctness. The architecture
+  stays vendor-independent, with NVIDIA RTX the first target for
+  optimisation and validation. The four DXR documents are being revised
+  to this; until that lands, where they say host triangles are "never
+  passed" or put the hybrid first, this entry governs.
