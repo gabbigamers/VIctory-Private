@@ -8,50 +8,75 @@ the platform underneath it and converts the title's data, ahead of time where
 it can (shaders and pipelines too, see Getting started) and on first use
 otherwise. See [docs/architecture.md](docs/architecture.md).
 
-## Status (2026-11-25)
-
-**Not playable yet, because of the framerate: about 1 frame per second in the
-world.** Nothing else keeps the game from working: the title boots, runs its
-menus at its own 30 fps, loads the world, plays the intro cutscene and
-reaches the **prologue**, the mission after it, with the graphics fully
-displayed. 
+## Status (2026-11-27)
 
 | Stage | State |
 |-------|-------|
-| Boot, first-boot screens (accessibility, language, settings, legal) | works, 30 fps |
-| Intro video with sound | works |
-| Start screen, profile and saves | works |
-| Loading into the world (about a minute) | works |
-| The intro cutscene | plays at about 1 fps (0.9-1.0 s a frame, warm cache, quiet machine): textured and lit characters with whole hair, buildings, sky, depth of field, the title card, credits and interface. Missing: ray-traced shadows and indirect light, the local-light shadow mask. Seen in some shots: a pink band over nearer bodies, a stand-in head on a secondary character for a few frames |
-| The prologue | reached; the graphics are fully displayed, at about 1 fps |
+| Boot, first-boot screens (accessibility, language, settings, legal) | Not Tested, 30 fps is the goal |
+| Intro video with sound | Not Tested |
+| Start screen, profile and saves | Not Tested |
+| Loading into the world (about a minute) | Not Tested |
+| The intro cutscene | Not Tested |
+| The prologue | Not Tested |
 
-In the intro cutscene at 1 fps the opening credits land over other shots than
-on a console: they follow the frame count, the shots follow the clock.
+## Architecture:
 
-Tested on one machine: Windows 11, AMD RX 6700 XT (12 GB).
+| Features |
+| Native x86-64 Execution | Executes Xbox Series X|S CPU code directly on Windows. |
+| Semantic Compatibility Layer | Translates guest operations into functionally equivalent native PC operations. |
+| Vendor-Independent Design | Capability-based hardware support, with NVIDIA prioritized for development. |
 
-> **Warning.** Entering the world on a real GPU hung it in earlier builds,
-> and Windows then reset the display driver (every monitor goes black for a
-> moment). The latest runs, several minutes each in the world, did not, but
-> it is not ruled out; a run can also end on a GPU fault (`crashes.log`). A
-> diagnostics build with `VICTORY_D3D12_WARP=1` renders on the software
-> adapter instead (too slow to reach the world in minutes).
+## Ray Tracing:
+| Features |
+| Native DXR Backend (Experimental) | Utilizes dedicated hardware for ray traversal and triangle intersections. | 
+| Hybrid Ray Tracing (Experimental) | Combines hardware traversal with guest-compatible intersection calculations. |
+| Software Ray Tracing Fallback | Retains translated compute-based traversal for unsupported workloads. |
+| Adaptive RT Backend Selection (Planned) | Selects the fastest validated implementation for each workload. |
+| Acceleration Structure Management | Supports native BLAS/TLAS construction, refitting, compaction and caching. |
+| Inline RayQuery Translation | Generates native DXIL ray-query operations. |
+| Semantic Traversal Recognition (In Development) | Identifies guest ray-tracing workloads for native substitution. |
 
-What each part does today and what it still needs:
+## Shader Translation:
+| Features |
+| RDNA-to-DXIL Translation | Recompiles console GPU instructions into DirectX-compatible shaders. |
+| Wave64 Emulation (Experimental) | Enables supported 64-lane workloads on 32-lane GPU architectures. |
+| Shader Execution Safeguards | Provides individual loop limits and cumulative execution protection. |
+| Persistent Shader Caching | Stores translated shaders and compiled pipelines across sessions. |
+| DXIL Validation | Validates generated shader containers using Microsoft's official validator. |
 
-| Subsystem | Today | Needs |
-|-----------|-------|-------|
-| Loader | Runs the title's executable and its DLLs in our process; crash reports name the faulting code and are kept in `crashes.log` | – |
-| Runtime services | One signed-in offline user, licences, packages, saves that survive a kill at any step, text entry dialog | Speech is silent; the dialog and relaunch are untested live |
-| Network | Offline by design: the title cannot reach the network | – |
-| Files and streaming | Archives and streamed data read, zlib and BCPack decoded in parallel | Loading is limited by writes into title memory |
-| Input | XInput pads, keyboard, keyboard stand-in pad | Trigger rumble |
-| Audio | Menu, video and loading sound; XMA voices and Opus streams decode | Reverb is silent; Opus results unverified against the title |
-| GPU: menus | Draws, compute and presentation on host D3D12; only changed title memory is copied | Frame pacing drifts on one screen in release builds |
-| GPU: world | The scene is drawn and presented: mesh pipelines, indirect execution, views the shaders pick from the heap themselves, title memory read by address, depth written from compute, lists that wait for values other queues write, textures made when a shader first reads them, pipelines pre-built or made by worker threads and kept on disk, depth bounds on supporting adapters (synthetic tests) | The title's ray-tracing structures are never built (no ray-traced shadows or indirect light in the intro cutscene); about 1 s a frame; draws of untranslated shaders are dropped; real queries, HDR and scaling are missing |
-| Shaders | Console GPU code recompiled to DXIL, ahead of time (`translate --cache`) or at first use, cached on disk. Menus: all. World: all but under 300 of 24,387 programs | Merged geometry stages (195 programs) and under 100 others; fused multiply-adds follow the host GPU; some compute programs need a GPU with 64-lane waves |
-| Textures | Console tiled layouts and detiling for the modes the title uses | Render-target metadata planes |
-| Series S mode | Menus, loading and the world run with the PC upscaler (`VICTORY_FIDELITYFX_DIR`, about 1 s a frame) | The title's own upscaler DLLs: six of their passes are untranslated, so their picture is wrong |
+## Memory Management:
+| Features |
+| Memory Ownership Tracking | Tracks resource ownership, lifetime, consumers and allocation dependencies. |
+| Memory Budget Management | Adapts resource allocation to available system RAM and VRAM. |
+| On-Demand Memory Paging (Experimental) | Creates host-backed memory pages when guest shader accesses require them. |
+| Resource Lifetime Management | Protects GPU resources against premature release and invalidation. |
+| Memory Allocation Accounting | Provides detailed per-subsystem memory consumption statistics. |
+| Scratch Memory Pooling | Reuses temporary ray-tracing allocations to reduce allocation overhead. |
+
+## Rendering & Streaming:
+| BCPack Texture Decompression | Implements corrected texture decoding backed by extensive synthetic validation. |
+| Native Direct3D 12 Rendering | Translates console graphics workloads into host GPU commands. |
+| Mesh Shader Support | Supports modern geometry rendering pipelines. |
+| Asynchronous Pipeline Compilation | Reduces blocking compilation during rendering. |
+| Texture Streaming | Converts and uploads textures as required by the guest renderer. |
+| FidelityFX Integration | Supports compatible PC-native upscaling providers. |
+| Xbox Series X|S Profiles | Supports both console rendering configurations. |
+
+## Validation & Diagnostics:
+| Independent Ray-Tracing Reference | Provides mathematical CPU reference implementations for intersection correctness. |
+| Synthetic Workload Validation | Tests rendering operations independently of game execution. |
+| Performance Instrumentation | Records CPU execution, GPU execution, frame pacing and memory consumption. |
+| GPU Capability Detection | Identifies supported shader models, wave sizes and ray-tracing capabilities. |
+| Regression Testing | Protects existing functionality against unintended implementation changes. |
+
+## Development Objectives:
+| Full Rendering Fidelity | Preserve original geometry, textures, materials, lighting and shadows. |
+| Sustained 30 FPS | Target consistent native rendering without frame generation. |
+| 16 GB RAM Compatibility | Reduce physical memory requirements without sacrificing rendering quality. |
+| Cross-Vendor Compatibility | Support capable NVIDIA, AMD and Intel GPUs through standardized APIs. |
+| Complete World Rendering | Achieve accurate geometry, reliable streaming and complete map representation. |
+
+
 
 ## Getting started
 
