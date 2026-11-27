@@ -1157,10 +1157,12 @@ Only what cannot be done from a cloud session.
   * Evidence: arithmetic on this host, nothing else. The tolerance is
     a bound of modelled `f32` arithmetic times 4; that any hardware
     stays inside it is speculative. Found on the model of the existing
-    node test, each kept by a host test: `t` on slivers follows the
-    barycentric error; with tight boxes a ray leaves a closed mesh (7
-    of 40 seeds); a triangle of no area can be hit (D3D12 makes no such
-    hit); a hit one float step inside the range can be lost. That the
+    node test, the first three each kept by a host test: `t` on slivers
+    follows the barycentric error; with tight boxes a ray leaves a
+    closed mesh (7 of 40 seeds); a triangle of no area can be hit
+    (D3D12 makes no such hit); and a hit one float step inside the
+    range can be lost (seen on three rays of the documented seed in
+    the corrector's dump; the test only classifies them as rounding). That the
     shader does the same rests on the test that has not run.
   * By default nothing in a run changes; no switch, log line or
     column. Outside the crate, kept by the coordinator: a Windows-only
@@ -1251,7 +1253,9 @@ Only what cannot be done from a cloud session.
     document's status table lists the rules the reading left open.
   * By default: the device report (`victory gpu-info`, a run's log)
     ends with a `ray tracing backend:` line that says software and
-    that no run uses the hardware backend; three performance-log
+    that no run uses the hardware backend, its line for ray tracing
+    tier 1.1 is reworded, and an unknown value of the switch adds a
+    note line; three performance-log
     columns after the other owners and before the wave columns
     (`own_rt_structures_mb`, `own_rt_scratch_mb`, `own_rt_buffers_mb`;
     rows R2 to R4 of docs/memory.md), 0 while nothing opens the backend.

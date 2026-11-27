@@ -165,6 +165,10 @@ is native, hybrid, software. `VICTORY_RT_BACKEND=software|auto|native|hybrid`,
 default `software`; the last two force a path for measuring, on eligible
 workloads only, each use logged as not validated;
 `VICTORY_RT_CLASS=<class>` narrows a forced path to one workload class.
+The host module in the tree today (`crates/victory-gpu/src/rt/`, called by
+nothing yet) reads `software|hardware|auto` and takes any other value,
+`native` and `hybrid` included, as `software` with a note in the device
+report; the values above replace `hardware` when the layer is built.
 
 | When | What is decided | Evidence |
 |---|---|---|
