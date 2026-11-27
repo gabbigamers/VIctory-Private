@@ -898,3 +898,54 @@ Only what cannot be done from a cloud session.
   without the worktree's own tests in it. From this entry on every
   change is validated in a build directory of its own before it is
   committed, whatever its engineers ran.
+* Ray tracing: the four DXR documents revised to the owner's two
+  directions of 2026-11-27 (native first; a semantic compatibility
+  layer), from three readers' findings, challenged by two verifiers (28
+  problems, all upheld in substance) and corrected. Everything in them
+  is speculative: nothing was run on a device.
+  * `docs/dxr-architecture.md`: the layer. One path-independent
+    description of a recognised trace workload (ray source, flags,
+    mask, extents, the filter run on non-opaque candidates, what is
+    kept from a hit, and how the result depends on visit order: none,
+    tie by visit, tie by key, visit order), a generator per path
+    (native, hybrid, software as the untouched region), a table of
+    guest concepts and their native equivalents with where each
+    difference is resolved (translation, pipeline creation, structure
+    build, or per ray or hit), and a validation record by workload
+    class, device and driver. `auto` selects a path only with three
+    gates passed: the synthetic probe, a title verdict, a title time.
+    The probe's own times select nothing.
+  * `docs/dxr-compatibility.md`: the rule for "functionally equivalent
+    rendering", written before any measurement and marked proposed
+    until the owner accepts it: three levels (rays; what shading
+    stores; pictures), a tolerance computed on the processor from the
+    emulated test's own error against a double-precision reference and
+    never raised to fit a host, kinds of ambiguous ray (shared edge,
+    seam, boundary, extent, tie, filter threshold, degenerate) with a
+    bound on how many a class may hold, what is accepted (a number
+    within tolerance; either triangle at an edge of one surface) and
+    what is not (a lost hit on an unambiguous ray or at a like-facing
+    shared edge; a different surface at a tie beyond the bound).
+  * Leaving out the guest's own builds: "always build" is the only
+    position available today. Keeping a structure on the host only
+    cannot be shown safe (page guards work on 64 KiB pages shared with
+    the title's own objects and cannot show "no processor read");
+    not dispatching the builder needs five conditions, two of which
+    have no signal yet (a stand-in for the size the title reads back;
+    no later update or copy). Two more consumers were found in the
+    builder's exports: a processor-side check of a built structure and
+    a rehydrate that takes a device and no command list; whether the
+    title calls either is unknown.
+  * Found on the way, to be settled before any facing-dependent class
+    is validated: this repository's emulated triangle test and the
+    forks' give opposite facing for odd triangle-id bytes. Which is
+    right needs a count of id bytes over one real bottom level.
+  * For the owner, each with the default taken meanwhile in the
+    documents: acceptance of the rule and its constants (until then
+    `auto` selects nothing under it); the hybrid's bar on ambiguous
+    rays (default: equal to the emulated test there); what "fastest"
+    means (default: the title's own trace time plus the host builds a
+    path adds, against software's); loops with an iteration or stack
+    cap (default: software); the video-memory budget for host
+    structures (no value chosen; no allocation code before the
+    `docs/memory.md` case is written).

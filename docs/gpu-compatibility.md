@@ -41,6 +41,18 @@ Two GPUs meet in this code and only one of them is fixed.
    width), the translation spells the guest's result out itself, or uses
    the host operation only where a measurement on that device shows it
    agrees.
+   *For ray tracing, the owner's decision of 2026-11-27:* where a
+   recognised traversal is answered by the host's own ray-tracing
+   hardware, "agrees" does not mean bit for bit. It means functionally
+   equivalent rendering, demonstrated by a recorded test on that device
+   and driver before the path is selected. What "demonstrated" means is
+   written in [dxr-compatibility.md](dxr-compatibility.md) as a
+   proposal, and binds once the owner has accepted it. The hybrid is
+   answered by host hardware too and is selected only after its own
+   recorded test; whether its bar is that rule or equality with the
+   software path is the owner's to say. Without a passing test the
+   traversal runs the software path, which itself, like everything
+   outside ray tracing, stays under the rule as written.
 4. **Standard Direct3D 12 first.** A vendor's extension or library is used
    only as an optional path: behind a capability check, with a standard
    path that gives the same picture, and with a measured gain recorded in
