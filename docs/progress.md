@@ -194,7 +194,7 @@ that need no title files; the items marked "owner's machine, title" wait.
 | # | Blocker | Audit | Next step | Where |
 |---|---|---|---|---|
 | 1 | A lane stopped by the loop limit keeps running with a truncated loop's values | A-C4 | **fixed and host-tested** (2026-11-26); to run on Windows: the DXIL validator and the hardware and WARP cases its tests now carry. Counters and a defined end per stage follow (C7) | owner's machine, no title |
-| 2 | BCPack: a codebook difference against the independent decoder, untested block formats, no end-state check | A-C15 | the entropy stage (all six lane layouts) and BC1 blocks are compared with the vendored part of `bcpack-rs` on synthetic streams; two differences in the lane decoder are reproduced and their corrections held as a separate commit until validated against Microsoft's module. The block stages of BC3, BC4, BC5, BC6H and BC7 are compared with nothing from outside | any host |
+| 2 | BCPack: a codebook difference against the independent decoder, untested block formats, no end-state check | A-C15 | the entropy stage (all six lane layouts) and BC1 blocks are compared with the vendored part of `bcpack-rs` on synthetic streams; two differences in the lane decoder were reproduced, checked against a simulation of Microsoft's one-lane module and changed in a commit of their own (2026-11-27; `docs/bcpack-lane-corrections.md`); how several lanes share a stream is still unpublished. The block stages of BC3, BC4, BC5, BC6H and BC7 are compared with nothing from outside | any host |
 | 3 | Lane-dependent compute programs declare the console's wave size; a host with narrower waves drops them, and the trigger is wider than needed | A-C1, A-C3, G2 | refusal reason and tally; narrow the trigger; lane-carrying lowering | any host; counts need the title |
 | 4 | A host with a smaller view heap gets shaders that redirect past it | A-C2, G3 | heap layout as a tested function of the host's size | any host; `gpu-info` for the card's limit |
 | 5 | Fused multiply-add and other float behaviour follow the host | A-C9, A-C10, G4, G5 | probe run on the target card; exact lowering where it differs | owner's machine, no title; then any host |
@@ -655,3 +655,45 @@ Only what cannot be done from a cloud session.
   measured GPU benchmarks. Unchanged: NVIDIA first but vendor-independent,
   16 GB of system memory, sustained 30 frames a second, no loss of
   rendering quality.
+* BCPack: the two lane-decoder changes are in, as a commit of their own
+  that `git revert` undoes, on the owner's condition that validation
+  shows valid synthetic streams handled. The earlier "held back" entry
+  above is superseded; no test is ignored for this reason any more and
+  the two known-difference tests are gone. What carried the decision,
+  and what it costs, from `docs/bcpack-lane-corrections.md` (compared,
+  reviewed, corrected; nothing run on Windows):
+  * Against Microsoft's one-lane module simulated unmodified, the only
+    independent evidence: the changed decoder equals the module on
+    189,000 of 189,000 valid one-lane streams over four seeds; the
+    earlier decoder's entry point on 109,348. The kept byte is confirmed
+    by decoded symbols (16,000 of 16,000 against 2,401). The symbol
+    count is confirmed for a lane's own symbols and bytes, and for
+    bytes behind a finished lane on one reading of the module's start
+    signal only. The one-step-later end is the module's step order on
+    one lane and changes no symbol there; whether a group of lanes
+    needs it is not established, because how lanes share a stream is
+    not published.
+  * Against the vendored port (related code, not proof): every stream
+    in the port's byte order decodes as written (20,184 of 20,184);
+    the earlier decoder refused 8,036 of the first 14,760 and returned
+    other symbols with no error on 759.
+  * What changed for input the earlier decoder accepted, stated as
+    regressions where they are: streams in the earlier decoder's own
+    byte order with a filler fragment before another lane's data (of
+    9,224, other symbols with no error on 2,612, refused 475; which
+    byte order real streams have is the unpublished part); a call that
+    asks for fewer blocks than the stream was written for (of 1,696,
+    another output with no error on 392, refused 24; the one runtime
+    call site, `dstorage.rs`, decodes a request's whole destination,
+    and whether a title ever asks for less than a stream holds is not
+    known); throughput lower in direction (paired ratio below 1 in 190
+    of 192 cells, by the stated rule a difference in 45 and none in
+    the repository's own benchmark; the size, between 0 and 9 %, moved
+    with the build on a loaded shared machine and is not a figure);
+    the lane bank on the stack 320 to 512 bytes, heap use identical.
+    No panic in either version on 241,680 damaged inputs, with and
+    without overflow checks; neither has an end-state check.
+  * To settle it for real streams: one texture's decode on the owner's
+    machine compared before and after (same bytes or not), which also
+    tells which byte order the title's streams have.
+
