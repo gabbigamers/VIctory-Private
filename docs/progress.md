@@ -587,3 +587,31 @@ Only what cannot be done from a cloud session.
   workflows building on four cores, then passed three times alone. Rerun
   before reading it as a regression.
 
+* Ray tracing: the feasibility record, written by one architect from six
+  readers' findings, challenged by three independent verifiers (48
+  problems raised, 9 of them statements that were wrong; none rejected as
+  unfounded) and corrected: `docs/ray-tracing-research.md`,
+  `docs/dxr-architecture.md`, `docs/dxr-compatibility.md`,
+  `docs/dxr-validation.md`. Nothing in them was run. The verdict is
+  "not determined; needs measurement":
+  * Hardware traversal over host triangles is not equivalent to the
+    software path by the DXR specification itself, whatever the driver:
+    exclusive extents against the emulation's inclusive ones, one
+    triangle reported on a shared edge against both, a rounded float
+    distance against numerator and denominator, candidate order left to
+    the implementation. It can only ever be offered under a tolerance
+    the owner accepts.
+  * A per-node hardware answer does not exist in D3D12.
+  * The one candidate for equivalence is the hybrid: host boxes around
+    the guest's triangles, the emulated triangle test kept in the shader.
+    It equals the software path only for a loop whose result does not
+    depend on candidate order, on rays where guest and host box culling
+    agree, on a driver that presents every candidate and repeats none;
+    each of those is a thing to measure, per driver.
+  * Nothing can be traversed until the title's structures appear in this
+    fork (seven candidate causes now listed), and no trace loop of the
+    title has been read by anyone: their shapes decide what can be
+    recognised.
+  The documents give the order of work inside the owner's decision to
+  build, the evidence that would change it, the probe's paths and
+  pass rules fixed before measuring, and what is needed from the owner.
