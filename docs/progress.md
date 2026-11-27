@@ -513,3 +513,39 @@ Only what cannot be done from a cloud session.
   defined end for the other stages; stops counted and reported by shader
   and stage.
 
+* Ray tracing: the owner's decisions of 2026-11-27. An experimental
+  native DXR backend is to be developed, not only investigated: inline
+  RayQuery (DXR 1.1), host bottom- and top-level structures built from the
+  title's build descriptions where they can be seen, whole traversal
+  regions translated rather than single node instructions, the software
+  traversal kept as correctness reference and fallback, a hybrid form
+  (hardware box traversal, software triangle test) where the host's
+  triangle test cannot keep the title's semantics, and selection by
+  detected capability. It stays behind a switch, off by default, until
+  validated. Bit-identical results are not assumed where DXR leaves a
+  result to the implementation: tolerances are written down before
+  measuring, and cases that need the software path are named. Traversal
+  time, build time, video memory, system memory and synchronisation cost
+  are measured separately. Nothing ray traced is switched off to reach
+  the frame-rate target. Words used from here on: implemented, tested
+  (host tests), type-checked for Windows only, hardware-validated,
+  speculative.
+* Ray tracing: what the first reading found (four public forks, the
+  reference notes, the DXR specification; none of it run here).
+  No fork uses a host ray-tracing API. The private fork's ray-tracing
+  files are byte-identical to its upstream's. The forks that get further
+  differ from the private fork in four places, each a candidate cause for
+  the structures never appearing (audit A-C7), none decided without a
+  title run: a flag of the console dispatch that makes the counts threads
+  instead of groups; host copies for title pages that lie in no buffer;
+  the address of a view whose dimension is "acceleration structure"
+  (the private fork records 0); 64-lane programs on hosts with 32-lane
+  waves. Each is being investigated in a worktree of its own. The forks'
+  figures (an RX 7900 XTX: traversal 56 to 60 ms of the card's time a
+  frame, building 1.5 ms) are theirs, with dynamic structures still
+  partly corrupt; they are not a fidelity reference and not our
+  measurement.
+* Found on the way: `emit/lower/bvh.rs` names AMD GPURT and Mesa RADV as
+  the sources of the emulated node test, and `THIRD_PARTY_NOTICES.md` has
+  no entry for either. To be checked (licence, and whether code or only
+  the method was taken) and noticed, as a change of its own.
