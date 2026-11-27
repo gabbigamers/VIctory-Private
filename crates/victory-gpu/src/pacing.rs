@@ -390,15 +390,15 @@ mod tests {
             line,
             "12.3,370,150,30.00,33.33,33.33,33.33,33.33,33.33,0.0000,0.00,5123,0.2,12.35,6.50,\
              20480,9000,28000,40000,9500,15000,120,21000,9500,1234,16300,2100,3000,24000,8000,8600,64,7000,\
-             1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16"
+             1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17"
         );
         (row.memory.commit, row.memory.video_budget, row.memory.uploads) = (None, None, None);
-        row.memory.owners[14] = None;
+        (row.memory.owners[14], row.memory.owners[16]) = (None, None);
         let line = row.line();
         assert_eq!(line.split(',').count(), columns.split(',').count());
         assert!(line.contains(",6.50,,9000,28000,40000,9500,,120,"), "{line}");
         assert!(line.contains(",8600,,7000,1,2,"), "{line}");
-        assert!(line.ends_with(",13,14,,16"), "{line}");
+        assert!(line.ends_with(",13,14,,16,"), "{line}");
     }
 
     /// Each value under the column that names it: the reader goes by name.

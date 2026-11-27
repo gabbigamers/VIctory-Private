@@ -254,6 +254,7 @@ ranges (address space only).
 | G9 | Refresh and detile scratch | process heap | the largest texture refreshed; kept per thread up to 32 MiB | worker threads end with each call, so theirs is allocated and zero-filled again each time | transient | none |
 | G10 | Tables of views, placed-texture records, tracked pages | process heap | grows with what the title describes; views without a resource object are never dropped | the run | none | none |
 | G11 | Copies of 64 KiB title pages a translated shader reached by address and no other copy held, and of the pages after them in their aligned 4 MiB (`VICTORY_MEMORY_PAGING=1`; off by default, then zero) | GPU memory in system RAM | one buffer of 4,194,304 bytes for each aligned 4 MiB of title memory with such a page; at most `max(1, floor(M / 4))` buffers for `M` megabytes asked (default 256: 64 buffers, 268.4 MB; at most 4,096: 4.29 GB) | a page from the submission that missed it (or the page before it) until another copy has it or the title gives the memory up; a buffer until the last copy in it is gone | title memory. **Needed while held**: during a submission the copy is the only holder of what shaders wrote there | `own_demand_pages_mb` |
+| G12 | Per host view heap: which slots hold a view of a ray-tracing structure, and which structures those name (`descriptor/structures.rs`) | process heap | two maps, about 30 bytes an entry each; at most 2^14 slots a heap are followed (under 1 MiB), none until a title makes such a view. A slot past that is counted and the heap's list says it is not complete | with the host heap; an entry goes when its slot is written again or a table's slots are given back | none | `own_structure_slots` (entries, not bytes) |
 
 ### Video memory and caches (`victory-gpu`)
 
@@ -296,6 +297,7 @@ first run with the log is also the first check of these figures.
 | `own_pipeline_save_mb` | C2 | the buffer a save serialises into, while it lives | |
 | `own_shaders_mb` | C3 | container and DXIL bytes kept in the shader map | the translations' other tables |
 | `own_demand_pages_mb` | G11 | whole 4 MiB buffers of pages held on demand, from a buffer's first copy until its last copy is gone | the maps and counters beside them (process heap, bounded: see the case below) |
+| `own_structure_slots` | G12 | host view heap slots that hold a view of a ray-tracing structure, as far as they are followed (a count) | slots past 2^14 a heap; the fixed tables of what was logged (static, 400 bytes) |
 | `private_working_set_mb` | | the process's working set without section and mapped-file pages | not given before Windows 10 22H2 |
 
 A release of more than was counted leaves the gauge at zero and is noted;

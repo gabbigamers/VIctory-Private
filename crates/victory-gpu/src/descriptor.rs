@@ -12,6 +12,7 @@ use crate::resource::{Memory, PAGEABLE_IIDS};
 
 #[cfg(windows)]
 pub(crate) mod host;
+pub(crate) mod structures;
 
 const HEAP_IIDS: [Iid; 4] = [
     guid(
@@ -275,6 +276,42 @@ pub(crate) fn evict(textures: &std::collections::HashSet<usize>) {
             host.evict(textures);
         }
     }
+}
+
+/// The top-level ray-tracing structures the title's descriptors name now:
+/// the `Location` of every view of one (shader resource views of dimension
+/// 11, which have no resource) that a slot of a live shader-visible view
+/// heap holds, or a slot of a table made afresh for a draw of a list not
+/// yet reset. Followed as slots are made: when the title makes such a view
+/// in a heap or copies one there (by a call or as bytes, seen at the next
+/// sync), until the slot is written again, the table's slots are given
+/// back or the heap is released. A heap no draw has used yet has no host
+/// heap and lists nothing. At most [`structures::MAX_ADDRESSES`] addresses,
+/// and the answer says whether those are all
+/// ([`structures::Structures::complete`]). See [`structures::Structures`]
+/// for what "now" does not promise.
+///
+/// Not listed, and not said to be missing: a view in a title slot past a
+/// host heap smaller than the title's (the host caps its size; warned of
+/// once as `title slot past the host heap`), and a structure a title binds
+/// some other way than through a view in a heap or a table (a root
+/// parameter given an address), if a title does that.
+///
+/// Where host code that wants the title's structures starts (an
+/// experimental host ray-tracing backend); today the five-second report
+/// reads it.
+#[cfg(windows)]
+pub(crate) fn live_structures() -> structures::Structures {
+    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut found = structures::Structures::none();
+    for &(_, _, at) in heaps.iter() {
+        // SAFETY: registered heaps are live (removed when dropped).
+        let heap = unsafe { &*(at as *const Heap) };
+        if let (Some(Some(host)), VIEWS_KIND) = (heap.host.get(), heap.desc.kind) {
+            host.structures_into(&mut found);
+        }
+    }
+    found
 }
 
 /// Gives back dynamic slots of the host heap behind the title heap at
@@ -596,7 +633,11 @@ pub(crate) extern "system" fn create_srv(
     desc: *const [u32; 10],
     handle: u64,
 ) {
-    record(handle, View::Shader(resource as usize, words(desc)));
+    let desc = words(desc);
+    if let (Some(desc), true) = (&desc, handle != 0) {
+        structures::created(desc, false, !resource.is_null(), None);
+    }
+    record(handle, View::Shader(resource as usize, desc));
 }
 
 /// Device method.
@@ -607,7 +648,11 @@ pub(crate) extern "system" fn create_uav(
     desc: *const [u32; 10],
     handle: u64,
 ) {
-    let view = View::Unordered(resource as usize, counter as usize, words(desc));
+    let desc = words(desc);
+    if let (Some(desc), true) = (&desc, handle != 0) {
+        structures::created(desc, true, !resource.is_null(), None);
+    }
+    let view = View::Unordered(resource as usize, counter as usize, desc);
     record(handle, view);
 }
 
@@ -621,7 +666,18 @@ pub(crate) extern "system" fn create_placed_srv(
     handle: u64,
 ) {
     if let (Some(resource), Some(desc)) = (words(resource), words(desc)) {
+        note_placed(&desc, false, handle);
         record(handle, View::Placed(false, resource, desc));
+    }
+}
+
+/// Counts the view of placed memory described by `desc` (the plain
+/// description, then the memory's address) by what its dimension says it
+/// is ([`structures::created`]).
+fn note_placed(desc: &[u32; 16], unordered: bool, handle: u64) {
+    if let (Ok(plain), true) = (desc[..10].try_into(), handle != 0) {
+        let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
+        structures::created(plain, unordered, false, Some(address));
     }
 }
 
@@ -632,6 +688,7 @@ pub(crate) extern "system" fn create_placed_uav(
     handle: u64,
 ) {
     if let (Some(resource), Some(desc)) = (words(resource), words(desc)) {
+        note_placed(&desc, true, handle);
         record(handle, View::Placed(true, resource, desc));
     }
 }
@@ -946,6 +1003,122 @@ pub(crate) mod tests {
         assert_eq!(view(s2), view(s0));
         assert_eq!(view(s3), view(s1));
         assert_eq!(view(at(0) + 8), None);
+        heap[0] = 0;
+    }
+
+    /// A ray-tracing structure's view as a title makes it: no resource, and
+    /// a description (read from the title's bytes, at any alignment) of
+    /// dimension 11 whose union holds the structure's address, `Location`.
+    /// The record keeps the description, so the address is there for
+    /// whoever reads the slot, after descriptor copies by a call and as
+    /// bytes too, and a slot written again names what was written last.
+    #[test]
+    fn a_structure_views_location_survives_records_and_copies() {
+        let null = std::ptr::null();
+        let mut heap = vec![0u64; 4 * 4]; // four 32-byte slots
+        let start = heap.as_mut_ptr() as u64;
+        let at = |i: u64| start + 32 * i;
+        // The public description, 40 bytes: format, dimension, component
+        // mapping, padding, then the union. One byte off any alignment.
+        let description = |location: u64| {
+            let mut bytes = [0u8; 41];
+            bytes[5..9].copy_from_slice(&11u32.to_le_bytes());
+            bytes[9..13].copy_from_slice(&0x1688u32.to_le_bytes());
+            bytes[17..25].copy_from_slice(&location.to_le_bytes());
+            bytes
+        };
+        let location_at = |slot: u64| view(at(slot)).as_ref().and_then(structures::location);
+        let (a, b) = (0xd_4321_0000u64, 0xd_8765_0100u64);
+        let before = structures::counts().structures;
+        create_srv(null, null, description(a)[1..].as_ptr().cast(), at(0));
+        assert_eq!(view(at(0)), Some(View::Shader(0, Some([0, 11, 0x1688, 0, 0x4321_0000, 0xd, 0, 0, 0, 0]))));
+        assert_eq!(location_at(0), Some(a));
+        // Other tests make such views at the same time: at least this one.
+        assert!(structures::counts().structures > before);
+        // Copied by a call, and as bytes (what `sync_heaps` finds).
+        copy_simple(null, 1, at(1), at(0), 0);
+        // SAFETY: both slots are in `heap`.
+        unsafe { std::ptr::copy_nonoverlapping(at(0) as *const u8, at(2) as *mut u8, 32) };
+        assert_eq!((location_at(1), location_at(2)), (Some(a), Some(a)));
+        // The same view is one record, another structure's another.
+        create_srv(null, null, description(a)[1..].as_ptr().cast(), at(3));
+        // SAFETY: both slots are in `heap`.
+        assert_eq!(unsafe { *(at(0) as *const [u32; 3]) }, unsafe { *(at(3) as *const [u32; 3]) });
+        create_srv(null, null, description(b)[1..].as_ptr().cast(), at(0));
+        assert_eq!((location_at(0), location_at(1)), (Some(b), Some(a)), "the copy names what it was copied from");
+        // Written again as a view that is no structure's, and as none.
+        create_srv(null, null, std::ptr::null(), at(1));
+        create_cbv(null, &[0x1000, 1, 256, 0], at(2));
+        assert_eq!((location_at(1), location_at(2), location_at(3)), (None, None, Some(a)));
+        // Never released: the view has no resource whose release ends it.
+        forget(0);
+        assert_eq!(location_at(3), Some(a));
+        // A view of placed memory with the same description names it too.
+        let mut placed = [0u32; 16];
+        placed[..6].copy_from_slice(&[0, 11, 0x1688, 0, b as u32, (b >> 32) as u32]);
+        (placed[10], placed[11]) = (0x9000, 0x3);
+        create_placed_srv(null, &[0; 14], &placed, at(1));
+        assert_eq!(location_at(1), Some(b));
+        // Unordered access has no such dimension.
+        create_placed_uav(null, &[0; 14], &placed, at(1));
+        assert_eq!(location_at(1), None);
+        heap[0] = 0;
+    }
+
+    /// Every method that makes a shader or unordered view counts what its
+    /// dimension says it is: the placed-memory ones and unordered access
+    /// too, each as its own kind of view. (Counts are the process's: other
+    /// tests may add to them at the same time, none takes away, and the
+    /// dimensions here are no other test's.)
+    #[test]
+    fn every_view_making_method_counts_structures_and_unknown_dimensions() {
+        let null = std::ptr::null();
+        let mut heap = vec![0u64; 4 * 4]; // four 32-byte slots
+        let start = heap.as_mut_ptr() as u64;
+        let at = |i: u64| start + 32 * i;
+        let counts = structures::counts;
+        let noted = structures::unknown_dimension_noted;
+        let described = |dimension: u32| [0, dimension, 0x1688, 0, 0x100, 0xd, 0, 0, 0, 0];
+        let placed = |dimension: u32| {
+            let mut words = [0u32; 16];
+            words[..10].copy_from_slice(&described(dimension));
+            (words[10], words[11]) = (0x9000, 0x3);
+            words
+        };
+        // A structure's view made by the placed-memory method for shader
+        // views is counted as made, and as of placed memory.
+        let before = counts();
+        create_placed_srv(null, &[0; 14], &placed(11), at(0));
+        let after = counts();
+        assert!(after.structures > before.structures && after.placed > before.placed, "{before:?} {after:?}");
+        // A slot of no heap (handle 0) is no view made: nothing is counted
+        // for a dimension only it has.
+        create_placed_srv(null, &[0; 14], &placed(0x7e57_0000), 0);
+        assert!(!noted(0x7e57_0000, false));
+        // An unknown dimension, by each of the four methods.
+        assert!(!noted(0x7e57_0001, false) && !noted(0x7e57_0002, true));
+        let before = counts().unknown;
+        create_placed_srv(null, &[0; 14], &placed(0x7e57_0001), at(1));
+        assert!(noted(0x7e57_0001, false) && !noted(0x7e57_0001, true));
+        create_placed_uav(null, &[0; 14], &placed(0x7e57_0002), at(1));
+        assert!(noted(0x7e57_0002, true) && !noted(0x7e57_0002, false));
+        assert!(!noted(0x7e57_0003, true) && !noted(0x7e57_0004, false));
+        create_uav(null, null, null, &described(0x7e57_0003), at(2));
+        assert!(noted(0x7e57_0003, true) && !noted(0x7e57_0003, false));
+        create_srv(null, null, &described(0x7e57_0004), at(3));
+        assert!(noted(0x7e57_0004, false));
+        assert!(counts().unknown >= before + 4);
+        // Unordered access has no structure dimension: 11 is unknown there,
+        // by both of its methods.
+        let before = counts().unknown;
+        create_uav(null, null, null, &described(11), at(2));
+        assert!(noted(11, true));
+        create_placed_uav(null, &[0; 14], &placed(11), at(1));
+        assert!(counts().unknown >= before + 2);
+        // The views themselves are recorded as described, whatever was
+        // counted.
+        assert_eq!(view(at(2)), Some(View::Unordered(0, 0, Some(described(11)))));
+        assert_eq!(view(at(3)), Some(View::Shader(0, Some(described(0x7e57_0004)))));
         heap[0] = 0;
     }
 

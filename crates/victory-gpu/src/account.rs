@@ -253,10 +253,17 @@ pub enum Owner {
     /// its first page's copy until the last copy in it is gone. Zero in a
     /// run without the switch.
     DemandPages,
+    /// G12 (after G11, for the same reason): slots of host view heaps that
+    /// hold a view of a ray-tracing structure, as far as they are followed
+    /// (`crate::descriptor::structures::Live`): an entry in each of two
+    /// maps on the process heap, about 30 bytes each, at most 2^14 slots a
+    /// heap. A count, since the bytes are few and the number is what a run
+    /// is read for.
+    StructureSlots,
 }
 
 impl Owner {
-    pub const ALL: [Owner; 16] = [
+    pub const ALL: [Owner; 17] = [
         Owner::TitlePages,
         Owner::TitlePagesMapped,
         Owner::TitleSections,
@@ -273,6 +280,7 @@ impl Owner {
         Owner::PipelineSave,
         Owner::Shaders,
         Owner::DemandPages,
+        Owner::StructureSlots,
     ];
 
     /// The owner's column in the performance log.
@@ -294,13 +302,14 @@ impl Owner {
             Owner::PipelineSave => "own_pipeline_save_mb",
             Owner::Shaders => "own_shaders_mb",
             Owner::DemandPages => "own_demand_pages_mb",
+            Owner::StructureSlots => "own_structure_slots",
         }
     }
 
     pub const fn kind(self) -> Kind {
         match self {
             Owner::TitlePages | Owner::TitlePagesMapped => Kind::Section,
-            Owner::TitleSections => Kind::Count,
+            Owner::TitleSections | Owner::StructureSlots => Kind::Count,
             Owner::Loading
             | Owner::Snapshots
             | Owner::SnapshotPool

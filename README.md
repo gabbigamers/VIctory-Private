@@ -225,6 +225,7 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_PIPELINE_LOG=<file>` | a line per title pipeline created (key, shaders, state), first used, and made or loaded (library name); `translate --cache --pipelines` writes the last kind too |
 | `VICTORY_PREBUILD_KEYS=<file>` | `translate --cache --pipelines` makes nothing and lists each pack record's key, shaders and state (or why it is skipped) |
 | `VICTORY_MEMORY_PAGING=1` | experimental, any build: a 64 KiB page of title memory that a translated shader reached by address and that had no host copy gets one after the submission that missed it, and so do the pages after it in its aligned 4 MiB, side by side in one host buffer (`VICTORY_MEMORY_PAGING_MB=<megabytes>` of such buffers at most, 256 unset, 4096 at most; `own_demand_pages_mb` in the performance log). The list that missed is not run again and its writes stay out of title memory as before, so a program the title runs only once has lost its output if it missed; the switch helps work that runs again. Unset, such pages read 0 in every frame as before. Either way the log has a line "title memory misses over N frames" (each of the first eight frames with something to report, then every 60 frames): misses by reason (in a 256 MiB region with no copy, not title memory, tracked memory in no buffer object, in a title buffer with no copy, ...), frames whose writes were withheld, the pages looked at and the time it took, the draws and dispatches of lists whose writes were withheld by pipeline, pages the title and shaders both wrote, the pages a table names for a copy holding only part of them (the rest of such a page reads 0 and is no counted miss), the regions missed most; and a line for each kind of miss, and each pipeline with withheld writes, when first seen. `VICTORY_MEMORY_PROBES=0` turns off the empty page-table blocks that make misses name their page; `VICTORY_MEMORY_MISS_REASONS=0` turns off looking at missed pages (a few system calls for at most 16 pages a frame; ignored while pages on demand are on). What a run shows and does not show: docs/memory.md, G11 |
+| `VICTORY_STRUCTURE_ADDRESSES=1` | any build, experimental: shaders read the `Location` of a view of a ray-tracing structure (a shader view of dimension 11) as the view's address, where without it they read what they did before (0 for such a view made with no resource), and the host is given no view of a resource passed with one. Not shown by a run to be what a title's trace programs need. To compare two runs: a trace that then reads the structure where no host copy holds it shows in the `title memory this frame` lines as missed pages near the logged addresses, and holds back that frame's and the next one's title-memory write-backs. The counts and the log lines about such views are there without it |
 | `VICTORY_SHADER_LOOP_LIMIT=<n>` | a translated shader loop stops its lane after `n` iterations instead of 2^20, counted for each loop from where the lane enters it (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
 | `VICTORY_SHADER_LOOP_TOTAL_LIMIT=<n>` | a lane is stopped once it would have gone round its translated loops `n` times in all instead of 2^22, which is what bounds a loop inside another, and a loop whose `continue` the translation counts as a loop inside it (own shader cache entries) |
 | `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
@@ -240,6 +241,15 @@ time went, and the frame times as a distribution: median, 95th and 99th
 percentile, longest, the share of late frames (over 50 ms, a frame and a
 half at 30 fps) and the jitter (the mean difference between one frame's
 time and the next one's).
+
+Beside those lines, at the first report and whenever it changed: how many
+views of ray-tracing structures the title made (shader views of dimension
+11, whose description holds the structure's address), how many slots of
+the host view heaps hold one now, the addresses of the structures those
+name, and whether shaders read those addresses
+(`VICTORY_STRUCTURE_ADDRESSES`). Each distinct address is also logged once
+when its first view is made (the first 32), and so is a view whose
+dimension the Direct3D 12 header does not name.
 
 `VICTORY_PERF_LOG=<file.csv>` (any build; a file outside the repository)
 also writes those five-second periods as rows, with draws and dropped draws

@@ -949,3 +949,48 @@ Only what cannot be done from a cloud session.
     cap (default: software); the video-memory budget for host
     structures (no value chosen; no allocation code before the
     `docs/memory.md` case is written).
+* Ray-tracing prerequisite, views of ray-tracing structures (candidate
+  cause 3 of the structures never appearing): implemented, reviewed (6
+  findings, all upheld) and corrected. Tested: 20 host tests of the
+  decoding, the counting and the bookkeeping. Type-checked for Windows
+  only: every use of it by the host view heaps, and two Windows tests
+  that have never executed. Not run on a device; not hardware-validated.
+  * Read from this repository's own code and the public Direct3D 12
+    header: a shader view of dimension 11 made with no resource gets
+    the view address 0 and a null 2D host view, and translated programs
+    that load a descriptor as data read that address as a buffer's
+    base. Speculative: that the title's trace programs read a
+    structure's address this way and that the view's `Location` is what
+    they should get. That the title makes such views at all is the
+    forks' report (one line of descent), not confirmed.
+  * By default, nothing a shader or the host device sees changes. What
+    changes is diagnostics and bookkeeping: such views and views of an
+    unnamed dimension are counted and logged once per kind; a line
+    "ray-tracing structure views: ..." at the first five-second report
+    and whenever it changed; a table per host view heap of the slots
+    holding such a view (at most 2^14 a heap; `docs/memory.md`, G12);
+    one new performance-log column, `own_structure_slots`, which
+    changes the CSV header; and `HostHeap::release` clears that table
+    before its slots are free to take.
+  * Behind `VICTORY_STRUCTURE_ADDRESSES=1`, off by default: shaders
+    read the `Location` as the view's address, such a view is never
+    treated as a buffer view, and the host gets no view of a resource
+    passed with it. Off by default because a trace that then reads the
+    structure where no host copy holds it is a miss, and one miss
+    withholds the title-memory writes of that frame and the next;
+    whether traces already miss at address 0 is not known without a run.
+  * What the review found: the address on by default with that side
+    effect (now behind the switch); a race between a release and the
+    next holder of its slots (fixed by order, read in the code, no test
+    interleaves two threads); one-time log lines dropped when a view
+    was the first of several oddities; an "as before" claim that did
+    not hold for views made with a buffer or over placed memory (now it
+    does, with the switch off); counting not tested in the four
+    view-making methods (now tested; six mutations each fail a test);
+    a headline stronger than the evidence (reworded).
+  * For the owner's machine: a ray-traced scene without the switch (the
+    "ray-tracing structure views" lines: N made, S slots, the
+    addresses; N = 0 means cause 3 does not apply there), then with it,
+    comparing picture, frame time and the "title memory this frame"
+    lines; and `cargo test -p victory-gpu a_structure_` in both switch
+    positions, which would be the first hardware-validated result.

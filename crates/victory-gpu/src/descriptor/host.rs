@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
-use super::{VIEW_TAG, View, view_at, views_current};
+use super::{VIEW_TAG, View, structures, view_at, views_current};
 use crate::account::{Held, Owner};
 use crate::host::host;
 
@@ -58,6 +58,14 @@ pub(crate) struct HostHeap {
     /// [`write_address`]): the buffer, its mapping and host address and the
     /// count of its bytes, made on first use.
     addresses: std::sync::OnceLock<Option<(ID3D12Resource, usize, u64, Held)>>,
+    /// The slots (title and dynamic) that hold a view of a ray-tracing
+    /// structure now, entered where the view addresses are
+    /// ([`HostHeap::note_address`]) and when dynamic slots are given back.
+    /// Taken inside the slot lock (`made`), never the other way round.
+    structures: Mutex<structures::Live>,
+    /// How many slots `structures` holds: 0 lets a slot that gets any other
+    /// view pass without the lock.
+    structure_slots: std::sync::atomic::AtomicU32,
     /// What the title slots view that title memory feeds (`crate::bindless`).
     pub(crate) viewed: std::sync::Arc<crate::bindless::Viewed>,
 }
@@ -207,6 +215,8 @@ impl HostHeap {
             strides,
             marks,
             addresses: std::sync::OnceLock::new(),
+            structures: Mutex::new(structures::Live::new()),
+            structure_slots: std::sync::atomic::AtomicU32::new(0),
             viewed: Default::default(),
         };
         if !sampler {
@@ -396,9 +406,18 @@ impl HostHeap {
         let Some(at) = first.checked_sub(self.count) else {
             return;
         };
+        let end = at.saturating_add(n).min(self.dynamic);
+        // What the slots held is no longer a view anything reads. Forgotten
+        // before the slots are free to take: once they are, another list's
+        // thread may take them and make a structure's view there, which a
+        // clearing after that would forget.
+        if end > at && self.structure_slots.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+            let mut live = self.structures.lock().unwrap_or_else(|e| e.into_inner());
+            live.clear(first, end - at);
+            self.structure_slots.store(live.len() as u32, std::sync::atomic::Ordering::SeqCst);
+        }
         let mut guard = self.next.lock().unwrap_or_else(|e| e.into_inner());
-        let end = (at + n).min(self.dynamic) as usize;
-        if let Some(slots) = guard.1.get_mut(at as usize..end) {
+        if let Some(slots) = guard.1.get_mut(at as usize..end as usize) {
             slots.fill(false);
         }
     }
@@ -601,13 +620,57 @@ impl HostHeap {
         self.count + self.dynamic
     }
 
-    /// Slot `index` now holds `view` (or no view): its view address.
+    /// Slot `index` now holds `view` (or no view): its view address, and
+    /// whether it names a ray-tracing structure (followed in either
+    /// position of the switch that gives shaders the address).
     fn note_address(&self, index: u32, view: Option<&View>) {
+        self.note_structure(index, view.and_then(structures::location));
         if index < self.address_slots()
             && let Some(Some((_, data, ..))) = self.addresses.get()
         {
             write_address(*data, index as usize, view);
         }
+    }
+
+    /// Slot `index` now holds a view of the ray-tracing structure at
+    /// `location`, or (none) anything else.
+    fn note_structure(&self, index: u32, location: Option<u64>) {
+        use std::sync::atomic::Ordering::SeqCst;
+        // Nearly every slot written: no structure's view, and none to
+        // forget. A slot is written by one thread at a time (title slots
+        // under the slot lock, dynamic ones by the list that took them), so
+        // a count of 0 read here is not one this slot is part of.
+        if location.is_none() && self.structure_slots.load(SeqCst) == 0 {
+            return;
+        }
+        let mut live = self.structures.lock().unwrap_or_else(|e| e.into_inner());
+        if !live.set(index, location) {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                tracing::warn!(
+                    index,
+                    followed = structures::MAX_SLOTS,
+                    "more slots of a view heap hold a ray-tracing structure's view than are followed: \
+                     the list of live structures is not complete from here on"
+                );
+            });
+        }
+        self.structure_slots.store(live.len() as u32, SeqCst);
+    }
+
+    /// Adds the slots that hold a view of a ray-tracing structure now, and
+    /// the structures they name, to `found`
+    /// ([`crate::descriptor::live_structures`]).
+    pub(crate) fn structures_into(&self, found: &mut structures::Structures) {
+        self.structures.lock().unwrap_or_else(|e| e.into_inner()).add_to(found);
+    }
+
+    /// What [`HostHeap::structures_into`] adds, alone (tests).
+    #[cfg(test)]
+    fn structures(&self) -> structures::Structures {
+        let mut found = structures::Structures::none();
+        self.structures_into(&mut found);
+        found
     }
 
     /// The view address entered for slot `index`; none for a slot past the
@@ -1076,16 +1139,33 @@ fn element_size(desc: &D3D12_SHADER_RESOURCE_VIEW_DESC) -> u64 {
 /// caller keeps `index` below [`HostHeap::address_slots`]), 16 bytes a
 /// slot: a buffer view's title address (dword 0 low, dword 1 bits 0-15
 /// high), a texture view's size fields ([`texture_words`]), zeros for
-/// anything else.
+/// anything else. With `VICTORY_STRUCTURE_ADDRESSES` on, a ray-tracing
+/// structure's view has its `Location` where a buffer view has its
+/// address.
 fn write_address(data: usize, index: usize, view: Option<&View>) {
-    let address = view.and_then(buffer_range).map_or(0, |(a, _)| a);
-    let words = match view.and_then(texture_words) {
-        Some(words) => words,
-        None => [address as u32, (address >> 32) as u32 & 0xFFFF, 0, 0],
-    };
+    let words = view_words(view, structures::addresses_on());
     // SAFETY: the mapped view addresses hold 16 bytes per title and dynamic
     // slot (below `address_slots`).
     unsafe { ((data + 16 * index) as *mut [u32; 4]).write_unaligned(words) };
+}
+
+/// What [`write_address`] enters for `view`, with the switch that makes a
+/// ray-tracing structure's view one (`structures::addresses_on`) in
+/// position `structure_addresses`. Off, it is what was entered before
+/// there was the switch: such a view made with no resource has 0.
+fn view_words(view: Option<&View>, structure_addresses: bool) -> [u32; 4] {
+    // A structure's view first: it has no resource, and whatever the title
+    // passed as one says nothing about it.
+    if let Some(location) = view.and_then(|v| structures::address_if(v, structure_addresses)) {
+        return structures::address_words(location);
+    }
+    match view.and_then(texture_words) {
+        Some(words) => words,
+        None => {
+            let range = view.and_then(|v| buffer_range_as(v, structure_addresses));
+            structures::address_words(range.map_or(0, |(a, _)| a))
+        }
+    }
 }
 
 /// A texture view's console image descriptor dwords 0-3 as far as its size
@@ -1156,6 +1236,13 @@ fn image_words(resource: &[u32; 14], desc: Option<&[u32; 10]>, unordered: bool) 
 /// The title memory a buffer shader or unordered access view reads: its
 /// address and length.
 pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
+    buffer_range_as(view, structures::addresses_on())
+}
+
+/// [`buffer_range`] with the switch that makes a ray-tracing structure's
+/// view one in position `structure_addresses`: on, such a view reads no
+/// buffer.
+fn buffer_range_as(view: &View, structure_addresses: bool) -> Option<(u64, u64)> {
     let (base, words): (u64, &[u32; 10]) = match view {
         View::Shader(r, Some(desc)) => (
             crate::resource::buffer_bytes(*r as crate::object::This)?.0 as u64,
@@ -1175,6 +1262,13 @@ pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
         }
         _ => return None,
     };
+    // A ray-tracing structure's view reads no buffer, whatever resource
+    // came with it: its union holds a Location, not a range of elements.
+    // Only with the switch on; off, the range is what it was before (for
+    // such a view of a buffer: from the buffer's start, no bytes).
+    if structure_addresses && matches!(structures::kind(words, false), structures::Kind::Structure(_)) {
+        return None;
+    }
     let desc = srv_desc(words);
     let element = element_size(&desc);
     // SAFETY: a buffer view's union member.
@@ -1469,6 +1563,15 @@ pub(crate) fn make_view(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<
 /// Makes the host descriptor for `view` at `at`: the host resource it
 /// views, or `None` if it cannot.
 fn make(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) -> Option<Kept> {
+    // With `VICTORY_STRUCTURE_ADDRESSES` on, a ray-tracing structure's view
+    // is one whatever came with it, and has nothing for the host to view:
+    // shaders read its address ([`view_words`]). Its slot reads zeros
+    // ([`null_for`]). Off, it is made as before: by its resource, which
+    // for the view the header describes (no resource) is the same null
+    // view.
+    if structures::shader_address(view).is_some() {
+        return None;
+    }
     let host = host()?;
     let device = &host.device;
     match view {
@@ -1681,6 +1784,11 @@ fn null_for(view: &View, at: D3D12_CPU_DESCRIPTOR_HANDLE) {
             return null_buffer_view(at);
         }
         View::Placed(false, resource, _) if resource[0] == 1 => return null_buffer_view(at),
+        // A ray-tracing structure's view (with the switch on) is not read
+        // as a view at all (`make`): a slot that reads zeros. One the title
+        // made with a buffer has the null buffer view above; this is the
+        // rest, and what `null_like` gives dimension 11 without the switch.
+        _ if structures::shader_address(view).is_some() => return null_view(at),
         // Textures: a null view of the title's dimension (1D, arrays, 3D,
         // cubes), not always 2D.
         View::Shader(_, Some(desc)) => return null_like(desc, at),
@@ -2134,6 +2242,133 @@ mod tests {
         null_for(&view, heap.cpu(0));
         // SAFETY: a plain device query.
         assert!(unsafe { host.device.GetDeviceRemovedReason() }.is_ok());
+    }
+
+    /// The description of a ray-tracing structure's view in the host's own
+    /// type (the public header's) has its Location where `structures` reads
+    /// it. With the switch on that is the address a shader reads for the
+    /// view; off, the entry is what it was before the switch (0 for the
+    /// view the header describes, one with no resource). No device needed.
+    #[test]
+    fn a_structure_views_location_is_the_address_shaders_read_with_the_switch_on() {
+        let location = 0xd_4321_0000u64;
+        // SAFETY: plain data; zeroed so that every byte read below is set.
+        let mut desc: D3D12_SHADER_RESOURCE_VIEW_DESC = unsafe { std::mem::zeroed() };
+        desc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+        desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        desc.Anonymous.RaytracingAccelerationStructure = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV { Location: location };
+        assert_eq!(size_of_val(&desc), 40);
+        // SAFETY: 40 bytes of plain data, all set.
+        let words: [u32; 10] = unsafe { std::mem::transmute_copy(&desc) };
+        assert_eq!(structures::STRUCTURE, D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE.0 as u32);
+        assert_eq!(structures::kind(&words, false), structures::Kind::Structure(location));
+        let view = View::Shader(0, Some(words));
+        assert_eq!(structures::location(&view), Some(location));
+        assert_eq!(view_words(Some(&view), true), [0x4321_0000, 0xd, 0, 0]);
+        assert_eq!(view_words(Some(&view), false), [0; 4], "as before the switch");
+        // No buffer's view in either position: it has no resource.
+        assert_eq!((buffer_range_as(&view, true), buffer_range_as(&view, false)), (None, None));
+        assert_eq!(view_stride(&view), 0);
+        for on in [false, true] {
+            assert_eq!(view_words(None, on), [0; 4]);
+            assert_eq!(view_words(Some(&View::Shader(0, None)), on), [0; 4]);
+        }
+        // What the header rules out, a structure's description over a
+        // buffer the title placed in memory: with the switch on the view is
+        // a structure's, off it is the buffer view it was before (the
+        // buffer's address, and no bytes: the description has no elements).
+        let buffer = 0x3_0000_9000u64;
+        let mut resource = [0u32; 14];
+        (resource[0], resource[4]) = (1, 64);
+        let mut placed = [0u32; 16];
+        placed[..10].copy_from_slice(&words);
+        (placed[10], placed[11]) = (buffer as u32, (buffer >> 32) as u32);
+        let placed = View::Placed(false, resource, placed);
+        assert_eq!(buffer_range_as(&placed, true), None);
+        assert_eq!(view_words(Some(&placed), true), [0x4321_0000, 0xd, 0, 0]);
+        assert_eq!(buffer_range_as(&placed, false), Some((buffer, 0)));
+        assert_eq!(view_words(Some(&placed), false), [0x9000, 0x3, 0, 0]);
+        // A buffer view is the same in both positions.
+        let mut plain = [0u32; 16];
+        (plain[1], plain[2], plain[6], plain[7]) = (1, D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING, 16, 4);
+        (plain[10], plain[11]) = (buffer as u32, (buffer >> 32) as u32);
+        let plain = View::Placed(false, resource, plain);
+        for on in [false, true] {
+            assert_eq!(buffer_range_as(&plain, on), Some((buffer, 64)));
+            assert_eq!(view_words(Some(&plain), on), [0x9000, 0x3, 0, 0]);
+        }
+        // The process's own position is one of the two.
+        assert_eq!(buffer_range(&placed), buffer_range_as(&placed, structures::addresses_on()));
+    }
+
+    /// A structure's view in a title heap: the heap lists the structure
+    /// while a slot names it, where the view is made, copied to, or entered
+    /// in a table made afresh, until the slot is written again, the table's
+    /// slots are given back or the heap is released. Its slot's view
+    /// address is the Location with `VICTORY_STRUCTURE_ADDRESSES` on and 0
+    /// without (this test holds in either position: run it in both).
+    #[test]
+    fn a_structure_is_followed_through_creates_copies_rewrites_and_frees() {
+        if host().is_none() {
+            return; // no host GPU here
+        }
+        let null = std::ptr::null();
+        let heap_desc: [u32; 8] = [0, 8, 1, 0, 0, 0, 0, 0];
+        let mut heap = null;
+        let iid = crate::object::guid(0x8efb471d, 0x616c, 0x4f49, [0x90, 0xf7, 0x12, 0x7b, 0xb7, 0x63, 0xfa, 0x51]);
+        assert_eq!(crate::descriptor::create_heap(null, heap_desc.as_ptr().cast(), &iid, &mut heap), 0);
+        let title_heap = crate::descriptor::heap(heap);
+        let slot = |i: u32| title_heap.start + u64::from(i) * 32;
+        let structure = |location: u64| {
+            let mapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            [0, 11, mapping, 0, location as u32, (location >> 32) as u32, 0, 0, 0, 0]
+        };
+        // Addresses no other test uses: the list over all heaps is asked too.
+        let (a, b) = (0xd_4321_0000u64, 0xd_8765_0000u64);
+        let listed = |location: u64| crate::descriptor::live_structures().addresses.contains(&location);
+        // What a shader reads for a view of the structure at `location`.
+        let read = |location: u64| Some(if structures::addresses_on() { location } else { 0 });
+        // Made before the host heap is: entered when that is made.
+        crate::descriptor::create_srv(null, null, &structure(a), slot(1));
+        assert!(!listed(a), "no host heap yet");
+        let host = title_heap.host().expect("a host view heap");
+        assert!(host.view_addresses().is_some());
+        assert_eq!(host.address_at(1), read(a));
+        assert_eq!(host.structures().addresses, [a]);
+        assert!(!host.kept(1), "nothing of the host's is viewed");
+        // Copied by a call.
+        crate::descriptor::copy_simple(null, 1, slot(2), slot(1), 0);
+        assert_eq!(host.address_at(2), read(a));
+        assert_eq!((host.structures().slots, host.structures().addresses), (2, vec![a]));
+        // The first slot written again for another structure, the second
+        // for a view that is none.
+        crate::descriptor::create_srv(null, null, &structure(b), slot(1));
+        assert_eq!((host.address_at(1), host.structures().addresses), (read(b), vec![a, b]));
+        crate::descriptor::create_srv(null, null, std::ptr::null(), slot(2));
+        assert_eq!((host.address_at(2), host.structures().addresses), (Some(0), vec![b]));
+        // A table made afresh names it until its slots are given back.
+        let first = host.dynamic(1).unwrap();
+        host.make_at(first, &View::Shader(0, Some(structure(a))));
+        assert_eq!(host.address_at(first), read(a));
+        assert_eq!(host.structures().addresses, [a, b]);
+        assert!(listed(a) && listed(b));
+        host.release(first, 1);
+        assert_eq!(host.structures().addresses, [b], "given back");
+        // Slots given back and taken again start with nothing listed, and
+        // list what is made there then. Giving back more slots than were
+        // taken (to the end of the dynamic ones) forgets no slot past them.
+        let again = host.dynamic(2).unwrap();
+        assert_eq!(host.structures().addresses, [b]);
+        host.make_at(again + 1, &View::Shader(0, Some(structure(a))));
+        assert_eq!((host.structures().slots, host.structures().addresses), (2, vec![a, b]));
+        host.release(again, 1);
+        assert_eq!(host.structures().addresses, [a, b], "the slot after it is still taken");
+        host.release(again + 1, u32::MAX);
+        assert_eq!(host.structures().addresses, [b]);
+        assert!(host.structures().complete());
+        // Released with its heap.
+        crate::object::slot::<extern "system" fn(crate::object::This) -> u32>(heap, 0x10)(heap);
+        assert!(!listed(a) && !listed(b), "the heap is gone");
     }
 
     /// A table made afresh lies in dynamic slots, and a shader reading a

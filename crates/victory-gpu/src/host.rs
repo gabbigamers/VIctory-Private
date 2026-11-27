@@ -3420,6 +3420,12 @@ impl Meter {
                     owners.join(", ")
                 );
             }
+            // The views of ray-tracing structures the title made and the
+            // structures its heaps name now: said whenever it changed, and
+            // once at the start (a run without any says so too).
+            if let Some(line) = crate::descriptor::structures::report(&crate::descriptor::live_structures()) {
+                tracing::info!("{line}");
+            }
             let (textures, bytes, used, shared, saved, replaced) = crate::resource::texture_counts();
             let (heaps, heap_used, heap_free) = crate::placement::stats();
             tracing::info!(
