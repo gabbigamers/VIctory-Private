@@ -1668,3 +1668,51 @@ Only what cannot be done from a cloud session.
     --rt-census > rt-census.txt`; send that file only (the rest of the
     report names files and pack records). It must show loops recognised
     by class and refused by reason: whether a title loop has this shape.
+* Designs for the three subsystems of the owner's direction of
+  2026-11-27, challenged by two reviewers and corrected: documents
+  only. Nothing in them is implemented, tested or measured, and no
+  gain is stated. `docs/resource-model.md`, `docs/unified-memory.md`,
+  `docs/gpu-scheduling.md`, `docs/predictive-streaming.md`; rows in
+  `docs/INDEX.md`.
+  * The shared model adds no record type: one read-only query over the
+    maps that exist, a content stamp, a last-use fence value, holder
+    counts by kind on a copy, and a summary per host list derived by a
+    fold over the steps the list already holds.
+  * The missed page in work that is not repeated: a re-run of the
+    missed piece inside its own submission is proposed first, behind
+    `VICTORY_MEMORY_REPLAY`, for pieces proven repeatable. It is not
+    built before a count-only census shows that the pieces which miss
+    pass the proof. It does not cover a frame already withholding, a
+    page the title wrote meanwhile, or pages the pager does not admit;
+    those keep today's path, counted by reason.
+  * A copy is given up or moved only if no shader wrote it since title
+    memory last matched it, nothing names it and its last use is
+    complete. "No pending range" was shown not to be enough: withheld
+    results, a root UAV that marks nothing and unmapped pages leave
+    shader-written bytes in the copy alone.
+  * Scheduling: anything unknown keeps today's order and waits, every
+    heap-wide list included. Deferred completion needs state per
+    submission, the blocking fence wait and a wake source of ours; it
+    is refused without them. CPU copies at submission and other queues'
+    memory-value waits are in the independence proof. A structure read
+    is decided when recorded, never refused at submission.
+  * Streaming: the request log first, counts only leaving the machine;
+    prediction from the request sequence alone (no reliable spatial
+    source was found); work done ahead advisory, bounded, cancellable
+    and reclaimed first; the cache off without a budget.
+  * No change to the default submission path without a switch: release
+    by fence value and state per submission each have one, off by
+    default. Each new long-lived structure has a proposed bound and
+    gauge; none has its case in `memory.md` yet.
+  * Order kept: instruments and observation, then memory, then
+    scheduling, then streaming. Step 0 carries the summary as a
+    portable type, the census and the request log.
+  * Only the owner's machine settles: whether a closed list may be
+    executed twice, whether the missing pieces are repeatable, every
+    size and time, and that the picture is unchanged.
+* The rule and the region recognition, at their push: the coordinator
+  ran the four checks on the two integrated commits in a fresh build
+  directory (1,110 host tests; 924 containers, none rejected; the
+  Windows type-check; the asset policy) and compared the containers
+  with the head's by hash: all 877 byte-identical, 47 new ones from the
+  synthetic walks and the recogniser's tests.

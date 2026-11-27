@@ -49,6 +49,33 @@ a task needs. A section is given as `document § heading`.
 | Ray queries in the emitter; the three shaders; the refused record | `dxr-shader-emission.md § What was added`, `§ The shaders`, `§ Open points for a Windows run` |
 | The builder's build descriptions at its imports | `dxr-build-capture.md § Where a build description is visible`, `§ What a run logs, and what it decides` |
 
+## Scheduling, streaming and memory management
+
+Designs for the three subsystems of the owner's direction of 2026-11-27.
+Nothing in them is implemented, tested or measured; each statement is
+marked as read from the code, reported, inferred, unknown or proposed.
+
+| Question | Read |
+|---|---|
+| The one shared understanding of a resource: for identity and aliases, ownership, residency and placement, access dependencies, content generations and dirty ranges, and execution lifetime, what in the code already is it, what is extended, what is not to be duplicated | `resource-model.md § The six notions`, then the numbered section for the notion |
+| What each of the three reads and writes of the model; the rules all three keep | `resource-model.md § Who reads and writes what`, `§ Rules all three keep` |
+| The order of work for the three, and why | `resource-model.md § Order of work` |
+| A missed page in work that is not repeated: what happens today, the options the code allows with what each guarantees and cannot, the one proposed first (a re-run inside the submission for pieces proven repeatable, its conditions and its round), its host tests, what the owner's runs must show | `unified-memory.md § Part 1. The missed page in work that is not repeated`, `§ Proposed first: B, for repeatable pieces`, `§ Tested here, and what the owner's run must show` |
+| The paging's other limits (2^40, a page held in part, one lookup, giving up by last use) | `unified-memory.md § The paging's other limits` |
+| Why separate system and video memory are not the console's one; what may live where by capability; when a copy may be given up or moved (reconstructible, not named, last use complete); pooling | `unified-memory.md § Two memories are not one`, `§ Part 2. What may live where`, `§ Giving up and moving`, `§ Pooling and suballocation` |
+| Where each candidate K1 to K11 fits (none approved there) | `unified-memory.md § Pooling and suballocation` (last row) |
+| The unit of GPU work today and what the title can observe of it | `gpu-scheduling.md § The unit of work today`, `§ What the title can observe` |
+| The dependency record per list and what fills it; what keeps today's order and waits | `gpu-scheduling.md § The dependency record`, `§ The rule: unknown keeps today's order and waits` |
+| What may be deferred or overlap, and the proof each needs; what deferred completion needs of the pump (a wake source of ours, the blocking fence wait); which waits can go | `gpu-scheduling.md § What may be deferred or overlap, and by which proof` |
+| Host structure builds, refits, retirement and ray-query dispatches in the scheduling model; barriers | `gpu-scheduling.md § Native structures in the model`, `§ Barriers` |
+| The scheduling columns and their definitions (CPU submission overhead, GPU idle time, queue wait, barrier cost, frame time) | `gpu-scheduling.md § Measurements` |
+| What a streaming request is; the request log and what leaves the machine | `predictive-streaming.md § What a streaming request is today`, `§ Observation first: the request log` |
+| What can be predicted from requests alone; that no spatial source was found; the rules for work done ahead | `predictive-streaming.md § What the sequence alone can predict`, `§ Prefetch and prepare-ahead` |
+| The persistent cache of converted resources (key, bound, invalidation); host DirectStorage by capability | `predictive-streaming.md § The persistent cache of converted resources`, `§ Host DirectStorage, by capability` |
+| The streaming columns and their definitions | `predictive-streaming.md § Measurements` |
+| The switches proposed for each subsystem and their fallbacks | `unified-memory.md § Switches, instruments, tests`; `gpu-scheduling.md § Switches, bounds, tests`; `predictive-streaming.md § Order, switches, tests`; release by fence value: `resource-model.md § 6. Execution lifetime` |
+| The bound, owner and gauge of each new long-lived structure proposed | `unified-memory.md § Bounds`; `gpu-scheduling.md § Switches, bounds, tests`; `predictive-streaming.md § Bounds` |
+
 ## BCPack
 
 | Question | Read |

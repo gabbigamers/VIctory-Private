@@ -26,7 +26,7 @@ about 27 GB of "reported memory" (build, scene and counter not yet known).
 
 | Area | State |
 |---|---|
-| Linux validation of the tree (tiers 1, 1b, 2), asset policy | in use; 1,043 host tests; the validator accepts all 877 containers the shader crate's host tests finish |
+| Linux validation of the tree (tiers 1, 1b, 2), asset policy | in use; 1,110 host tests; the validator accepts all 924 containers the shader crate's host tests finish |
 | Pixel outputs declared as the program writes them; what the earlier head translated is still translated and noted by reason (`victory translate` tallies the notes); `s_barrier` refused outside compute and mesh | tested; validator-accepted; the console-compiler tests (Windows) have not run with it |
 | Frame-time and memory instruments (`VICTORY_PERF_LOG`, gauges per owner, `cargo xtask perf-summary`, `victory gpu-info`) | tested; the Windows queries type-checked only |
 | Loop limits: a count per loop, a limit on a lane's loops together (2^22), a stopped lane's end by stage | tested, validator-accepted; one known defect (a `while` that begins a `do-while` body is counted with it) |
@@ -36,7 +36,8 @@ about 27 GB of "reported memory" (build, scene and counter not yet known).
 | Builder build descriptions recorded at its imports, behind `VICTORY_RT_CAPTURE` | tested (parsing, registry); speculative as to the real DLL |
 | Dispatch flags counted; counts as threads behind `VICTORY_DISPATCH_THREADS` | tested; validator-accepted guard; speculative as to the title |
 | Wave sizes counted; an emulated console wave behind `VICTORY_WAVE_EMULATION`; 64-lane masks as numbers read their high dword (a default change) | tested against a model of the console's wave; validator-accepted |
-| `victory-rt`: scenes, reference tracer, software model, comparison | tested; differs from the proposed rule (being reconciled) |
+| `victory-rt`: scenes (27 classes), reference tracer, software model, the older comparison, and the proposed rule as pure functions (k = 8 by measurement) | tested; the probe still judges by the older comparison |
+| Traversal-region recognition: loops and regions in the IR, the workload description and class hash, a recogniser, a counts-only census (`victory translate --rt-census`) | tested on hand-assembled synthetic programs; validator-accepted; no title loop has been read; consumed by nothing |
 | Ray queries in the emitter; native, hybrid and null prototype shaders | tested; validator-accepted; taken by the NVIDIA driver in the probe's short run |
 | Host structure backend (`crates/victory-gpu/src/rt/`), called by no run | tested (pure parts); builds, refits and binding ran on hardware in the probe's short run |
 | The synthetic probe `victory rt-probe` and `cargo xtask rt-summary` | tested with a stand-in device; ran on the owner's card (short run, 3 classes) |
@@ -50,9 +51,7 @@ Every experimental path is off by default. Switches: `README.md`
 | Item | State |
 |---|---|
 | The probe's next change: result files class by class, a bound on waits, the two debug-layer warnings of the first run fixed, the working set split into private and shareable and broken down by kind | starting |
-| Traversal-region recognition (loops and regions in the IR, the workload description, a recogniser on synthetic programs, a counts-only census) | being implemented |
-| `victory-rt` brought into line with the proposed rule | queued |
-| The three subsystems (scheduling, streaming, unified memory): read-only investigation and design | running |
+| The three subsystems: designed, challenged and corrected (`resource-model.md`, `unified-memory.md`, `gpu-scheduling.md`, `predictive-streaming.md`); nothing built | step 0 (instruments, the portable summary, the census, the request log) is next |
 
 ## Next, in order (the critical path is the first four)
 
@@ -66,13 +65,17 @@ Every experimental path is off by default. Switches: `README.md`
    and currency; variant slots in the shader cache and pipelines.
 4. The title comparison on the same rays (owner's machine), then `auto`.
 5. Loop-count defect; stops counted and reported by shader and stage.
-6. The three cooperating subsystems the owner asked for after the work
-   above (`progress.md`, "The owner's direction of 2026-11-27 for after
-   the work now active"): first a read-only investigation of what
-   exists; then unified memory management (it carries the fix for a
-   missed page in work that is not repeated, and a measured baseline
-   comes before anything is removed: `memory.md § Candidates`); then
-   dependency-aware GPU scheduling; then predictive world streaming.
+6. The three cooperating subsystems (`resource-model.md` and the three
+   plans): step 0 is instruments and observation only (memory, scheduling
+   and streaming columns; a portable summary of a list's steps with the
+   proofs of "repeatable" and "independent"; a counts-only census; a
+   request log), then the owner's baseline run. Only then: the missed
+   page in work that is not repeated (a re-run of the missed piece
+   inside its own submission, behind `VICTORY_MEMORY_REPLAY`, for pieces
+   proven repeatable; built only if the census shows such pieces miss),
+   holder counts and release by fence value, deferred completion,
+   decode-ahead and the cache of decoded resources. Each behind its own
+   switch, off by default.
 
 ## Decided (not reopened; the entry is in `progress.md`)
 
@@ -105,6 +108,7 @@ Decisions (a default is in force until answered):
 | A conditional `continue` that falls through counted as its own loop | in force |
 | Keep the ten-line dispatch entry test that follows a fork's (origin recorded in `THIRD_PARTY_NOTICES.md`) or have it rewritten | kept |
 | Where the title's files come from and how they became readable | title runs and the census wait on it |
+| The three subsystems' open points (in `unified-memory.md`, `gpu-scheduling.md` and `predictive-streaming.md`, and listed in their entry in `progress.md`): the replay as first resolution of the missed page and its 250 ms budget; whether completion effects may land from a thread of ours; the disk budget of a decoded-resource cache; host DirectStorage | nothing of it is built before the baseline run |
 | Origin of the remaining BCPack tables (`bcpack-tables.bin`, 75,678 bytes) | recorded as unknown |
 
 From the owner's machine, cheapest first:
@@ -119,4 +123,7 @@ From the owner's machine, cheapest first:
 4. One title run with `VICTORY_PERF_LOG` in a ray-traced scene, no switch
    set: frame times, memory by owner, dispatch flags, structure views,
    missed pages, wave refusals. Then one switch at a time.
-5. The probe, once integrated.
+5. The probe again after its next change (the same short run under the
+   debug layer, then the full run without it).
+6. `victory translate <shader folder> --rt-census`: counts of traversal
+   forms and refusal reasons only; send that file alone.
