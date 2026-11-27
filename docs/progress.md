@@ -1005,8 +1005,9 @@ Only what cannot be done from a cloud session.
   through a tap. Not run on a device; not hardware-validated.
   * Read from this repository's own code: a description is visible to
     us at one place, where the title's imports of the builder are
-    bound; list slots 146 and 148 are methods the builder calls, not
-    build entries. Speculative, resting on one external project's
+    bound; in this repository's code list slots 146 and 148 are
+    enhanced barriers and list upload memory, not build entries (the
+    external notes show the builder calling them). Speculative, resting on one external project's
     static reading of that DLL: the export names (kept in the source
     with a comment saying so), the description's size and flags, the
     copy's argument order and modes. Assumed: that the console's
@@ -1095,7 +1096,8 @@ Only what cannot be done from a cloud session.
   tests): 32 tests of the emulated wave against a separately written
   model of the console's wave under ten thread schedules, 9 of the
   census and the switch; Microsoft's validator accepts the containers
-  those tests emit. Type-checked for Windows only: the shader cache's
+  those tests emit (found at integration, after the correction, whose
+  report had no validator). Type-checked for Windows only: the shader cache's
   key and entries, the library tag, the census's call sites, the
   pipeline's refusal text, `victory translate`'s tally. Not run on a
   device; not hardware-validated; the barriers' cost is not measured.
@@ -1120,10 +1122,14 @@ Only what cannot be done from a cloud session.
     console wave carries the wave itself. Lanes exchange through
     group-shared memory at group barriers, meet where memory order
     needs it and share lane 0's scalar loads; a program with no
-    per-lane form is given this one where it can be made. The loop
-    limits stop such a wave whole, at one back edge, and it takes no
-    thread limits (`VICTORY_DISPATCH_THREADS`); both tested. Not done:
-    groups of several waves or of less than one.
+    per-lane form is given this one where it can be made. On two
+    hand-assembled programs (a mask loop; a mask loop inside a
+    scalar-counted loop) the loop limits stop such a wave whole at one
+    back edge; that is not shown for a nest whose loops begin at one
+    block. It takes no thread limits (`VICTORY_DISPATCH_THREADS`;
+    tested): a rule added at integration, as was the switch's byte in
+    the pipeline library's tag, both confirmed by the coordinator. Not
+    done: groups of several waves or of less than one.
   * What the review found: a lane's read not kept ahead of another's
     later write (lane 63 read 111 for 50); programs the per-lane form
     refuses out of the switch's reach and missing from the counts;
@@ -1132,6 +1138,6 @@ Only what cannot be done from a cloud session.
   * For the owner's machine: `victory translate --validate --pipelines
     <shaders>` before any run with the switch; a default run, keeping
     the "wave sizes" lines and the `wave_programs_*` columns; then
-    `VICTORY_WAVE_EMULATION=1`, watching for device removal (the forks
-    report it with barriers inside loops and branches, which this form
+    `VICTORY_WAVE_EMULATION=1`, watching for device removal (one fork
+    reports it with barriers inside loops and branches, which this form
     has); on a card with 64-lane waves, `=64` against unset.
