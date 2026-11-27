@@ -260,10 +260,19 @@ pub enum Owner {
     /// heap. A count, since the bytes are few and the number is what a run
     /// is read for.
     StructureSlots,
+    /// R1: the build descriptions the ray-tracing capture keeps, one for
+    /// each destination (`crate::rtcapture`): each entry with its
+    /// geometry or instance descriptions, while the registry has it; and
+    /// 32 B for each address it knows a structure was made at. Zero
+    /// unless `VICTORY_RT_CAPTURE` is on; at most the registry's bound
+    /// (64 MiB) and 2 MiB of addresses. Not the registry's own map nodes,
+    /// or what a description takes while it is being read (36 MiB at
+    /// most, for the call).
+    RtCapture,
 }
 
 impl Owner {
-    pub const ALL: [Owner; 17] = [
+    pub const ALL: [Owner; 18] = [
         Owner::TitlePages,
         Owner::TitlePagesMapped,
         Owner::TitleSections,
@@ -281,6 +290,7 @@ impl Owner {
         Owner::Shaders,
         Owner::DemandPages,
         Owner::StructureSlots,
+        Owner::RtCapture,
     ];
 
     /// The owner's column in the performance log.
@@ -303,6 +313,7 @@ impl Owner {
             Owner::Shaders => "own_shaders_mb",
             Owner::DemandPages => "own_demand_pages_mb",
             Owner::StructureSlots => "own_structure_slots",
+            Owner::RtCapture => "own_rt_capture_mb",
         }
     }
 
@@ -315,7 +326,8 @@ impl Owner {
             | Owner::SnapshotPool
             | Owner::PipelineLibrary
             | Owner::PipelineSave
-            | Owner::Shaders => Kind::Private,
+            | Owner::Shaders
+            | Owner::RtCapture => Kind::Private,
             Owner::BufferCopies
             | Owner::Windows
             | Owner::ViewChunks

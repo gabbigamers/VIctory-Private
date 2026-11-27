@@ -234,6 +234,11 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 Every build appends unhandled exceptions, panics, and host GPU failures to
 `crashes.log` in the title's data folder.
 
+`VICTORY_RT_CAPTURE=1` (any build) records what the title asks its
+ray-tracing builder to build and logs counts of it; nothing is built from
+the record yet, and the title runs as without it
+([docs/dxr-build-capture.md](docs/dxr-build-capture.md)).
+
 ### Measuring a run
 
 Every build logs, every five seconds, the frame rate with where a frame's

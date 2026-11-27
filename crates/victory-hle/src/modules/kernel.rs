@@ -242,12 +242,21 @@ pub extern "system" fn OutputDebugStringW(text: *const u16) {
 /// the code and the caller, then exits on the host.
 pub extern "C" fn exit(code: i32) -> ! {
     tracing::warn!(code, from = %host::callers(), "title exits");
+    ending();
     host::exit(code)
+}
+
+/// The process is about to end: what is only logged now and then is logged
+/// a last time (the ray-tracing capture's totals; nothing unless
+/// `VICTORY_RT_CAPTURE` is on).
+fn ending() {
+    victory_gpu::rtcapture::flush();
 }
 
 /// The CRT's `abort` (also reached from `terminate`): logged like [`exit`].
 pub extern "C" fn abort() -> ! {
     tracing::error!(from = %host::callers(), "title aborts");
+    ending();
     host::abort()
 }
 
@@ -255,12 +264,14 @@ pub extern "C" fn abort() -> ! {
 /// the host's `abort`.
 pub extern "C" fn terminate() -> ! {
     tracing::error!(from = %host::callers(), "title calls terminate");
+    ending();
     host::abort()
 }
 
 /// See [`terminate`].
 pub extern "C" fn _invalid_parameter_noinfo_noreturn() -> ! {
     tracing::error!(from = %host::callers(), "title passed an invalid parameter");
+    ending();
     host::abort()
 }
 
@@ -275,6 +286,7 @@ pub extern "system" fn SetUnhandledExceptionFilter(filter: usize) -> usize {
 
 extern "system" fn report_unhandled(info: *const c_void) -> i32 {
     host::report_unhandled(info);
+    ending();
     match TITLE_FILTER.load(std::sync::atomic::Ordering::Acquire) {
         0 => 0, // EXCEPTION_CONTINUE_SEARCH
         filter => {
@@ -290,6 +302,7 @@ extern "system" fn report_unhandled(info: *const c_void) -> i32 {
 pub extern "system" fn TerminateProcess(process: *mut c_void, code: u32) -> i32 {
     if process as isize == -1 {
         tracing::warn!(code, from = %host::callers(), "title terminates the process");
+        ending();
     }
     host::terminate_process(process, code)
 }

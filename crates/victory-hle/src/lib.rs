@@ -14,10 +14,12 @@
 mod host;
 pub mod modules;
 mod registry;
+mod rtcapture;
 pub mod runtime;
 
 pub use host::HostPolicy;
 pub use registry::{HleExport, HleModule, registry};
+pub use rtcapture::WithRtCapture;
 pub use victory_gpu::console;
 
 use victory_loader::{ImportResolver, Provenance, Resolution};

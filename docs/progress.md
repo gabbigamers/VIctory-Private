@@ -994,3 +994,49 @@ Only what cannot be done from a cloud session.
     comparing picture, frame time and the "title memory this frame"
     lines; and `cargo test -p victory-gpu a_structure_` in both switch
     positions, which would be the first hardware-validated result.
+* Ray-tracing prerequisite, the build descriptions (what the title asks
+  its builder DLL to build): implemented behind `VICTORY_RT_CAPTURE`,
+  off by default, reviewed (9 findings, all upheld) and corrected.
+  Tested (host tests): 48 tests of the reading, the registry, the
+  counts and the taps against stand-in exports. Type-checked for
+  Windows only: the layouts asserted against the `windows` crate, the
+  timer thread, the exit hooks, the reader of title memory, binding
+  into a real image, where win64 puts the arguments, an MSVC exception
+  through a tap. Not run on a device; not hardware-validated.
+  * Read from this repository's own code: a description is visible to
+    us at one place, where the title's imports of the builder are
+    bound; list slots 146 and 148 are methods the builder calls, not
+    build entries. Speculative, resting on one external project's
+    static reading of that DLL: the export names (kept in the source
+    with a comment saying so), the description's size and flags, the
+    copy's argument order and modes. Assumed: that the console's
+    geometry and instance layouts are PC's.
+  * By default no tap is installed, imports are bound to the same
+    addresses and no thread is started. What changes: debug-level log
+    lines at binding; one new performance-log column,
+    `own_rt_capture_mb`, which stays 0 and changes the CSV header
+    (`docs/memory.md`, R1); the title's exit, abort, terminate and
+    unhandled-exception paths call a flush that returns at once.
+  * Behind `VICTORY_RT_CAPTURE=1`: seven taps (build, batched build,
+    copy, size query, three unpacking calls) call the builder first and
+    record once it has returned; a failed or thrown call records
+    nothing and is counted. Totals are logged at the first call, at
+    each power of two of calls, every 10 s, 2 to 4 s after calls stop
+    (a timer thread) and at exit. Nothing is built from the record.
+    `=dump` also logs the first bytes of four batched descriptions.
+  * Not done: copies are not applied (the order is a source constant,
+    unset until a run decides it), so compacted or cloned structures
+    are missing from the record; batched descriptions are not read; a
+    method found by `GetProcAddress` or by ordinal is not tapped.
+  * What the review found: a copy's direction guessed from which
+    address was known, and applied backwards after a batched build;
+    taps that recorded before the call and ignored its result; totals
+    left at the first call by a burst, a stop or a crash; untapped
+    builder imports logged at debug only; copies in other modes left
+    stale; four untested behaviours (now tested); a stack-argument
+    claim the host cannot test; layouts tied to no declaration;
+    nothing in the log to check the geometry layout.
+  * For the owner's machine: one run with `VICTORY_RT_CAPTURE=dump`,
+    keeping every line that starts with `ray-tracing capture:`;
+    `docs/dxr-build-capture.md` says what each outcome decides,
+    including the pair of counts that settles the copy order.

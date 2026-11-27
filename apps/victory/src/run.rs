@@ -155,6 +155,9 @@ pub fn run(
         inner: &resolver,
         dlls: &dlls,
     };
+    // As resolved, unless `VICTORY_RT_CAPTURE` is on: then the title's
+    // calls into its ray-tracing builder are recorded on their way.
+    let with_dlls = victory_hle::WithRtCapture { inner: &with_dlls };
     let show = |name: &str, report: BindReport| {
         println!(
             "bound          {name}: {} hle, {} host, {} title, {} missing",
@@ -379,6 +382,7 @@ impl LateDlls {
                     inner: &old,
                     dlls: &new,
                 };
+                let resolver = victory_hle::WithRtCapture { inner: &resolver };
                 for (name, dll) in &new {
                     println!(
                         "title dll      {name} at {:#x} (loaded by the title)",
