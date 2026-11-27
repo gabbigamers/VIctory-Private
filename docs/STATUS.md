@@ -22,7 +22,8 @@ about 27 GB of "reported memory" (build, scene and counter not yet known).
 
 | Area | State |
 |---|---|
-| Linux validation of the tree (tiers 1, 1b, 2), asset policy | in use; about 900 host tests; the validator rejects 2 containers, both from the opcode census (fix in review) |
+| Linux validation of the tree (tiers 1, 1b, 2), asset policy | in use; 926 host tests; the validator accepts all 877 containers the shader crate's host tests finish |
+| Pixel outputs declared as the program writes them; what the earlier head translated is still translated and noted by reason (`victory translate` tallies the notes); `s_barrier` refused outside compute and mesh | tested; validator-accepted; the console-compiler tests (Windows) have not run with it |
 | Frame-time and memory instruments (`VICTORY_PERF_LOG`, gauges per owner, `cargo xtask perf-summary`, `victory gpu-info`) | tested; the Windows queries type-checked only |
 | Loop limits: a count per loop, a limit on a lane's loops together (2^22), a stopped lane's end by stage | tested, validator-accepted; one known defect (a `while` that begins a `do-while` body is counted with it) |
 | BCPack lane decoder: two changes in a commit of their own (`e57872f`) | tested against a simulation of Microsoft's one-lane module; what it costs is in `bcpack-lane-corrections.md` |
@@ -42,7 +43,6 @@ Every experimental path is off by default. Switches: `README.md`
 
 | Item | State |
 |---|---|
-| Validator findings: outputs declared as written; conditions the head translated are counted, not refused | applied; in review |
 | The synthetic probe `victory rt-probe` (native and hybrid against the CPU reference; times, memory and waits in separate columns) | being implemented |
 | Traversal-region recognition (loops and regions in the IR, the workload description, a recogniser on synthetic programs, a counts-only census) | being implemented |
 | `victory-rt` brought into line with the proposed rule | queued |

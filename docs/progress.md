@@ -1438,3 +1438,12 @@ Only what cannot be done from a cloud session.
     `victory translate` over the shader folder for each note's and
     refusal's count; a title run for the warnings and for any draw
     that changes where an output is no longer declared.
+* Pixel outputs, at the push: the coordinator ran the four checks on the
+  integrated commit in a fresh build directory (926 host tests; the
+  validator: 877 containers, none rejected, for the first time; the
+  Windows type-check; the asset policy) and compared the containers
+  with the head's by hash: 828 of 830 byte-identical, the two gone
+  being the two the validator rejected, 49 new ones from new tests.
+  The corrector's deliberate faults and its comparison of generated
+  programs with the earlier head were made before the rebase and were
+  not repeated on this base.
