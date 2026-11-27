@@ -154,6 +154,27 @@ impl Shader {
                         "shader does not translate; its pipelines' draws are dropped"
                     ),
                 }
+                // Pixel outputs whose declaration in the container and
+                // exports in the program do not agree: the shader is
+                // translated as each reason says
+                // (`victory_shader::emit::OutputReason`). Whether titles
+                // have such programs is not known, so each is named, one
+                // line per reason.
+                if let Ok(t) = &done {
+                    for reason in victory_shader::emit::OutputReason::ALL {
+                        let of_reason = t.host.output_notes.iter().filter(|n| n.reason == reason);
+                        let outputs: Vec<&str> = of_reason.map(|n| n.output.as_str()).collect();
+                        if !outputs.is_empty() {
+                            tracing::warn!(
+                                stage = self.stage,
+                                hash = %self.hash,
+                                reason = reason.text(),
+                                outputs = %outputs.join(" "),
+                                "shader's pixel outputs and its program's exports do not agree"
+                            );
+                        }
+                    }
+                }
                 match &done {
                     Ok(t) => {
                         // Kept with the container for the run (the map of

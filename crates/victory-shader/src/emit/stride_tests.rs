@@ -204,6 +204,7 @@ fn build(
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: lowered.dxil,
+        output_notes: lowered.output_notes,
         user_data: lowered.user_data,
         static_samplers: lowered
             .samplers

@@ -196,6 +196,7 @@ fn program() -> HostShader {
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: l.dxil,
+        output_notes: l.output_notes,
         user_data: l.user_data,
         samplers: l.samplers,
         static_samplers: Vec::new(),
@@ -432,6 +433,7 @@ fn root_views_read_their_copy_and_zeros_past_it() {
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: l.dxil,
+        output_notes: l.output_notes,
         user_data: l.user_data,
         samplers: l.samplers,
         static_samplers: Vec::new(),
@@ -568,6 +570,7 @@ fn writes_through_views_mark_their_pages() {
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: l.dxil,
+        output_notes: l.output_notes,
         user_data: l.user_data,
         samplers: l.samplers,
         static_samplers: Vec::new(),
@@ -702,6 +705,7 @@ fn heap_direct_texture_reads_mark_their_heap_index() {
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: l.dxil,
+        output_notes: l.output_notes,
         user_data: l.user_data,
         samplers: l.samplers,
         static_samplers: Vec::new(),
@@ -810,6 +814,7 @@ fn straddling_writes_across_256mib_and_4gib_boundaries_mark_exact_pages() {
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: l.dxil,
+        output_notes: l.output_notes,
         user_data: l.user_data,
         samplers: l.samplers,
         static_samplers: Vec::new(),

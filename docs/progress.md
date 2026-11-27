@@ -1392,3 +1392,49 @@ Only what cannot be done from a cloud session.
   the other two rest on its residency and generations); then
   scheduling (it needs the dependency model and the native path);
   then streaming (it needs the residency manager to bound it).
+* The validator's two rejections are fixed in the lowering: implemented,
+  tested (host tests), accepted by Microsoft's validator on Linux. Not
+  hardware-validated: nothing ran on Windows, a card or the title.
+  * Found: a pixel shader declared the container's `OSG1` whatever its
+    program exports, and `s_barrier` became a group sync in any stage.
+    Evidence: the validator on the two census programs, D3D11.3 16.9.1
+    and 16.9.2, LLVM's AMDGPU note on the barrier. How often a title
+    program meets either is speculative.
+  * Changed by default, behind no switch. A pixel shader declares the
+    outputs its program writes (`Lower::pixel_outputs`). Where exports
+    and declaration differ it still translates, with a note per output
+    (`HostShader::output_notes`): never exported (not declared; also a
+    depth, stencil reference or coverage the stage data enables),
+    channels exported past the element (dropped), channels never
+    written, exported on some paths only (stored as exported, no value
+    made up). Refused: `s_barrier` outside compute and mesh; a pixel
+    export in a whole-wave section that is the `done` export or writes
+    a declared channel (one with no store anywhere is passed over, as
+    before). The notes are in the shader cache's entry, so every shader
+    is translated once more; a run warns per shader and reason and
+    counts them in its shader line; `victory translate` tallies them.
+  * Against the newer head: a lane a loop limit stopped is discarded in
+    both its forms and adds no path to the ones followed (two host
+    tests added at integration: a pixel program with a loop and exports
+    at both kinds of latch; a vertex end and its declared outputs).
+    `lower_limited` redoes a round for a phi without a form, then for
+    thread limits that do not fit (compute), then for a declared output
+    without a store (pixel); the last two never meet.
+  * Checked on the integrated commit: 926 host tests; the validator,
+    877 containers, 0 rejected (830 with 2 before). By hash 828 are the
+    head's, with every one of the stopped-lane (283), emulated-wave,
+    ray-query and thread-limit tests; the 2 gone are the census's; the
+    49 new come from the new tests and the census. Type-checked for
+    Windows only: the warning, the shader line, `victory translate`,
+    the cache's tests (6 pass on Linux through a scratch crate). The
+    corrector's 27 deliberate faults and 220,000 generated pairs
+    against the older head were not repeated here.
+  * The reviews found: an output left declared without a store (now
+    lowered again without it); refusals of programs the head translated
+    and silent pruning (now notes); a section refusal wider than the
+    loss (narrowed); rules and counters without a test (added).
+  * For the owner's machine: `cargo test --workspace --locked` (the
+    cache's and the console-compiler tests have not run with this);
+    `victory translate` over the shader folder for each note's and
+    refusal's count; a title run for the warnings and for any draw
+    that changes where an output is no longer declared.

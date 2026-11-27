@@ -598,6 +598,7 @@ fn build(wide: bool, memory: bool) -> HostShader {
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: lowered.dxil,
+        output_notes: lowered.output_notes,
         user_data: lowered.user_data,
         samplers: lowered.samplers,
         static_samplers: Vec::new(),

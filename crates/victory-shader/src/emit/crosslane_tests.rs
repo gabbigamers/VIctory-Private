@@ -417,6 +417,7 @@ fn build_wave32_cs(pattern: MaskPattern, div: Divergence, op_words: &[u32]) -> H
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: lowered.dxil,
+        output_notes: lowered.output_notes,
         user_data: lowered.user_data,
         samplers: lowered.samplers,
         static_samplers: Vec::new(),

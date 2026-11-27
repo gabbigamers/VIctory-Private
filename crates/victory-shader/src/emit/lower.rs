@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::UserData;
+use super::{OutputNote, UserData};
 use super::bitcode::{Attr, V};
 use super::container::SigElement;
 use super::shader::{Shader, flags};
@@ -86,6 +86,9 @@ pub(crate) struct Lowered {
     /// Heap handles written.
     #[cfg(test)]
     pub heap_handles: u32,
+    /// Pixel: the outputs whose exports do not agree with their
+    /// declaration, each with how ([`Lower::pixel_outputs`]).
+    pub output_notes: Vec<OutputNote>,
     /// Whether the program uses wave operations.
     #[cfg(test)]
     pub wave_ops: bool,
@@ -195,6 +198,10 @@ enum Stop {
     /// The program reads user data where its thread limits were put: redo
     /// without them.
     Unlimited,
+    /// Pixel outputs (their places in [`Parts::outputs`]) that were
+    /// declared and have no store in the function as the module writes it:
+    /// redo without declaring them ([`Lower::stored_outputs`]).
+    Unstored(Vec<usize>),
     Fail(ShaderError),
 }
 
@@ -232,14 +239,50 @@ pub(crate) fn lower_with(parts: &Parts, thread_limits: bool) -> Result<Lowered, 
 
 /// [`lower_with`] with the loop limits given: the tests of the counting
 /// run loops against small ones.
+///
+/// The program is lowered in rounds, each from the start and with the
+/// same loop limits, until one ends without a [`Stop`]. A round is done
+/// again for three reasons, which it finds in this order:
+///
+/// 1. [`Stop::Retry`], any stage, where the phis are filled
+///    ([`Lower::fill_phis`]): a phi's incoming value has no DXIL form.
+///    The next round takes that phi as missing.
+/// 2. [`Stop::Unlimited`], compute with thread limits, once the phis are
+///    filled: the program reads user data where the limits were put. The
+///    rounds from there are without thread limits and start with no phi
+///    taken as missing, so the program is lowered exactly as without the
+///    option.
+/// 3. [`Stop::Unstored`], pixel, last ([`Lower::stored_outputs`]): a
+///    declared output has no store in the function as the module writes
+///    it. The next round does not declare it; the phis taken as missing
+///    stay so.
+///
+/// The second is a compute program's alone and the third a pixel
+/// program's, so no program meets both; either can follow rounds of the
+/// first, and be followed by them. Each ends: a phi found missing twice
+/// refuses the program, thread limits are taken away once, and each round
+/// of the third takes at least one more output out of the declaration.
 pub(crate) fn lower_limited(parts: &Parts, limits: Limits, mut thread_limits: bool) -> Result<Lowered, ShaderError> {
     let mut bad = HashMap::new();
+    let mut unstored = HashSet::new();
     loop {
-        match Lower::new(parts, &bad, limits).run(thread_limits) {
+        match Lower::new(parts, &bad, &unstored, limits).run(thread_limits) {
             Ok(l) => return Ok(l),
             Err(Stop::Unlimited) => {
                 thread_limits = false;
                 bad.clear();
+            }
+            Err(Stop::Unstored(outputs)) => {
+                // Each round takes at least one more output out of the
+                // declaration, so there are no more rounds than outputs.
+                let before = unstored.len();
+                unstored.extend(outputs);
+                if unstored.len() == before {
+                    return Err(ShaderError::Unsupported {
+                        offset: 0,
+                        what: "a pixel output that stays without a store",
+                    });
+                }
             }
             Err(Stop::Retry(v, why)) => {
                 if bad.insert(v, why).is_some() {
@@ -265,6 +308,15 @@ struct Lower<'a> {
     s: Shader,
     x: &'a Parts<'a>,
     bad: &'a HashMap<Value, Why>,
+    /// Pixel outputs, by their places in [`Parts::outputs`], that an
+    /// earlier round declared and the module then wrote no store of
+    /// ([`Stop::Unstored`]).
+    unstored: &'a HashSet<usize>,
+    /// Pixel: the place in [`Parts::outputs`] of each output the shader
+    /// declares, and what there is to say of the container's outputs
+    /// ([`Lower::pixel_outputs`]).
+    declared: Vec<usize>,
+    notes: Vec<OutputNote>,
     lane_fail: HashMap<Value, Why>,
     vals: HashMap<Value, Val>,
     floats: HashMap<Value, V>,
@@ -650,7 +702,12 @@ fn unsupported(offset: usize, what: Why) -> Stop {
 }
 
 impl<'a> Lower<'a> {
-    fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>, limits: Limits) -> Self {
+    fn new(
+        x: &'a Parts<'a>,
+        bad: &'a HashMap<Value, Why>,
+        unstored: &'a HashSet<usize>,
+        limits: Limits,
+    ) -> Self {
         let p = x.p;
         let mut phi_at = HashMap::new();
         for (b, block) in p.blocks.iter().enumerate() {
@@ -809,6 +866,9 @@ impl<'a> Lower<'a> {
             s,
             x,
             bad,
+            unstored,
+            declared: Vec::new(),
+            notes: Vec::new(),
             lane_fail: HashMap::new(),
             vals: HashMap::new(),
             floats: HashMap::new(),
@@ -918,6 +978,10 @@ impl<'a> Lower<'a> {
         if self.emu.is_none() {
             self.find_sections();
         }
+        // A pixel shader declares the outputs its exports write, and its
+        // position's interpolation follows what it declares.
+        self.pixel_outputs(&order)?;
+        self.position_mode();
         self.inputs()?;
         if let Some(mesh) = self.s.mesh {
             self.mesh_prologue(mesh).map_err(|w| unsupported(0, w))?;
@@ -926,13 +990,7 @@ impl<'a> Lower<'a> {
         for &b in &order {
             self.cur = self.block[b].expect("reachable");
             self.cur_ir = b;
-            let preds: Vec<usize> = p.blocks[b]
-                .preds
-                .iter()
-                .copied()
-                .filter(|&q| self.block[q].is_some())
-                .collect();
-            self.exported[b] = !preds.is_empty() && preds.iter().all(|&q| self.exported_out(q));
+            self.exported[b] = self.enters_exported(b, &self.exported);
             for (i, phi) in p.blocks[b].phis.iter().enumerate() {
                 let val = match phi.reg {
                     Reg::S(c) if c == EXEC || c == EXEC + 1 => Val::Missing("a lane mask"),
@@ -991,6 +1049,7 @@ impl<'a> Lower<'a> {
         if limits.iter().any(|u| self.user_reads.get(&u.index) != Some(u)) {
             return Err(Stop::Unlimited);
         }
+        self.stored_outputs()?;
         let user_data = self.user_reads.values().copied().collect();
         self.s.samplers = self.samplers.len() as u32;
         let root_cbvs = self.s.root_cbvs.iter().map(|r| r.0).collect();
@@ -1013,6 +1072,7 @@ impl<'a> Lower<'a> {
             heap: self.heap[0],
             heap_writes: self.heap[1],
             view_marks: self.s.view_writes.is_some(),
+            output_notes: self.notes,
             #[cfg(test)]
             nonuniform_handles: self.s.nonuniform_handles,
             #[cfg(test)]
@@ -1040,8 +1100,16 @@ impl<'a> Lower<'a> {
         })
     }
 
-    fn exported_out(&self, b: usize) -> bool {
-        self.exported[b] || self.has_done_export(b)
+    /// Whether a `done` export is behind every lane entering block `b`,
+    /// `exported` saying so for the blocks before it in reverse postorder
+    /// (and nothing yet for the others).
+    fn enters_exported(&self, b: usize, exported: &[bool]) -> bool {
+        let mut preds = self.x.p.blocks[b]
+            .preds
+            .iter()
+            .filter(|&&q| self.block[q].is_some())
+            .peekable();
+        preds.peek().is_some() && preds.all(|&q| exported[q] || self.has_done_export(q))
     }
 
     fn has_done_export(&self, b: usize) -> bool {
@@ -1090,6 +1158,17 @@ impl<'a> Lower<'a> {
         }
         let r = match &inst.fields {
             Fields::Sop { .. } => self.sop(inst),
+            // `s_barrier` waits until every wave of the wave's thread group
+            // has arrived at one (LLVM's AMDGPU notes on execution
+            // synchronisation: one barrier per group, expecting as many
+            // arrivals as the group has waves). Compute and mesh programs
+            // run in thread groups, on the console and on the host. A pixel
+            // or vertex wave belongs to none: what the instruction does
+            // there its definition does not say, and DXIL has no group
+            // sync outside the stages with thread groups.
+            Fields::Sopp { .. } if name == "s_barrier" && self.s.threads.is_none() => {
+                Err("a thread-group barrier outside compute and mesh programs")
+            }
             Fields::Sopp { .. } if name == "s_barrier" && self.no_barrier.contains(&b) => Ok(()),
             Fields::Sopp { .. } if name == "s_barrier" => {
                 // Thread-group sync with a shared-memory fence, and a UAV
@@ -1292,6 +1371,17 @@ mod tests {
         };
         let layout = vec![constants, root(RootType::Table, 4, 1)];
         lower_wave_limited(&words, layout, vec![buffer], false, limits)
+    }
+
+    /// `s_barrier` in a compute program is the thread group's sync, with
+    /// a fence for the group's shared memory (mode 1 | 8).
+    #[test]
+    fn a_compute_barrier_is_a_group_sync() {
+        let l = lower_with(&[0xBF8A_0000, S_ENDPGM], vec![], vec![]).unwrap();
+        let calls: Vec<&str> = (0..l.flow.blocks.len())
+            .flat_map(|b| l.flow.calls(b))
+            .collect();
+        assert_eq!(calls, ["dx.op.barrier"]);
     }
 
     #[test]

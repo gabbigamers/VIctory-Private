@@ -1959,6 +1959,199 @@ mod tests {
         );
     }
 
+    /// [`lower_pixel`]'s program in a container that declares four
+    /// outputs, in this order: render targets 0, 1 and 2 and the depth.
+    /// Before `body` it exports v1, the first root constant, to target
+    /// 2's four channels; after it, as there, v0 and v1 to target 0's
+    /// with the `done` export. No export writes target 1 or the depth.
+    fn lower_pixel_of_four_outputs(body: &[u32], limits: Limits) -> Lowered {
+        let mut words = prologue();
+        // exp mrt2, v1, v1, v1, v1
+        words.extend_from_slice(&[0xF800_002F, 0x0101_0101]);
+        words.extend_from_slice(body);
+        words.extend_from_slice(&STORE_V0);
+        words.extend_from_slice(&[
+            0xF800_180F, // exp mrt0, v0, v1, v1, v1 done vm
+            0x0101_0100,
+            S_ENDPGM,
+        ]);
+        let io = StageIo::Ps {
+            inputs: vec![],
+            input_addr: 0,
+            db_shader_control: 0,
+            patches: vec![],
+        };
+        let target = |n: u32| SigElement {
+            index: n,
+            ..element("SV_Target", 16, n)
+        };
+        let depth = SigElement {
+            row: None,
+            cols: 1,
+            ..element("SV_Depth", 17, 0)
+        };
+        let outputs = vec![target(0), target(1), target(2), depth];
+        lower_stage(HwStage::Ps, io, &words, outputs, vec![], limits)
+    }
+
+    /// The outputs the shader `l` declares: name, index and register.
+    fn declared(l: &Lowered) -> Vec<(String, u32, Option<u32>)> {
+        let c = crate::dxbc::Container::parse(&l.dxil).unwrap();
+        let part = c.part(crate::dxbc::FourCC::OSG1).unwrap();
+        let outputs = crate::emit::signature(part.data).unwrap();
+        outputs.into_iter().map(|e| (e.name, e.index, e.row)).collect()
+    }
+
+    /// The ids of the outputs the function of `l` has a store of, with
+    /// the block of each store.
+    fn output_stores(l: &Lowered) -> Vec<(usize, u64)> {
+        let mut stores = Vec::new();
+        for (b, block) in l.flow.blocks.iter().enumerate() {
+            for i in &block.insts {
+                if let FlowOp::Call(name, args) = &i.op
+                    && name.starts_with("dx.op.storeOutput")
+                {
+                    let Arg::Int(id) = args[1] else {
+                        panic!("{name} {args:?}");
+                    };
+                    stores.push((b, id));
+                }
+            }
+        }
+        stores
+    }
+
+    /// Where a lane a loop limit stopped meets the outputs a pixel shader
+    /// declares from its program's exports (`Lower::pixel_outputs`, which
+    /// follows the program's own paths and knows of no limit).
+    ///
+    /// A container with four outputs of which the program exports two,
+    /// one before a loop and one, with the `done` export, after it. The
+    /// shader declares those two, the later one renumbered, and notes the
+    /// other two as never exported, whatever the limits are and whichever
+    /// kind the loop's latch is. No output is noted as exported on some
+    /// paths only: a stopped lane is discarded, so its path needs no value.
+    ///
+    /// * A latch that leaves its loop: the stopped lane has made the
+    ///   export before the loop, is discarded on the loop's exit and runs
+    ///   on to the `done` export, on the edge the other lanes take. Its
+    ///   stores to both outputs are in the function, the later one after
+    ///   its discard, where the host drops it with the first.
+    /// * A latch that only goes back: the stopped lane ends in the block
+    ///   that discards and returns, which stores no output. It never
+    ///   reaches the `done` export, and the output that export writes is
+    ///   declared and stored all the same: the lanes that end of
+    ///   themselves write it.
+    ///
+    /// A lane that ends of itself stores both outputs under their new
+    /// ids and is not discarded, as without limits.
+    #[test]
+    fn a_stopped_pixel_lane_meets_the_outputs_its_program_declares() {
+        let small = Limits { each: 5, total: 13 };
+        let notes = |l: &Lowered| -> Vec<String> {
+            l.output_notes.iter().map(|n| n.to_string()).collect()
+        };
+        // Per program: whether its latch only goes back, a lane that ends
+        // of itself and a lane the small limits stop.
+        type Lanes = (bool, [u32; 4], [u32; 4]);
+        let programs: [(&str, Vec<u32>, Lanes); 3] = [
+            (
+                "back on SCC set",
+                counts_to_s0(true).to_vec(),
+                (false, [3, 0, 0, 0], [9, 0, 0, 0]),
+            ),
+            (
+                "back on SCC clear",
+                counts_to_s0(false).to_vec(),
+                (false, [3, 0, 0, 0], [9, 0, 0, 0]),
+            ),
+            (
+                "a latch that only goes back",
+                LATCH_IS_INNER_HEADER.to_vec(),
+                (true, [9, 1, 0, 0], [9, 3, 0, 0]),
+            ),
+        ];
+        for (name, body, (only_back, ends, stops)) in &programs {
+            for limits in [small, defaults()] {
+                let l = lower_pixel_of_four_outputs(body, limits);
+                let says = format!("{name} with {limits:?}");
+                assert_eq!(
+                    notes(&l),
+                    ["SV_Target1: never exported", "SV_Depth: never exported"],
+                    "{says}"
+                );
+                let named = |n: u32| ("SV_Target".to_owned(), n, Some(n));
+                assert_eq!(declared(&l), [named(0), named(2)], "{says}");
+                // Both declared outputs have their stores, four channels
+                // each, and no other output has one.
+                let stores = output_stores(&l);
+                let of = |id: u64| stores.iter().filter(|s| s.1 == id).count();
+                assert_eq!((of(0), of(1), stores.len()), (4, 4, 8), "{says}");
+                // The block that ends a stopped lane, where there is one,
+                // discards and stores nothing.
+                assert_eq!(l.limit_stop.is_some(), *only_back, "{says}");
+                if let Some(stop) = l.limit_stop {
+                    assert_eq!(l.flow.calls(stop), ["dx.op.discard"], "{says}");
+                    assert!(stores.iter().all(|s| s.0 != stop), "{says}");
+                }
+            }
+            let l = lower_pixel_of_four_outputs(body, small);
+            let says = |constants: &[u32; 4]| format!("{name}: {constants:?}");
+            // A lane that ends of itself: target 2, now output 1, before
+            // the loop, then target 0, and no discard.
+            let run_of = run(&l, small, *ends, 0);
+            let did = run_of.did();
+            assert!(!did.contains(&Did::Discard), "{}", says(ends));
+            assert_eq!(run_of.output(1), Some([ends[0]; 4]), "{}", says(ends));
+            let last = run_of.output(0).unwrap_or_else(|| panic!("{}", says(ends)));
+            assert_eq!(last[1..], [ends[0]; 3], "{}", says(ends));
+            // A lane the limits stop.
+            let run_of = run(&l, small, *stops, 0);
+            let did = run_of.did();
+            let first = did.iter().position(|d| *d == Did::Discard);
+            let first = first.unwrap_or_else(|| panic!("{}: not discarded", says(stops)));
+            let before: Vec<Did> = (0..4).map(|col| Did::Output(1, col, stops[0])).collect();
+            assert_eq!(did[..first], before, "{}", says(stops));
+            assert_eq!(run_of.output(1), Some([stops[0]; 4]), "{}", says(stops));
+            let after = &did[first + 1..];
+            if *only_back {
+                assert!(after.is_empty(), "{}: {after:?}", says(stops));
+                assert_eq!(run_of.output(0), None, "{}", says(stops));
+            } else {
+                // Its store to the buffer and its export, both dropped.
+                let exported = run_of.output(0);
+                let exported = exported.unwrap_or_else(|| panic!("{}", says(stops)));
+                assert_eq!(exported, [small.each, stops[0], stops[0], stops[0]]);
+                let mut dropped = vec![Did::Store(small.each)];
+                dropped.extend((0..4).map(|col| Did::Output(0, col, exported[col as usize])));
+                assert_eq!(after, dropped, "{}", says(stops));
+            }
+        }
+        // The models of the limits' own tests say the same of the lanes.
+        assert_eq!(latch_is_inner_header(small, [9, 1, 0, 0]), (false, Some(1)));
+        assert_eq!(latch_is_inner_header(small, [9, 3, 0, 0]), (true, None));
+    }
+
+    /// The outputs a vertex shader declares are the container's, and a
+    /// stopped lane's end writes to them by their places there: the
+    /// declaration from the program's exports is a pixel shader's alone
+    /// (`Lower::pixel_outputs`), and a vertex program gets no note.
+    #[test]
+    fn a_stopped_vertex_lane_writes_the_outputs_its_shader_declares() {
+        let limits = Limits { each: 5, total: 13 };
+        for early in [false, true] {
+            let l = lower_vertex(&counts_to_s0(true), early, limits);
+            assert!(l.output_notes.is_empty());
+            let position = ("SV_Position".to_owned(), 0, Some(0));
+            let parameter = ("TEXCOORD".to_owned(), 0, Some(1));
+            assert_eq!(declared(&l), [position, parameter]);
+            let stop = vertex_stop(&l);
+            let at_stop = output_stores(&l).into_iter().filter(|s| s.0 == stop);
+            let ids: Vec<u64> = at_stop.map(|s| s.1).collect();
+            assert_eq!(ids, [0, 0, 0, 0, 1, 1, 1, 1]);
+        }
+    }
+
     /// What vertex element `id` of [`lower_vertex`]'s programs holds in a
     /// lane that ends of itself with `v` in v0 and `s0` in the first root
     /// constant, the parameter (element 1) exported `early` or not.

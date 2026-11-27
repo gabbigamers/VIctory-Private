@@ -298,6 +298,7 @@ fn lower_program(words: &[u32]) -> Result<HostShader, String> {
     Ok(HostShader {
         stage: HwStage::Cs,
         dxil: lowered.dxil,
+        output_notes: lowered.output_notes,
         user_data: lowered.user_data,
         samplers: lowered.samplers,
         static_samplers: Vec::new(),

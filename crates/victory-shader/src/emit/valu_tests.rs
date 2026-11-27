@@ -157,6 +157,7 @@ fn lower_valu_cs(native: &NativeProgram) -> Result<HostShader, crate::ShaderErro
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: lowered.dxil,
+        output_notes: lowered.output_notes,
         user_data: lowered.user_data,
         samplers: lowered.samplers,
         static_samplers: Vec::new(),
@@ -1729,6 +1730,7 @@ fn lower_cs32(words: &[u32], used: &[(u8, ResourceType, u32, u8)], validate: boo
     let shader = HostShader {
         stage: HwStage::Cs,
         dxil: lowered.dxil,
+        output_notes: lowered.output_notes,
         user_data: lowered.user_data,
         samplers: lowered.samplers,
         static_samplers: Vec::new(),

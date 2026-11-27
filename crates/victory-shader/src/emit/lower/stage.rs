@@ -4,17 +4,34 @@
 
 use std::collections::HashMap;
 
-use super::{Lower, Stop, Val, Why, packed_half};
-use crate::emit::UserData;
+use super::{Lower, Stop, Val, Why, packed_half, unsupported};
 use crate::emit::bitcode::{Attr, Bin, Cast, Term, V, pred};
 use crate::emit::container::SigElement;
 use crate::emit::shader::{USER_THREAD_LIMIT, flags};
+use crate::emit::{OutputNote, OutputReason, UserData};
 use crate::gfx10::{Fields, Operand};
 use crate::io::{Barycentric, Export, Input, Interp, Target};
 use crate::ir::{Inst, Reg, Value};
 use crate::native::{RootType, StageIo, Usage};
 use crate::resource::Site;
-use crate::structure::Bool;
+use crate::structure::{Bool, LaneExit};
+
+/// One channel an export stores: the output element, its channel, the
+/// value and, for a 16-bit vertex output, which half of the dword it is.
+type Store = (usize, u8, Value, Option<bool>);
+
+/// A pixel export as [`Lower::pixel_outputs`] follows it.
+struct PixelExport {
+    /// (output element, channel) per channel it stores, in every lane.
+    stores: Vec<(usize, u8)>,
+    /// The output elements it exports a channel past the declared ones
+    /// of: channels the lowering does not store ([`Lower::export`]).
+    past: Vec<usize>,
+    /// Whether it is the program's `done` export.
+    done: bool,
+    /// A `done` export no lane that reaches it survives.
+    kills_all: bool,
+}
 
 impl<'a> Lower<'a> {
     /// Values of the program's input registers.
@@ -534,35 +551,12 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
-    pub(super) fn export(&mut self, b: usize, i: usize) -> Result<(), Why> {
-        let e = *self
-            .exports
-            .get(&(b, i))
-            .ok_or("an export I/O raising did not see")?;
-        if e.compressed {
-            return Err("a compressed export");
-        }
-        let guard = self.guard(b, i)?;
+    /// What the export `e` stores, without lowering anything: per exported
+    /// channel that an output element holds, the element, its channel, the
+    /// value and, for a 16-bit vertex output, which half of the dword it is.
+    /// Per-primitive outputs are elements of `prims`.
+    pub(super) fn export_stores(&self, e: &Export) -> Result<Vec<Store>, Why> {
         let mesh = self.s.mesh.is_some();
-        let c = self.cur;
-        // A pixel export whose lanes outside its guard the `done` export
-        // after it discards: what those lanes write is lost, so it stores in
-        // every lane.
-        if let Some(g) = guard
-            && !mesh
-            && !(self.s.pixel && !e.done && self.discarded_at_done(b, i))
-        {
-            if !(e.done && self.s.pixel) {
-                return Err("a conditional export");
-            }
-            let t = self.s.m.bool(true);
-            let kill = self.s.m.bin(c, Bin::Xor, g, t);
-            self.s
-                .op(c, "discard", Attr::NoUnwind, self.s.t.void, 82, &[kill]);
-        }
-        if mesh && e.target == Target::Primitive {
-            return self.emit_indices(e, guard);
-        }
         let param_row = |usage: Usage, row: u8| match usage {
             // The 2020 compiler leaves a mesh program's first entry zeroed
             // (usage "position"): its row is the one no other entry names.
@@ -672,18 +666,52 @@ impl<'a> Lower<'a> {
                 stores.push((id, col, value, None));
             }
         }
+        if stores
+            .iter()
+            .any(|s: &Store| s.3.is_none() && outputs[s.0].half)
+        {
+            return Err("a 16-bit output the stage data does not mark");
+        }
+        Ok(stores)
+    }
+
+    pub(super) fn export(&mut self, b: usize, i: usize) -> Result<(), Why> {
+        let e = *self
+            .exports
+            .get(&(b, i))
+            .ok_or("an export I/O raising did not see")?;
+        if e.compressed {
+            return Err("a compressed export");
+        }
+        let guard = self.guard(b, i)?;
+        let mesh = self.s.mesh.is_some();
+        let c = self.cur;
+        // A pixel export whose lanes outside its guard the `done` export
+        // after it discards: what those lanes write is lost, so it stores in
+        // every lane.
+        if let Some(g) = guard
+            && !mesh
+            && !(self.s.pixel && !e.done && self.discarded_at_done(b, i))
+        {
+            if !(e.done && self.s.pixel) {
+                return Err("a conditional export");
+            }
+            let t = self.s.m.bool(true);
+            let kill = self.s.m.bin(c, Bin::Xor, g, t);
+            self.s
+                .op(c, "discard", Attr::NoUnwind, self.s.t.void, 82, &[kill]);
+        }
+        if mesh && e.target == Target::Primitive {
+            return self.emit_indices(e, guard);
+        }
+        let primitive = matches!(e.target, Target::PrimitiveParam { .. });
+        let stores = self.export_stores(e)?;
         fn elements<'l>(l: &'l mut Lower, primitive: bool) -> &'l mut Vec<SigElement> {
             if primitive {
                 &mut l.s.prims
             } else {
                 &mut l.s.outputs
             }
-        }
-        if stores
-            .iter()
-            .any(|s| s.3.is_none() && elements(self, primitive)[s.0].half)
-        {
-            return Err("a 16-bit output the stage data does not mark");
         }
         // A mesh lane writes its own vertex or primitive, where it exports.
         let at = if mesh {
@@ -697,6 +725,16 @@ impl<'a> Lower<'a> {
             (true, true) => ("storePrimitiveOutput", 172),
         };
         for (id, col, value, half) in stores {
+            // A pixel export's channel past its output's element is one
+            // DXIL has no store of: left out, and noted
+            // ([`Lower::pixel_outputs`], [`OutputReason::PastElement`]).
+            // (The other stages have no note and keep their stores. There
+            // [`Lower::export_stores`] finds a channel within its element,
+            // but for an SV_Position declared with fewer than four, which
+            // is no valid DXIL either way: "SV_Position must be float4".)
+            if self.s.pixel && col >= self.s.outputs[id].cols {
+                continue;
+            }
             let mut x = self.i32_of(value)?;
             if let Some(high) = half {
                 // An f16 half, declared a 32-bit float on the host.
@@ -745,6 +783,374 @@ impl<'a> Lower<'a> {
         }
         self.end_guarded(at, &[]);
         Ok(())
+    }
+
+    /// Pixel: makes the outputs the shader declares the ones the program
+    /// writes, and notes every output whose exports and declaration do not
+    /// agree ([`OutputNote`]). Runs before anything is lowered: an output's
+    /// place among the declared ones is its id in every store.
+    ///
+    /// The declaration is the container's signature, the writes are the
+    /// exports the code reaches, and nothing else makes the two agree. On
+    /// the host an output that is declared and not written is undefined: a
+    /// render target takes undefined values, and a depth that is not
+    /// written "results in undefined behavior (which may or may not
+    /// include discard of the pixel/sample)" (D3D11.3 functional
+    /// specification, 16.9.1 and 16.9.2). Microsoft's validator refuses a
+    /// shader with a declared output no store writes, unless it is a
+    /// render target; it does not look at paths, nor at the channels of a
+    /// render target.
+    ///
+    /// None of the four cases below refuses the program. A refusal takes
+    /// the shader and every draw that uses it away, how often title
+    /// programs meet these cases is not known, and all four were
+    /// translated before 2026-11-27. Each is noted by output and reason,
+    /// for the caller to log and count.
+    ///
+    /// * [`OutputReason::NeverExported`]: an output no export writes in a
+    ///   block a lane can enter is not declared. (A block no lane enters
+    ///   runs no export, and the module leaves out those it can tell, with
+    ///   their stores; what it leaves out beyond that,
+    ///   [`Lower::stored_outputs`] finds.) The host then keeps the
+    ///   rasteriser's depth and coverage and the pipeline's stencil
+    ///   reference, and does not modify a render target with no declared
+    ///   output (16.9.1). On the console `DB_SHADER_CONTROL` says whether
+    ///   depth, stencil reference and coverage come from the program
+    ///   (Z_EXPORT_ENABLE, bit 0; STENCIL_TEST_VAL_EXPORT_ENABLE, bit 1;
+    ///   MASK_EXPORT_ENABLE, bit 8: the register's fields as the Linux
+    ///   kernel's `gc_10_3_0_sh_mask.h` lists them). With the bit clear the
+    ///   console keeps its own as well. With the bit set it takes, for
+    ///   every lane that is not discarded, a value the program never
+    ///   exports, and what it then does is not established: there is no
+    ///   value of the program's to declare the output for, so it is left
+    ///   out all the same and noted with the others (the note does not say
+    ///   which way the bit is). For a render target the stage data has no
+    ///   such bit; the console chooses each target's export code by the
+    ///   target's format at pipeline creation, the format "none" among
+    ///   them ([`NativeProgram::patched_code`](crate::native::NativeProgram::patched_code)),
+    ///   and what it writes to a target of another format that the program
+    ///   never exports is not established.
+    /// * [`OutputReason::PastElement`]: an export of a channel past the
+    ///   ones its output's element declares (four channels to a render
+    ///   target declared with three or fewer) stores the declared channels
+    ///   and drops the others ([`Lower::export`]). DXIL has no store of
+    ///   such a channel: a store's channel is one of its element's. The
+    ///   host shader's output is that element and has no such channel, so
+    ///   the dropped value had nowhere on the host to go and nothing
+    ///   rendered changes (by the element's definition; not compared on a
+    ///   card). Before, the store was emitted as it stood: one exactly one
+    ///   channel past the element, which Microsoft's validator lets
+    ///   through by its own comparison (`Col > Cols`), or one further
+    ///   past, which it rejects. What the console's target keeps of such a
+    ///   channel is its format's to say.
+    /// * [`OutputReason::NeverWritten`]: a declared channel no export
+    ///   writes (a render target declared with four channels and exported
+    ///   with two), in a lane that is not discarded. The exported channels
+    ///   are stored and that one is not, as before: what the console
+    ///   writes to it is not established, so no value is made up. The
+    ///   validator accepts the shader (only a render target has more than
+    ///   one channel).
+    /// * [`OutputReason::SomePaths`]: an output written on some of the
+    ///   paths a surviving lane takes is stored where the program exports
+    ///   it and nowhere else, as before; a lane that ends on another path
+    ///   leaves it without a value, what the console writes for that lane
+    ///   is not established, and none is made up. The validator accepts
+    ///   the shader (it asks for a store somewhere in the function). A
+    ///   lane that is discarded writes nothing on either machine, so a
+    ///   path on which the shader discards the lane needs no value and
+    ///   gives no note. Those are three: a `done` export no lane reaches
+    ///   in EXEC, an end with no `done` export behind it
+    ///   ([`Lower::exit`]), a lane a loop limit stopped (the module
+    ///   `stopped`). Such a lane is discarded in either of its two forms,
+    ///   and neither adds a path to the ones followed here. At a latch
+    ///   that leaves its loop it is discarded on the loop's exit and runs
+    ///   on as a helper along that edge ([`Lower::leave_stopped`]): an
+    ///   edge of the program, which the lanes that leave of themselves
+    ///   take, so the exports it still reaches are the ones followed for
+    ///   them, and the host drops what it stores there. At a latch that
+    ///   only goes back it is discarded and returns in a block of the
+    ///   lowering's own ([`Lower::abort_block`]), which is none of the
+    ///   program's ends and has no store.
+    ///
+    ///   A discard's exit (no lane of the wave is left: a `done` export to
+    ///   `null`, then the end) is the first of the three where its block
+    ///   takes the lanes out of EXEC before the export. Where it does not, the killed lanes reach that export in
+    ///   EXEC with the discarded lanes taken out
+    ///   ([`structure::killing`](crate::structure::killing)): by the mask
+    ///   they are exported and not discarded, the shader returns for them
+    ///   with no discard and no store, as before, and every output other
+    ///   paths write is noted. (With the discarded lanes kept as helpers
+    ///   no lane takes that exit: the discard is where the lanes are
+    ///   killed, and there is no note.)
+    ///
+    /// One case is refused: an export inside a whole-wave section that is
+    /// the `done` export or writes a channel of a declared output. The
+    /// lowering does not run a section's instructions
+    /// ([`Lower::pixel_stores`]): the output would otherwise pass for one
+    /// no export writes, and the export would be lost without a word. An
+    /// export there that the lowering would do nothing for anywhere (no
+    /// `done`, no channel of a declared output) loses nothing and is
+    /// passed over.
+    ///
+    /// A program whose every declared output is written on every such
+    /// path, in its declared channels and no others, is lowered as before.
+    pub(super) fn pixel_outputs(&mut self, order: &[usize]) -> Result<(), Stop> {
+        if !self.s.pixel {
+            return Ok(());
+        }
+        self.declared = (0..self.s.outputs.len()).collect();
+        let Some(mut blocks) = self.pixel_stores(order)? else {
+            // An export the lowering refuses, with its own reason.
+            return Ok(());
+        };
+        let p = self.x.p;
+        let st = self.x.st;
+        // The blocks no lane enters: what holds in every lane that enters
+        // one holds in none.
+        let none_enters: Vec<bool> = order
+            .iter()
+            .map(|&b| !st.bools.meet(&[(st.reach[b], true)]))
+            .collect();
+        // What there is to note, by the output's place in the container's
+        // signature.
+        let mut notes: Vec<(usize, OutputReason)> = Vec::new();
+        let entered = blocks.iter().zip(&none_enters).filter(|b| !*b.1);
+        for e in entered.flat_map(|b| b.0) {
+            notes.extend(e.past.iter().map(|&id| (id, OutputReason::PastElement)));
+        }
+        // Per output, the channels written by exports a lane can run.
+        let written = |blocks: &[Vec<PixelExport>], n: usize| {
+            let mut all = vec![0u16; n];
+            let entered = blocks.iter().zip(&none_enters).filter(|b| !*b.1);
+            for e in entered.flat_map(|b| b.0) {
+                for &(id, col) in &e.stores {
+                    all[id] |= 1 << col;
+                }
+            }
+            all
+        };
+        let all = written(&blocks, self.s.outputs.len());
+        // An output stays declared if such an export writes it and an
+        // earlier round did not find the module without a store of it
+        // ([`Lower::stored_outputs`]).
+        let keep: Vec<bool> = (0..all.len())
+            .map(|n| all[n] != 0 && !self.unstored.contains(&n))
+            .collect();
+        if keep.contains(&false) {
+            let left_out = (0..keep.len()).filter(|&n| !keep[n]);
+            notes.extend(left_out.map(|n| (n, OutputReason::NeverExported)));
+            self.declared.retain(|&n| keep[n]);
+            let mut keep = keep.iter();
+            self.s
+                .outputs
+                .retain(|_| *keep.next().expect("one per output"));
+            // The ids changed.
+            blocks = self.pixel_stores(order)?.expect("as before");
+        }
+        let all = written(&blocks, self.s.outputs.len());
+        // (A signature's channel mask is a byte: eight channels at most.)
+        let full: Vec<u16> = self.s.outputs.iter().map(|o| (1 << o.cols) - 1).collect();
+
+        // Per block, the channels every lane that leaves it not discarded
+        // has written, on every path there; `None` where no such lane is.
+        let mut index = vec![usize::MAX; p.blocks.len()];
+        for (n, &b) in order.iter().enumerate() {
+            index[b] = n;
+        }
+        let mut out: Vec<Option<Vec<u16>>> = vec![None; order.len()];
+        loop {
+            let mut changed = false;
+            for (n, &b) in order.iter().enumerate() {
+                let mut state = (n == 0).then(|| vec![0u16; full.len()]);
+                for &q in &p.blocks[b].preds {
+                    let Some(from) = index.get(q).and_then(|&m| out.get(m)) else {
+                        continue; // not reachable
+                    };
+                    state = match (state, from) {
+                        (Some(a), Some(b)) => Some(a.iter().zip(b).map(|(a, b)| a & b).collect()),
+                        (a, None) => a,
+                        (None, b) => b.clone(),
+                    };
+                }
+                if none_enters[n] {
+                    state = None;
+                }
+                for e in &blocks[n] {
+                    if let Some(s) = &mut state {
+                        for &(id, col) in &e.stores {
+                            s[id] |= 1 << col;
+                        }
+                    }
+                    if e.kills_all {
+                        state = None;
+                    }
+                }
+                if out[n] != state {
+                    out[n] = state;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // The ends a lane leaves through without a discard, as
+        // [`Lower::exit`] tells them: what such a lane has not written
+        // there, it never writes.
+        let mut exported = vec![false; p.blocks.len()];
+        for (n, &b) in order.iter().enumerate() {
+            exported[b] = self.enters_exported(b, &exported);
+            let survives = exported[b] || self.has_done_export(b);
+            if st.exits[b] != LaneExit::End || !survives {
+                continue;
+            }
+            let Some(state) = &out[n] else {
+                continue;
+            };
+            for id in 0..full.len() {
+                let missing = full[id] & !state[id];
+                if missing & !all[id] != 0 {
+                    notes.push((self.declared[id], OutputReason::NeverWritten));
+                }
+                if missing & all[id] != 0 {
+                    notes.push((self.declared[id], OutputReason::SomePaths));
+                }
+            }
+        }
+        notes.sort_unstable();
+        notes.dedup();
+        let named = notes.into_iter().map(|(place, reason)| {
+            let o = &self.x.outputs[place];
+            // A render target's index is its number; the others have none.
+            let output = match o.kind {
+                16 => format!("{}{}", o.name, o.index),
+                _ => o.name.clone(),
+            };
+            OutputNote { reason, output }
+        });
+        self.notes = named.collect();
+        Ok(())
+    }
+
+    /// Pixel: with a conservative depth output (SV_DepthLessEqual,
+    /// GreaterEqual) DXIL wants the position centroid (or per sample), as
+    /// DXC declares it then. The outputs are the ones the shader declares
+    /// ([`Lower::pixel_outputs`]): a conservative depth the container lists
+    /// and no export writes leaves the position at the pixel's centre,
+    /// where the console has it.
+    pub(super) fn position_mode(&mut self) {
+        if self.s.pixel && self.s.outputs.iter().any(|e| matches!(e.kind, 18 | 19)) {
+            for e in self.s.inputs.iter_mut().filter(|e| e.kind == 3) {
+                e.interp = 5;
+            }
+        }
+    }
+
+    /// Pixel, after everything is lowered: every declared output has a
+    /// store in the function as the module writes it, or the lowering is
+    /// done again without declaring the ones that have none
+    /// ([`Stop::Unstored`]). The module leaves out a block behind a branch
+    /// on a constant, and its constants are not all ones structurisation's
+    /// conditions show ([`Lower::pixel_outputs`] goes by those): "some
+    /// lane of the quad is set" is taken as true ([`Lower::atom`]). An
+    /// output declared with no store is what Microsoft's validator refuses
+    /// (a render target excepted), and every lane then leaves the function
+    /// without a value for it.
+    pub(super) fn stored_outputs(&self) -> Result<(), Stop> {
+        if !self.s.pixel || self.declared.is_empty() {
+            return Ok(());
+        }
+        // `dx.op.storeOutput`: the opcode, then the output's id.
+        let stored = self.s.m.written_call_args("dx.op.storeOutput", 1);
+        let unstored: Vec<usize> = (0..self.declared.len())
+            .filter(|&id| !stored.contains(&(id as i64)))
+            .map(|id| self.declared[id])
+            .collect();
+        if unstored.is_empty() {
+            Ok(())
+        } else {
+            Err(Stop::Unstored(unstored))
+        }
+    }
+
+    /// Per block of `order`, the exports the lowering runs there, in
+    /// order, with the output channels each stores. `None` if the lowering
+    /// refuses one of them.
+    ///
+    /// The inside of a whole-wave section is not lowered instruction by
+    /// instruction ([`Lower::run`]), so an export there is passed over.
+    /// That loses nothing where the lowering would do nothing for the
+    /// export outside a section either: one that is not the `done` export
+    /// and has no channel of a declared output (its target is `null` or
+    /// one the container does not list, or it enables no channel). Such an
+    /// export is passed over here as well, a channel past its output's
+    /// element noted as anywhere else. Any other export in a section
+    /// would be lost without a word, and its output taken for one no
+    /// export writes: refused here.
+    fn pixel_stores(&self, order: &[usize]) -> Result<Option<Vec<Vec<PixelExport>>>, Stop> {
+        let p = self.x.p;
+        let mut blocks = Vec::with_capacity(order.len());
+        for &b in order {
+            let mut exports = Vec::new();
+            let mut i = 0;
+            while i < p.blocks[b].insts.len() {
+                if matches!(p.blocks[b].insts[i].fields, Fields::Exp { .. }) {
+                    let Some(e) = self.pixel_export(b, i) else {
+                        return Ok(None);
+                    };
+                    exports.push(e);
+                }
+                i = match self.sections.get(&b).and_then(|s| s.get(&i)) {
+                    Some(section) => {
+                        for j in i + 1..section.end {
+                            let inside = &p.blocks[b].insts[j];
+                            if !matches!(inside.fields, Fields::Exp { .. }) {
+                                continue;
+                            }
+                            match self.pixel_export(b, j) {
+                                Some(e) if !e.done && e.stores.is_empty() => exports.push(e),
+                                _ => {
+                                    return Err(unsupported(
+                                        inside.machine.offset,
+                                        "a pixel export inside a whole-wave section",
+                                    ));
+                                }
+                            }
+                        }
+                        section.end
+                    }
+                    None => i + 1,
+                };
+            }
+            blocks.push(exports);
+        }
+        Ok(Some(blocks))
+    }
+
+    /// The export at instruction `i` of block `b` as
+    /// [`Lower::pixel_outputs`] follows it; `None` if the lowering refuses
+    /// it ([`Lower::export`]).
+    fn pixel_export(&self, b: usize, i: usize) -> Option<PixelExport> {
+        let st = self.x.st;
+        let &e = self.exports.get(&(b, i))?;
+        if e.compressed {
+            return None;
+        }
+        let stores = self.export_stores(e).ok()?;
+        // The lanes its guard leaves out are discarded
+        // ([`Lower::export`]); with none left in, every lane is.
+        let guard = st.guards[b][i].unwrap_or(Bool::TRUE);
+        let declares = |s: &&Store| s.1 < self.s.outputs[s.0].cols;
+        Some(PixelExport {
+            stores: stores.iter().filter(declares).map(|s| (s.0, s.1)).collect(),
+            past: stores
+                .iter()
+                .filter(|s| !declares(s))
+                .map(|s| s.0)
+                .collect(),
+            done: e.done,
+            kills_all: e.done && !st.bools.meet(&[(st.reach[b], true), (guard, true)]),
+        })
     }
 
     /// Mesh: `exp prim` as the lane's primitive. Each corner takes ten

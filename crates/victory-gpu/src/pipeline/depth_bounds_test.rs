@@ -59,6 +59,7 @@ fn host_shader(stage: &'static str, hw_stage: victory_shader::HwStage, bytes: &[
         host: victory_shader::emit::HostShader {
             stage: hw_stage,
             dxil: bytes.to_vec(),
+            output_notes: Vec::new(),
             user_data: Vec::new(),
             samplers: Vec::new(),
             static_samplers: Vec::new(),

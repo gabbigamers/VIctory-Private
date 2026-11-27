@@ -681,6 +681,23 @@ impl Module {
             .count()
     }
 
+    /// Argument `arg` of every call [`Module::write`] writes of a function
+    /// whose name starts with `name`, where that argument is an integer
+    /// constant.
+    pub fn written_call_args(&self, name: &str, arg: usize) -> Vec<i64> {
+        let plan = self.plan();
+        let calls = plan.layout.iter().flat_map(|&b| &self.blocks[b].body);
+        calls
+            .filter(|&&i| plan.live[i as usize])
+            .filter_map(|&i| match &self.insts[i as usize].op {
+                Op::Call(f, args) if self.funcs[*f as usize].name.starts_with(name) => {
+                    args.get(arg).and_then(|&a| self.int_value(a))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The globals and functions [`Module::write`] declares, each kept
     /// one's new index and their number: functions declared and not called,
     /// and constant globals nothing reads, are left out (the validator

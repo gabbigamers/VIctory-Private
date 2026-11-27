@@ -520,7 +520,18 @@ extern "system" fn present(
         #[cfg(windows)]
         if frame >= 256 {
             let (hits, misses) = crate::shader_cache::counts();
-            tracing::info!(hits, misses, "shaders from the cache and translated so far");
+            // In the order of `victory_shader::emit::OutputReason::ALL`.
+            let [never_exported, past_element, never_written, some_paths] =
+                crate::shader_cache::output_notes();
+            tracing::info!(
+                hits,
+                misses,
+                never_exported,
+                past_element,
+                never_written,
+                some_paths,
+                "shaders from the cache and translated so far, and those with a pixel output never exported, exported past its element, with channels never written, exported on some paths only"
+            );
         }
     }
     #[cfg(all(windows, feature = "diagnostics"))]

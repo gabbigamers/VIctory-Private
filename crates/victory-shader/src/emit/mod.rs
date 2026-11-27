@@ -210,7 +210,16 @@
 //! announced.
 //! * **Signatures** as the console container has them (same semantics,
 //!   registers and masks), so the input layout and stage linking are the
-//!   title's; pixel outputs are plain 32-bit values.
+//!   title's; pixel outputs are plain 32-bit values. A pixel shader
+//!   declares the outputs its program exports (changed 2026-11-27): one
+//!   the container lists and no export writes is left out, so the host
+//!   keeps its own depth, coverage and stencil reference and does not
+//!   modify that render target. A program that exports an output on some
+//!   paths or in some channels only translates with the stores it has,
+//!   and one that exports a channel its output does not declare with the
+//!   declared channels alone. The shader names each such output with the
+//!   reason ([`HostShader::output_notes`]) for the caller to log and
+//!   count.
 //! * **Mesh shaders** ([`HwStage::Ms`], `ms_6_6`): user data and
 //!   descriptors as above (the root constants visible to the mesh stage);
 //!   the pipeline is a mesh pipeline (pipeline-state stream, no input
@@ -444,6 +453,12 @@ pub struct HostShader {
     pub stage: HwStage,
     /// The DXIL container, hashed as D3D12 expects.
     pub dxil: Vec<u8>,
+    /// Pixel: the outputs whose declaration in the console container and
+    /// whose exports in the program do not agree, each with how (module
+    /// notes, "Signatures"), in the container's order. The program
+    /// translates all the same. Whether a title program has any is not
+    /// known: the caller logs them by shader and counts them by reason.
+    pub output_notes: Vec<OutputNote>,
     /// The user-data dwords the shader reads.
     pub user_data: Vec<UserData>,
     /// Immediate samplers: the four sampler words of `s<n>`.
@@ -499,6 +514,72 @@ impl HostShader {
             .max()
             .unwrap_or(0);
         n.next_multiple_of(4)
+    }
+}
+
+/// A pixel output the container declares in one way and the program
+/// exports in another ([`HostShader::output_notes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputNote {
+    pub reason: OutputReason,
+    /// The output's semantic name, a render target's with its number
+    /// (`SV_Target1`, `SV_Depth`).
+    pub output: String,
+}
+
+impl std::fmt::Display for OutputNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.output, self.reason.text())
+    }
+}
+
+/// How a pixel output's exports differ from its declaration. None of them
+/// stops the translation; what the shader does in each case is the
+/// lowering's to say (`Lower::pixel_outputs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum OutputReason {
+    /// No export a lane can run writes a channel the output declares: the
+    /// shader does not declare it. The host leaves that render target
+    /// unmodified and keeps its own depth, stencil reference or coverage,
+    /// also where the console's stage data says it takes them from the
+    /// program.
+    NeverExported,
+    /// An export writes a channel past the ones the output's element
+    /// declares (four channels to a target declared with three): the
+    /// shader stores the declared channels alone.
+    PastElement,
+    /// A declared channel that no export writes, in a lane that is not
+    /// discarded: the shader stores the exported ones and leaves that
+    /// channel without a value.
+    NeverWritten,
+    /// A lane that is not discarded can end without an export of the
+    /// output that other paths have: the shader stores it where the
+    /// program exports it and nowhere else.
+    SomePaths,
+}
+
+impl OutputReason {
+    /// Every reason, in the order of [`OutputReason::code`].
+    pub const ALL: [OutputReason; 4] = [
+        OutputReason::NeverExported,
+        OutputReason::PastElement,
+        OutputReason::NeverWritten,
+        OutputReason::SomePaths,
+    ];
+
+    /// The reason as logs and tallies name it.
+    pub fn text(self) -> &'static str {
+        match self {
+            OutputReason::NeverExported => "never exported",
+            OutputReason::PastElement => "channels exported past the element",
+            OutputReason::NeverWritten => "channels never written",
+            OutputReason::SomePaths => "exported on some paths only",
+        }
+    }
+
+    /// Its place in [`OutputReason::ALL`]: what a stored translation keeps.
+    pub fn code(self) -> usize {
+        self as usize
     }
 }
 
@@ -652,18 +733,7 @@ pub fn emit_with(
     options: Options,
 ) -> Result<HostShader, ShaderError> {
     let sigs = Signatures::of(c, native)?;
-    let parts = |st, res| sigs.parts(native, p, st, io, res, options);
-    let per_lane = match lower::lower_with(&parts(st, res), options.thread_limits) {
-        // Discarded lanes kept on as helpers can read what no surviving
-        // lane does (a register only killed lanes skipped writing); such a
-        // program kills them as the console does (`structure::killing`).
-        Err(_) if !st.discards.is_empty() => {
-            let st = structure::killing(p)?;
-            let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
-            lower::lower_with(&parts(&st, &res), options.thread_limits)
-        }
-        l => l,
-    };
+    let per_lane = sigs.per_lane(native, p, st, io, res, options);
     let mut l = match per_lane {
         Ok(l) => l,
         // No per-lane form: the wave form alone, where the caller wants
@@ -770,13 +840,8 @@ impl Signatures {
                 _ => 0,
             };
         }
-        // With a conservative depth output (SV_DepthLessEqual, GreaterEqual) DXIL
-        // wants the position centroid (or per sample), as DXC declares it then.
-        if pixel && outputs.iter().any(|e| matches!(e.kind, 18 | 19)) {
-            for e in inputs.iter_mut().filter(|e| e.kind == 3) {
-                e.interp = 5;
-            }
-        }
+        // (With a conservative depth output the position is centroid: the
+        // lowering sets that, by the outputs the shader ends up declaring.)
         // Per-primitive outputs are constant. The console never exports a
         // primitive id or cull flag a mesh shader writes (it culls with the
         // primitive export), so those rows are left out.
@@ -834,6 +899,31 @@ impl Signatures {
         }
     }
 
+    /// The program lowered in its per-lane form: what [`emit_with`] makes
+    /// its host shader of, where no wave form takes its place.
+    fn per_lane(
+        &self,
+        native: &NativeProgram,
+        p: &ir::Program,
+        st: &structure::Structured,
+        io: &io::Io,
+        res: &resource::Resources,
+        options: Options,
+    ) -> Result<lower::Lowered, ShaderError> {
+        let parts = |st, res| self.parts(native, p, st, io, res, options);
+        match lower::lower_with(&parts(st, res), options.thread_limits) {
+            // Discarded lanes kept on as helpers can read what no surviving
+            // lane does (a register only killed lanes skipped writing); such a
+            // program kills them as the console does (`structure::killing`).
+            Err(_) if !st.discards.is_empty() => {
+                let st = structure::killing(p)?;
+                let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
+                lower::lower_with(&parts(&st, &res), options.thread_limits)
+            }
+            l => l,
+        }
+    }
+
     /// The program lowered in its wave form (`structure::waves`), with
     /// its resources traced on that form.
     fn emulated(
@@ -855,11 +945,27 @@ impl Signatures {
     }
 }
 
+/// The per-lane lowering [`emit_with`] makes its host shader of, for the
+/// tests that read its function.
+#[cfg(test)]
+fn lowered(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: &structure::Structured,
+    io: &io::Io,
+    res: &resource::Resources,
+    options: Options,
+) -> Result<lower::Lowered, ShaderError> {
+    Signatures::of(c, native)?.per_lane(native, p, st, io, res, options)
+}
+
 /// A lowered program as its caller binds it.
 fn host_shader(native: &NativeProgram, l: lower::Lowered, wave: WaveUse) -> HostShader {
     HostShader {
         stage: native.stage,
         dxil: l.dxil,
+        output_notes: l.output_notes,
         user_data: l.user_data,
         static_samplers: l
             .samplers
@@ -1004,6 +1110,7 @@ mod tests {
     fn the_loop_limits_are_the_documented_ones() {
         assert_eq!((LOOP_LIMIT, LOOP_TOTAL_LIMIT), (1 << 20, 1 << 22));
     }
+    use super::bitcode::{Arg, FlowOp};
     use super::container::SigElement;
     use super::shader::Shader;
     use super::*;
@@ -1245,6 +1352,1087 @@ mod tests {
         assert_ne!(features & 0x200, 0, "SFI0 {features:#x}: no StencilRef");
     }
 
+    /// One-channel pixel outputs as a console container declares them.
+    fn pixel_output(name: &str, kind: u8, row: Option<u32>) -> SigElement {
+        SigElement {
+            name: name.into(),
+            index: row.unwrap_or(0),
+            kind,
+            comp: if matches!(kind, 14 | 20) { 5 } else { 9 },
+            interp: 0,
+            row,
+            col: 0,
+            cols: 1,
+            usage: 0,
+            half: false,
+        }
+    }
+
+    /// The outputs a host shader declares, by name and register.
+    type Declared = Vec<(String, Option<u32>)>;
+
+    /// What `make` (as [`emit`] or [`lowered`]) gives for the pixel
+    /// program `words` in a container declaring `inputs` and `outputs`,
+    /// structurised with the discarded lanes kept as helpers or
+    /// (`killing`) taken out.
+    fn pixel_program<T>(
+        words: &[u32],
+        db_shader_control: u32,
+        inputs: &[SigElement],
+        outputs: &[SigElement],
+        killing: bool,
+        make: impl FnOnce(
+            &Container,
+            &NativeProgram,
+            &ir::Program,
+            &structure::Structured,
+            &io::Io,
+            &resource::Resources,
+        ) -> T,
+    ) -> T {
+        let native = NativeProgram {
+            stage: HwStage::Ps,
+            wave64: false,
+            vgprs: 8,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Ps {
+                inputs: vec![],
+                input_addr: 0,
+                db_shader_control,
+                patches: vec![],
+            },
+            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let isg1 = container::signature(inputs, true);
+        let osg1 = container::signature(outputs, false);
+        let mut parts = vec![(FourCC::OSG1, osg1.as_slice())];
+        if !inputs.is_empty() {
+            parts.insert(0, (FourCC::ISG1, isg1.as_slice()));
+        }
+        let bytes = crate::dxbc::build(&parts);
+        let c = Container::parse(&bytes).unwrap();
+        let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+        let st = if killing {
+            structure::killing(&p).unwrap()
+        } else {
+            structure::structure(&p).unwrap()
+        };
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+        let io = io::raise(&p, &native).unwrap();
+        make(&c, &native, &p, &st, &io, &res)
+    }
+
+    /// Emits the pixel program `words` ([`pixel_program`]).
+    fn emit_pixel_program(
+        words: &[u32],
+        db_shader_control: u32,
+        inputs: &[SigElement],
+        outputs: &[SigElement],
+        killing: bool,
+    ) -> Result<HostShader, ShaderError> {
+        let out = pixel_program(words, db_shader_control, inputs, outputs, killing, emit)?;
+        // dxil.dll, where there is one, checks the module.
+        #[cfg(windows)]
+        if let Ok(mut v) = super::validator::Validator::load(
+            super::validator::Validator::default_path().as_deref(),
+        ) {
+            v.validate(&mut out.dxil.clone()).unwrap();
+        }
+        Ok(out)
+    }
+
+    /// A pixel program that translates, as the tests of the output notes
+    /// read it.
+    struct Stored {
+        /// The notes, as [`notes`] gives them.
+        notes: Vec<String>,
+        /// Per output store the module writes, the output's id and the
+        /// channel, in the order of the function's blocks.
+        stores: Vec<(u64, u64)>,
+        /// What one lane stores when the function is run
+        /// ([`bitcode::Flow::run`]; the programs' registers start at 0):
+        /// the output's id, the channel, the value's bits.
+        lane: Vec<(u64, u64, u64)>,
+        /// Whether that lane is discarded.
+        discarded: bool,
+        /// The outputs the host shader declares, with each one's channels.
+        declared: Vec<(String, Option<u32>, u8)>,
+        dxil: Vec<u8>,
+    }
+
+    /// The pixel program `words` with no inputs, emitted
+    /// ([`emit_pixel_program`]: the validator sees it where there is one),
+    /// with the function of its lowering.
+    fn stored_pixel_outputs(
+        words: &[u32],
+        db_shader_control: u32,
+        outputs: &[SigElement],
+        killing: bool,
+    ) -> Stored {
+        let shader = emit_pixel_program(words, db_shader_control, &[], outputs, killing).unwrap();
+        let l = pixel_program(
+            words,
+            db_shader_control,
+            &[],
+            outputs,
+            killing,
+            |c, native, p, st, io, res| lowered(c, native, p, st, io, res, Options::default()),
+        )
+        .unwrap();
+        assert_eq!(l.dxil, shader.dxil);
+        assert_eq!(l.output_notes, shader.output_notes);
+        l.flow.check().unwrap();
+        let calls = l.flow.blocks.iter().flat_map(|b| &b.insts);
+        let stores = calls
+            .filter_map(|i| match &i.op {
+                FlowOp::Call(name, args) if name.starts_with("dx.op.storeOutput") => {
+                    // The opcode, the output's id, its row, the channel, the value.
+                    let [_, Arg::Int(id), Arg::Int(0), Arg::Int(col), _] = args[..] else {
+                        panic!("{name} {args:?}");
+                    };
+                    Some((id, col))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut lane = Vec::new();
+        let mut discarded = false;
+        let mut call = |name: &str, args: &[u64]| {
+            match name {
+                "dx.op.storeOutput.f32" | "dx.op.storeOutput.i32" => {
+                    lane.push((args[1], args[3], args[4]));
+                }
+                "dx.op.discard" => discarded |= args[1] != 0,
+                name => panic!("{name}"),
+            }
+            Vec::new()
+        };
+        l.flow.run(1000, &mut call).unwrap();
+        let host = Container::parse(&shader.dxil).unwrap();
+        let declared = signature(host.part(FourCC::OSG1).unwrap().data).unwrap();
+        Stored {
+            notes: notes(&shader.output_notes),
+            stores,
+            lane,
+            discarded,
+            declared: declared
+                .into_iter()
+                .map(|e| (e.name, e.row, e.cols))
+                .collect(),
+            dxil: shader.dxil,
+        }
+    }
+
+    /// [`emit_pixel_program`] of a program with no inputs: the outputs the host
+    /// shader declares, with its feature flags.
+    fn declared_pixel_outputs(
+        words: &[u32],
+        db_shader_control: u32,
+        outputs: &[SigElement],
+        killing: bool,
+    ) -> Result<(Declared, u64), ShaderError> {
+        let out = emit_pixel_program(words, db_shader_control, &[], outputs, killing)?;
+        let host = Container::parse(&out.dxil).unwrap();
+        let declared = signature(host.part(FourCC::OSG1).unwrap().data)?
+            .into_iter()
+            .map(|e| (e.name, e.row))
+            .collect();
+        let sfi0 = host.part(FourCC::SFI0).unwrap().data;
+        Ok((declared, u64::from_le_bytes(sfi0.try_into().unwrap())))
+    }
+
+    /// A stored translation keeps a note's reason as its place in
+    /// [`OutputReason::ALL`] (the shader cache of the gpu crate), and logs
+    /// and tallies tell the reasons apart by their text.
+    #[test]
+    fn output_reasons_have_their_places_and_their_own_texts() {
+        for (place, reason) in OutputReason::ALL.into_iter().enumerate() {
+            assert_eq!(reason.code(), place);
+            let same = OutputReason::ALL.iter().filter(|r| r.text() == reason.text());
+            assert_eq!(same.count(), 1, "{}", reason.text());
+        }
+        let note = OutputNote {
+            reason: OutputReason::SomePaths,
+            output: "SV_Depth".into(),
+        };
+        assert_eq!(note.to_string(), "SV_Depth: exported on some paths only");
+    }
+
+    /// Output notes as logs give them: the output, then the reason.
+    fn notes(notes: &[OutputNote]) -> Vec<String> {
+        notes.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn refusal(e: ShaderError) -> &'static str {
+        match e {
+            ShaderError::Unsupported { what, .. } => what,
+            e => panic!("{e}"),
+        }
+    }
+
+    /// The container's signature declares outputs whether or not the code
+    /// exports them. One no export writes is undefined on the host if the
+    /// shader declares it (and Microsoft's validator refuses a depth or a
+    /// stencil reference that is declared and never written), so it is
+    /// not declared: the host keeps its own depth and stencil reference
+    /// and leaves the render target alone, as the console does where
+    /// `DB_SHADER_CONTROL` does not take them from the program. (Where it
+    /// does: [`an_output_the_stage_data_enables_and_no_export_writes_is_not_declared`].)
+    /// Each is noted.
+    #[test]
+    fn a_pixel_output_no_export_writes_is_not_declared() {
+        let depth = || pixel_output("SV_Depth", 17, None);
+        let stencil = || pixel_output("SV_StencilRef", 20, None);
+        let target = |n| pixel_output("SV_Target", 16, Some(n));
+        let named = |names: &[(&str, Option<u32>)]| -> Declared {
+            names.iter().map(|&(n, r)| (n.to_owned(), r)).collect()
+        };
+        // The program ends before its export (the opcode census puts
+        // `s_endpgm` there): no lane exports, every lane is discarded.
+        let ends_early = [
+            0x7E02_0285u32, // v_mov_b32 v1, 5
+            0xBF81_0000,    // s_endpgm
+            0xF800_1883,
+            0x0000_0100, // exp mrtz v0, v1, off, off done vm
+            0xBF81_0000,
+        ];
+        let (declared, features) =
+            declared_pixel_outputs(&ends_early, 0, &[depth(), stencil()], false).unwrap();
+        assert_eq!(declared, []);
+        assert_eq!(features & 0x200, 0, "SFI0 {features:#x}: StencilRef");
+
+        // Only render target 0 is exported: the others, depth and stencil
+        // reference go, wherever they stand in the signature.
+        let color_only = [
+            0xF800_180Fu32,
+            0x0000_0000, // exp mrt0 v0, v0, v0, v0 done vm
+            0xBF81_0000,
+        ];
+        let rgba = |n| SigElement {
+            cols: 4,
+            ..target(n)
+        };
+        let (declared, features) = declared_pixel_outputs(
+            &color_only,
+            0,
+            &[depth(), rgba(1), rgba(0), stencil()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(declared, named(&[("SV_Target", Some(0))]));
+        assert_eq!(features & 0x200, 0, "SFI0 {features:#x}: StencilRef");
+        // The shader names the ones it leaves out, in the signature's
+        // order, for the caller to log.
+        let outputs = [depth(), rgba(1), rgba(0), stencil()];
+        let shader = emit_pixel_program(&color_only, 0, &[], &outputs, false).unwrap();
+        assert_eq!(
+            notes(&shader.output_notes),
+            [
+                "SV_Target1: never exported",
+                "SV_Depth: never exported",
+                "SV_StencilRef: never exported"
+            ]
+        );
+        // And it is, byte for byte, the shader of a container that never
+        // listed them.
+        let plain = emit_pixel_program(&color_only, 0, &[], &[rgba(0)], false).unwrap();
+        assert_eq!(plain.output_notes, []);
+        assert_eq!(shader.dxil, plain.dxil);
+
+        // Depth exported, stencil reference not.
+        let depth_only = [
+            0xF800_1881u32,
+            0x0000_0000, // exp mrtz v0, off, off, off done vm
+            0xBF81_0000,
+        ];
+        let (declared, _) =
+            declared_pixel_outputs(&depth_only, 1, &[depth(), stencil()], false).unwrap();
+        assert_eq!(declared, named(&[("SV_Depth", None)]));
+
+        // A coverage output likewise.
+        let coverage = pixel_output("SV_Coverage", 14, None);
+        let (declared, _) =
+            declared_pixel_outputs(&color_only, 0, &[rgba(0), coverage], false).unwrap();
+        assert_eq!(declared, named(&[("SV_Target", Some(0))]));
+
+        // Where no lane survives the console takes no value from the
+        // program whatever the stage data says.
+        let (declared, _) =
+            declared_pixel_outputs(&ends_early, 0x103, &[depth(), stencil()], false).unwrap();
+        assert_eq!(declared, []);
+    }
+
+    /// `DB_SHADER_CONTROL` can say the console takes depth, stencil
+    /// reference or coverage from the program (Z_EXPORT_ENABLE,
+    /// STENCIL_TEST_VAL_EXPORT_ENABLE, MASK_EXPORT_ENABLE) while the
+    /// program exports none and a lane survives. What the console then
+    /// does is not established and there is no value to store, so the
+    /// output is not declared and the host keeps its own. The program
+    /// translates (a refusal would lose every draw of the shader), to the
+    /// bytes of a container that never listed the output, and the output
+    /// is noted with the others no export writes.
+    #[test]
+    fn an_output_the_stage_data_enables_and_no_export_writes_is_not_declared() {
+        let stencil = || pixel_output("SV_StencilRef", 20, None);
+        let coverage = || pixel_output("SV_Coverage", 14, None);
+        let color_only = [MRT0_DONE[0], MRT0_DONE[1], S_ENDPGM];
+        let enabled = [
+            (1, depth_output()),
+            (2, stencil()),
+            (0x100, coverage()),
+            (0x103, depth_output()),
+        ];
+        for (bits, output) in enabled {
+            for killing in [false, true] {
+                let outputs = [rgba_target(0), output.clone()];
+                let t = stored_pixel_outputs(&color_only, bits, &outputs, killing);
+                assert_eq!(t.notes, [format!("{}: never exported", output.name)]);
+                assert_eq!(t.declared, [("SV_Target".to_owned(), Some(0), 4)]);
+                // The lane stores its colour and survives.
+                assert_eq!(t.stores, [(0, 0), (0, 1), (0, 2), (0, 3)]);
+                assert_eq!(t.lane, [(0, 0, 0), (0, 1, 0), (0, 2, 0), (0, 3, 0)]);
+                assert!(!t.discarded);
+                // The same bytes with the bit clear, and with the output
+                // never listed.
+                let clear = stored_pixel_outputs(&color_only, 0, &outputs, killing);
+                assert_eq!(clear.notes, t.notes);
+                assert_eq!(clear.dxil, t.dxil);
+                let plain = stored_pixel_outputs(&color_only, bits, &outputs[..1], killing);
+                assert_eq!(plain.notes, [""; 0]);
+                assert_eq!(plain.dxil, t.dxil);
+            }
+        }
+        // An output with nothing but the enabled ones: the shader declares
+        // none (the colour export has no target in this container).
+        for (bits, output) in [(1, depth_output()), (2, stencil())] {
+            let alone = std::slice::from_ref(&output);
+            let t = stored_pixel_outputs(&color_only, bits, alone, false);
+            assert_eq!(t.notes, [format!("{}: never exported", output.name)]);
+            assert_eq!((t.declared.len(), t.stores.len()), (0, 0));
+        }
+
+        // Depth and stencil reference both enabled, the depth alone
+        // exported (4.0): it is stored, the stencil reference is noted.
+        let depth_only = [
+            0x7E02_02F6u32, // v_mov_b32 v1, 4.0
+            0xF800_1881,
+            0x0000_0001, // exp mrtz v1, off, off, off done vm
+            S_ENDPGM,
+        ];
+        for killing in [false, true] {
+            let outputs = [depth_output(), stencil()];
+            let t = stored_pixel_outputs(&depth_only, 3, &outputs, killing);
+            assert_eq!(t.notes, ["SV_StencilRef: never exported"]);
+            assert_eq!(t.declared, [("SV_Depth".to_owned(), None, 1)]);
+            assert_eq!(t.stores, [(0, 0)]);
+            assert_eq!(t.lane, [(0, 0, u64::from(4f32.to_bits()))]);
+        }
+        // With the coverage exported as well (`mrtz`'s third channel), all
+        // that is enabled is written: no note.
+        let both = [
+            0xF800_1885u32,
+            0x0000_0000, // exp mrtz v0, off, v0, off done vm
+            S_ENDPGM,
+        ];
+        let t = stored_pixel_outputs(&both, 0x101, &[depth_output(), coverage()], false);
+        assert_eq!(t.notes, [""; 0]);
+        assert_eq!(t.stores, [(0, 0), (1, 0)]);
+    }
+
+    /// An output exported on some of the paths a surviving lane takes has
+    /// no value on the others. (Microsoft's validator only asks for a
+    /// store somewhere in the function.) What the console writes for a
+    /// lane on such a path is not established, so the shader stores the
+    /// output where the program exports it and makes up no value for the
+    /// other lanes; the output is noted. With the export on every path
+    /// there is no note.
+    #[test]
+    fn a_pixel_output_exported_on_some_paths_only_is_stored_where_it_is_exported() {
+        let outputs = [rgba_target(0), depth_output()];
+        const NOTE: &str = "SV_Depth: exported on some paths only";
+        let v1 = u64::from(4f32.to_bits());
+        // if (v0 == k) { depth = 4.0 }; color. The registers start at 0:
+        // with k = 0 the lane the function is run as exports its depth,
+        // with k = 1 it takes the other path.
+        let some = |k: u32| {
+            let mut words = vec![
+                0x7E02_02F6u32,  // v_mov_b32 v1, 4.0
+                0x7D84_0080 | k, // v_cmp_eq_u32 vcc, k, v0
+                0xBE80_3C6A,     // s_and_saveexec_b32 s0, vcc_lo
+                0xBF88_0002,     // s_cbranch_execz -> join
+            ];
+            words.extend(MRTZ_V1);
+            words.push(0x887E_007E); // join: s_or_b32 exec_lo, exec_lo, s0
+            words.extend(MRT0_DONE);
+            words.push(S_ENDPGM);
+            words
+        };
+        let color = [(0, 0, 0), (0, 1, 0), (0, 2, 0), (0, 3, 0)];
+        for killing in [false, true] {
+            for k in [0, 1] {
+                let t = stored_pixel_outputs(&some(k), 1, &outputs, killing);
+                assert_eq!(t.notes, [NOTE], "killing {killing}, k {k}");
+                assert_eq!(t.declared.len(), 2, "{:?}", t.declared);
+                // One store of the depth in the function, before the
+                // colour's four.
+                assert_eq!(t.stores, [(1, 0), (0, 0), (0, 1), (0, 2), (0, 3)]);
+                // The lane that takes the export's path stores its depth;
+                // the other stores its colour and no depth: none is made
+                // up for it.
+                let mut lane = color.to_vec();
+                if k == 0 {
+                    lane.insert(0, (1, 0, v1));
+                }
+                assert_eq!(t.lane, lane, "killing {killing}, k {k}");
+                assert!(!t.discarded);
+            }
+        }
+
+        // if (v0 == k) { depth; color; end } else { depth; color; end }
+        // (the depth is v0 here).
+        let every = |k: u32| {
+            let mut words = vec![
+                0x7D84_0080u32 | k, // v_cmp_eq_u32 vcc, k, v0
+                0xBE80_3C6A,        // s_and_saveexec_b32 s0, vcc_lo
+                0xBF88_0005,        // s_cbranch_execz -> else
+            ];
+            words.extend(MRTZ);
+            words.extend(MRT0_DONE);
+            words.push(S_ENDPGM);
+            words.push(0x887E_007E); // else: s_or_b32 exec_lo, exec_lo, s0
+            words.extend(MRTZ);
+            words.extend(MRT0_DONE);
+            words.push(S_ENDPGM);
+            words
+        };
+        for k in [0, 1] {
+            let t = stored_pixel_outputs(&every(k), 1, &outputs, false);
+            assert_eq!(t.notes, [""; 0]);
+            assert_eq!(t.declared.len(), 2, "{:?}", t.declared);
+            assert_eq!(t.lane[0], (1, 0, 0));
+            assert_eq!(t.lane[1..], color);
+        }
+    }
+
+    /// A render target declared with four channels and exported with
+    /// fewer: the channels the export has are stored and the others are
+    /// not. What the console writes to them is not established, so no
+    /// value is made up; Microsoft's validator accepts the shader (it does
+    /// not ask for a render target's stores), and the output is noted.
+    #[test]
+    fn a_pixel_output_with_a_channel_no_export_writes_stores_the_exported_ones() {
+        let v1 = u64::from(4f32.to_bits());
+        // Channels 0 and 1, then 0 to 2, then 1 and 3.
+        for (mask, channels) in [(0x3u32, &[0u64, 1][..]), (0x7, &[0, 1, 2]), (0xA, &[1, 3])] {
+            let words = [
+                0x7E02_02F6u32,     // v_mov_b32 v1, 4.0
+                0xF800_1800 | mask, // exp mrt0 (v1 in the channels of `mask`) done vm
+                0x0101_0101,
+                S_ENDPGM,
+            ];
+            for killing in [false, true] {
+                let t = stored_pixel_outputs(&words, 0, &[rgba_target(0)], killing);
+                assert_eq!(t.notes, ["SV_Target0: channels never written"]);
+                assert_eq!(t.declared, [("SV_Target".to_owned(), Some(0), 4)]);
+                let stores: Vec<(u64, u64)> = channels.iter().map(|&c| (0, c)).collect();
+                assert_eq!(t.stores, stores, "mask {mask:#x}");
+                let lane: Vec<(u64, u64, u64)> = channels.iter().map(|&c| (0, c, v1)).collect();
+                assert_eq!(t.lane, lane, "mask {mask:#x}");
+                assert!(!t.discarded);
+            }
+        }
+        // The same export to a target declared with the two channels it
+        // has: nothing to note.
+        let two = [
+            0xF800_1803u32,
+            0x0000_0000, // exp mrt0 v0, v0, off, off done vm
+            S_ENDPGM,
+        ];
+        let narrow = SigElement {
+            cols: 2,
+            ..pixel_output("SV_Target", 16, Some(0))
+        };
+        let t = stored_pixel_outputs(&two, 0, &[narrow], false);
+        assert_eq!(t.notes, [""; 0]);
+        assert_eq!(t.stores, [(0, 0), (0, 1)]);
+
+        // Two channels on one path and four on the other, the lanes of
+        // both surviving: every channel has an export, and two of them on
+        // one path only.
+        let paths = |k: u32| {
+            let mut words = vec![
+                0x7D84_0080u32 | k, // v_cmp_eq_u32 vcc, k, v0
+                0xBE80_3C6A,        // s_and_saveexec_b32 s0, vcc_lo
+                0xBF88_0003,        // s_cbranch_execz -> else
+            ];
+            words.extend(two);
+            words.push(0x887E_007E); // else: s_or_b32 exec_lo, exec_lo, s0
+            words.extend(MRT0_DONE);
+            words.push(S_ENDPGM);
+            words
+        };
+        for (k, stored) in [(0, 2), (1, 4)] {
+            let t = stored_pixel_outputs(&paths(k), 0, &[rgba_target(0)], false);
+            assert_eq!(t.notes, ["SV_Target0: exported on some paths only"]);
+            assert_eq!(t.stores.len(), 6, "{:?}", t.stores);
+            assert_eq!(t.lane.len(), stored, "k {k}: {:?}", t.lane);
+        }
+    }
+
+    /// Four channels exported to a render target declared with three or
+    /// fewer. DXIL has no store of a channel past its element's, and the
+    /// host shader's output is that element: the declared channels are
+    /// stored, the others dropped, and the output is noted. (Before
+    /// 2026-11-27 the store was emitted as it stood. Microsoft's validator
+    /// rejected that shader for a target of two channels and took it for
+    /// one of three, where the store is exactly one past: its test is
+    /// `Col > Cols`.)
+    #[test]
+    fn a_pixel_export_past_its_outputs_element_stores_the_declared_channels() {
+        let narrow = |cols| {
+            [SigElement {
+                cols,
+                ..pixel_output("SV_Target", 16, Some(0))
+            }]
+        };
+        let v1 = u64::from(4f32.to_bits());
+        let four = [
+            0x7E02_02F6u32, // v_mov_b32 v1, 4.0
+            0xF800_180F,
+            0x0101_0101, // exp mrt0 v1, v1, v1, v1 done vm
+            S_ENDPGM,
+        ];
+        const NOTE: &str = "SV_Target0: channels exported past the element";
+        for cols in 1..=4u8 {
+            for killing in [false, true] {
+                let t = stored_pixel_outputs(&four, 0, &narrow(cols), killing);
+                assert_eq!(
+                    t.notes,
+                    [NOTE; 1][usize::from(cols == 4)..],
+                    "{cols} channels"
+                );
+                assert_eq!(t.declared, [("SV_Target".to_owned(), Some(0), cols)]);
+                let stores: Vec<(u64, u64)> = (0..u64::from(cols)).map(|c| (0, c)).collect();
+                assert_eq!(t.stores, stores, "{cols} channels");
+                let lane: Vec<(u64, u64, u64)> = stores.iter().map(|&(o, c)| (o, c, v1)).collect();
+                assert_eq!(t.lane, lane, "{cols} channels");
+                assert!(!t.discarded);
+            }
+        }
+        // A second target beside it, exported within its channels: the
+        // note names the first alone, and each keeps its own stores.
+        let mut two_targets = vec![
+            0xF800_000Fu32,
+            0x0000_0000, // exp mrt0 v0, v0, v0, v0
+            0xF800_181F,
+            0x0000_0000, // exp mrt1 v0, v0, v0, v0 done vm
+        ];
+        two_targets.push(S_ENDPGM);
+        let outputs = [narrow(3)[0].clone(), rgba_target(1)];
+        let t = stored_pixel_outputs(&two_targets, 0, &outputs, false);
+        assert_eq!(t.notes, [NOTE]);
+        let stores = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (1, 3)];
+        assert_eq!(t.stores, stores);
+
+        // An export of the fourth channel alone to a target of three
+        // writes no channel the target declares: the target is not
+        // declared (the host leaves it as it is), under both reasons.
+        let fourth = [
+            0xF800_1808u32,
+            0x0000_0000, // exp mrt0 off, off, off, v0 done vm
+            S_ENDPGM,
+        ];
+        let t = stored_pixel_outputs(&fourth, 0, &narrow(3), false);
+        assert_eq!(t.notes, ["SV_Target0: never exported", NOTE]);
+        assert_eq!((t.declared.len(), t.stores.len()), (0, 0));
+        assert!(!t.discarded);
+    }
+
+    /// A discard's exit (no lane of the wave is left: a `done` export to
+    /// `null` with no lane in EXEC, then the end) writes no output and
+    /// needs none: every lane that takes it is discarded. The program
+    /// translates with its outputs declared and nothing to note, with the
+    /// discarded lanes kept as helpers and with them taken out. An exit
+    /// that leaves the killed lanes in EXEC is, with them taken out, an
+    /// export of those lanes that writes nothing: the outputs are noted.
+    #[test]
+    fn a_discard_exit_needs_no_pixel_outputs() {
+        // `cmpx` kills the lanes it holds in. The function is run as a
+        // lane whose registers are 0: `lt` leaves it alive, `eq` kills it.
+        // `kill` is what the exit's block does before its export.
+        const LT_F32: u32 = 0x7C22_0080; // v_cmpx_lt_f32 exec, 0, v0
+        const LT: u32 = 0x7DA2_0080; // v_cmpx_lt_u32 exec, 0, v0
+        const EQ: u32 = 0x7DA4_0080; // v_cmpx_eq_u32 exec, 0, v0
+        let program = |cmpx: u32, kill: &[u32]| {
+            let mut words = vec![
+                0xBE88_037Eu32, // s_mov_b32 s8, exec_lo
+                cmpx,           // (the lanes killed)
+                0x8A08_7E08,    // s_andn2_b32 s8, s8, exec_lo
+                0xBF84_0005,    // s_cbranch_scc0 -> kill
+                0xBEFE_0308,    // s_mov_b32 exec_lo, s8
+                0x7E02_0280,    // v_mov_b32 v1, 0
+                0xF800_180F,
+                0x0101_0101, // exp mrt0, v1, v1, v1, v1 done vm
+                S_ENDPGM,
+            ];
+            words.extend(kill); // kill:
+            words.extend([
+                0xF800_1890,
+                0x0000_0000, // exp null done vm
+                S_ENDPGM,
+            ]);
+            words
+        };
+        let outputs = [rgba_target(0)];
+        // The exit's block takes its lanes out of EXEC from the live mask,
+        // which is empty there.
+        let words = program(LT_F32, &[0xBEFE_0308]); // s_mov_b32 exec_lo, s8
+        for killing in [false, true] {
+            let shader = emit_pixel_program(&words, 0, &[], &outputs, killing).unwrap();
+            assert_eq!(notes(&shader.output_notes), [""; 0], "killing {killing}");
+            let (declared, _) = declared_pixel_outputs(&words, 0, &outputs, killing).unwrap();
+            assert_eq!(declared.len(), 1, "killing {killing}: {declared:?}");
+        }
+        // The same with a compare the function can be run with, and with
+        // EXEC made 0 at the exit.
+        let color = [(0, 0, 0), (0, 1, 0), (0, 2, 0), (0, 3, 0)];
+        for kill in [0xBEFE_0308u32, 0xBEFE_0380] {
+            for killing in [false, true] {
+                let t = stored_pixel_outputs(&program(LT, &[kill]), 0, &outputs, killing);
+                assert_eq!(t.declared.len(), 1, "killing {killing}: {:?}", t.declared);
+                assert_eq!(t.notes, [""; 0], "killing {killing}");
+                // The lane that is not killed stores its colour.
+                assert_eq!(t.lane, color);
+                assert!(!t.discarded);
+                // The killed lane is discarded: where it is killed, as a
+                // helper that runs on to the export (the host drops what
+                // it stores); or, taken out, at the exit.
+                let t = stored_pixel_outputs(&program(EQ, &[kill]), 0, &outputs, killing);
+                assert_eq!(t.notes, [""; 0], "killing {killing}");
+                assert!(t.discarded);
+                assert_eq!(t.lane, if killing { &[][..] } else { &color[..] });
+            }
+        }
+
+        // The same exit without that instruction: the killed lanes reach
+        // the `done` export in EXEC. With them kept as helpers the discard
+        // is where they are killed, as above. With them taken out, the
+        // lane that takes the exit is by the mask exported and not
+        // discarded: the shader returns for it with no discard and no
+        // store (as before 2026-11-27), and the target, which the other
+        // path writes, is noted.
+        for cmpx in [LT, EQ] {
+            let t = stored_pixel_outputs(&program(cmpx, &[]), 0, &outputs, false);
+            assert_eq!(t.notes, [""; 0]);
+            assert_eq!((t.lane.len(), t.discarded), (4, cmpx == EQ));
+        }
+        let t = stored_pixel_outputs(&program(EQ, &[]), 0, &outputs, true);
+        assert_eq!(t.notes, ["SV_Target0: exported on some paths only"]);
+        assert_eq!((t.lane.len(), t.discarded), (0, false));
+        let t = stored_pixel_outputs(&program(LT, &[]), 0, &outputs, true);
+        assert_eq!(t.notes, ["SV_Target0: exported on some paths only"]);
+        assert_eq!((&t.lane[..], t.discarded), (&color[..], false));
+    }
+
+    const S_ENDPGM: u32 = 0xBF81_0000;
+    /// `exp mrt0 v0, v0, v0, v0 done vm`.
+    const MRT0_DONE: [u32; 2] = [0xF800_180F, 0x0000_0000];
+    /// `exp mrtz v0, off, off, off` (depth).
+    const MRTZ: [u32; 2] = [0xF800_0081, 0x0000_0000];
+    /// The same, `done vm`.
+    const MRTZ_DONE: [u32; 2] = [0xF800_1881, 0x0000_0000];
+    /// `exp mrtz v1, off, off, off`.
+    const MRTZ_V1: [u32; 2] = [0xF800_0081, 0x0000_0001];
+
+    fn rgba_target(n: u32) -> SigElement {
+        SigElement {
+            cols: 4,
+            ..pixel_output("SV_Target", 16, Some(n))
+        }
+    }
+
+    fn depth_output() -> SigElement {
+        pixel_output("SV_Depth", 17, None)
+    }
+
+    /// An export in a block no lane enters writes nothing, and the module
+    /// leaves out the blocks it can tell no lane enters (a branch on a
+    /// constant), their stores with them. An output with no other export
+    /// would be declared and have no store in the function, which
+    /// Microsoft's validator refuses for a depth, a stencil reference and a
+    /// coverage: it is not declared.
+    #[test]
+    fn a_pixel_output_exported_only_where_no_lane_enters_is_not_declared() {
+        // A branch on "no lane in EXEC" at the entry, where every lane is:
+        // no lane takes it, and the path the lanes take ends without an
+        // export (every lane is discarded).
+        let depth_there = [
+            0xBF88_0001u32, // s_cbranch_execz -> there
+            S_ENDPGM,
+            MRTZ_DONE[0], // there: exp mrtz v0 done vm
+            MRTZ_DONE[1],
+            S_ENDPGM,
+        ];
+        let both_there = [
+            0xBF88_0001u32, // s_cbranch_execz -> there
+            S_ENDPGM,
+            0xF800_1883, // there: exp mrtz v0, v0, off, off done vm
+            0x0000_0000,
+            S_ENDPGM,
+        ];
+        let stencil = pixel_output("SV_StencilRef", 20, None);
+        for killing in [false, true] {
+            let (declared, _) =
+                declared_pixel_outputs(&depth_there, 0, &[depth_output()], killing).unwrap();
+            assert_eq!(declared, [], "killing {killing}");
+            let (declared, features) =
+                declared_pixel_outputs(&both_there, 0, &[depth_output(), stencil.clone()], killing)
+                    .unwrap();
+            assert_eq!(declared, [], "killing {killing}");
+            assert_eq!(features & 0x200, 0, "SFI0 {features:#x}: StencilRef");
+        }
+        // The same with a colour export on the path the lanes take: the
+        // depth export is still one no lane runs.
+        let color_here = [
+            0xBF88_0003u32, // s_cbranch_execz -> there
+            MRT0_DONE[0],
+            MRT0_DONE[1],
+            S_ENDPGM,
+            MRTZ[0], // there: exp mrtz v0
+            MRTZ[1],
+            MRT0_DONE[0],
+            MRT0_DONE[1],
+            S_ENDPGM,
+        ];
+        for killing in [false, true] {
+            let (declared, _) =
+                declared_pixel_outputs(&color_here, 0, &[rgba_target(0), depth_output()], killing)
+                    .unwrap();
+            assert_eq!(declared, [("SV_Target".to_owned(), Some(0))]);
+        }
+
+        // A block that conditions structurisation holds possible lead to
+        // and that the module leaves out all the same: EXEC is "some lane
+        // of the quad is in an empty mask", which the lowering takes as
+        // true, so its branch on "no lane in EXEC" is one on a constant.
+        // The depth is declared at first, the function is then found
+        // without a store of it, and the program is lowered again without
+        // it ([`Lower::stored_outputs`]).
+        let quad = [
+            0xBE89_0380u32, // s_mov_b32 s9, 0
+            0xBEFE_0909,    // s_wqm_b32 exec_lo, s9
+            0xBF88_0001,    // s_cbranch_execz -> there
+            S_ENDPGM,
+            MRTZ_DONE[0], // there: exp mrtz v0 done vm
+            MRTZ_DONE[1],
+            S_ENDPGM,
+        ];
+        for killing in [false, true] {
+            let shader = emit_pixel_program(&quad, 0, &[], &[depth_output()], killing).unwrap();
+            assert_eq!(notes(&shader.output_notes), ["SV_Depth: never exported"]);
+            let host = Container::parse(&shader.dxil).unwrap();
+            let declared = signature(host.part(FourCC::OSG1).unwrap().data).unwrap();
+            assert!(declared.is_empty(), "killing {killing}: {declared:?}");
+        }
+    }
+
+    /// A block no lane enters has nothing to note: an end there is one no
+    /// lane leaves through, whatever the paths to it have written, and an
+    /// export there runs in no lane, whatever its channels.
+    #[test]
+    fn a_block_no_lane_enters_gives_no_pixel_output_note() {
+        let narrow = SigElement {
+            cols: 3,
+            ..pixel_output("SV_Target", 16, Some(0))
+        };
+        // color (done); if (no lane in EXEC) { four channels of colour;
+        // end }; depth; end. At the entry every lane is in EXEC, so no
+        // lane takes the branch. Its block ends behind the `done` export
+        // and without the depth, and exports a channel the target does
+        // not declare.
+        let words = [
+            0xF800_1807u32,
+            0x0000_0000, // exp mrt0 v0, v0, v0, off done vm
+            0xBF88_0003, // s_cbranch_execz -> there
+            MRTZ[0],     // exp mrtz v0
+            MRTZ[1],
+            S_ENDPGM,
+            0xF800_000F, // there: exp mrt0 v0, v0, v0, v0
+            0x0000_0000,
+            S_ENDPGM,
+        ];
+        for killing in [false, true] {
+            let t = stored_pixel_outputs(&words, 1, &[narrow.clone(), depth_output()], killing);
+            assert_eq!(t.notes, [""; 0], "killing {killing}");
+            assert_eq!(t.declared.len(), 2, "{:?}", t.declared);
+            // The module leaves that block out, its stores with it.
+            assert_eq!(t.stores, [(0, 0), (0, 1), (0, 2), (1, 0)]);
+            assert_eq!(t.lane, [(0, 0, 0), (0, 1, 0), (0, 2, 0), (1, 0, 0)]);
+            assert!(!t.discarded);
+        }
+    }
+
+    /// The instructions inside a whole-wave section (EXEC made every lane,
+    /// then restored) are not lowered one by one, so an export there is
+    /// passed over. One that is the `done` export or writes a channel of a
+    /// declared output would be lost without a word, and its output taken
+    /// for one no export writes: refused. One the lowering does nothing
+    /// for outside a section either (its target is `null` or not one the
+    /// container lists) loses nothing: the program translates as it does
+    /// without that export.
+    #[test]
+    fn a_pixel_export_a_whole_wave_section_would_lose_is_refused() {
+        const WHY: &str = "a pixel export inside a whole-wave section";
+        // The section with `inside` in it, then `after`.
+        let section = |inside: &[u32], after: &[u32]| {
+            let mut words = vec![0xBE89_3DC1u32]; // s_or_saveexec_b32 s9, -1
+            words.extend(inside);
+            words.push(0xBEFE_0309); // s_mov_b32 exec_lo, s9
+            words.extend(after);
+            words.push(S_ENDPGM);
+            words
+        };
+        let words = section(&MRTZ, &MRT0_DONE);
+        let outputs = [rgba_target(0), depth_output()];
+        for killing in [false, true] {
+            let e = declared_pixel_outputs(&words, 0, &outputs, killing).unwrap_err();
+            assert_eq!(refusal(e), WHY);
+        }
+        // The same section without the export translates.
+        let plain = section(&[], &MRT0_DONE);
+        let (declared, _) = declared_pixel_outputs(&plain, 0, &outputs[..1], false).unwrap();
+        assert_eq!(declared.len(), 1, "{declared:?}");
+
+        // The `done` export in a section is refused whatever it writes:
+        // where a lane ends exported goes by it ([`Lower::exit`]).
+        const NULL_DONE: [u32; 2] = [0xF800_1890, 0x0000_0000]; // exp null done vm
+        for done in [MRT0_DONE, NULL_DONE] {
+            for killing in [false, true] {
+                let words = section(&done, &[]);
+                let e = declared_pixel_outputs(&words, 0, &outputs[..1], killing).unwrap_err();
+                assert_eq!(refusal(e), WHY);
+            }
+        }
+
+        // The depth export in a container that lists no depth, and an
+        // export to `null`: outside a section the lowering has no store
+        // for either, so nothing is lost inside one. The shader is, byte
+        // for byte, the one of the section without the export.
+        const NULL: [u32; 2] = [0xF800_0090, 0x0000_0000]; // exp null off, off, off, off
+        for killing in [false, true] {
+            let plain = stored_pixel_outputs(&plain, 0, &outputs[..1], killing);
+            assert_eq!(plain.notes, [""; 0]);
+            assert_eq!(plain.stores, [(0, 0), (0, 1), (0, 2), (0, 3)]);
+            for inside in [MRTZ, NULL] {
+                let words = section(&inside, &MRT0_DONE);
+                let t = stored_pixel_outputs(&words, 0, &outputs[..1], killing);
+                assert_eq!(t.notes, [""; 0], "{inside:x?}");
+                assert_eq!(t.dxil, plain.dxil, "{inside:x?}");
+                assert!(!t.discarded);
+            }
+        }
+
+        // The fourth channel alone to a target declared with three: a
+        // channel past the element, which the lowering stores nowhere
+        // ([`a_pixel_export_past_its_outputs_element_stores_the_declared_channels`]).
+        // Passed over, and noted as outside a section.
+        let narrow = [SigElement {
+            cols: 3,
+            ..pixel_output("SV_Target", 16, Some(0))
+        }];
+        let fourth = [0xF800_0008u32, 0x0000_0000]; // exp mrt0 off, off, off, v0
+        let three = [0xF800_1807u32, 0x0000_0000]; // exp mrt0 v0, v0, v0, off done vm
+        for killing in [false, true] {
+            let t = stored_pixel_outputs(&section(&fourth, &three), 0, &narrow, killing);
+            assert_eq!(t.notes, ["SV_Target0: channels exported past the element"]);
+            assert_eq!(t.stores, [(0, 0), (0, 1), (0, 2)]);
+            // A channel the target declares, in the section: refused.
+            let first = [0xF800_0001u32, 0x0000_0000]; // exp mrt0 v0, off, off, off
+            let e = declared_pixel_outputs(&section(&first, &three), 0, &narrow, killing);
+            assert_eq!(refusal(e.unwrap_err()), WHY);
+        }
+    }
+
+    /// Which ends a lane leaves through without a discard decides where an
+    /// output needs its value: a lane is behind its `done` export from that
+    /// export on, in whatever block the program then ends.
+    #[test]
+    fn pixel_outputs_are_needed_where_a_lane_ends_behind_its_done_export() {
+        let outputs = [rgba_target(0), depth_output()];
+        // color (done); if (v0 == 0) { depth }; end. The end is in the join
+        // block, behind the `done` export on both paths, and the depth is
+        // behind one of them only.
+        let mut after = MRT0_DONE.to_vec();
+        after.extend([
+            0x7D84_0080u32, // v_cmp_eq_u32 vcc, 0, v0
+            0xBE89_3C6A,    // s_and_saveexec_b32 s9, vcc_lo
+            0xBF88_0002,    // s_cbranch_execz -> join
+        ]);
+        after.extend(MRTZ);
+        after.push(0x887E_097E); // join: s_or_b32 exec_lo, exec_lo, s9
+        after.push(S_ENDPGM);
+        // The depth is noted, and stored where the program exports it:
+        // once, behind the colour's stores.
+        for killing in [false, true] {
+            let t = stored_pixel_outputs(&after, 1, &outputs, killing);
+            assert_eq!(t.notes, ["SV_Depth: exported on some paths only"]);
+            assert_eq!(t.stores, [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]);
+            assert!(!t.discarded);
+        }
+
+        // if (v0 == 0) { color (done) }; end. The end is joined by a path
+        // with the `done` export and one without: every lane that leaves
+        // through it is discarded ([`Lower::exit`]), so no output is needed
+        // there, and the target stays declared (a store of it is in the
+        // function).
+        let mut joined = vec![
+            0x7D84_0080u32, // v_cmp_eq_u32 vcc, 0, v0
+            0xBE89_3C6A,    // s_and_saveexec_b32 s9, vcc_lo
+            0xBF88_0002,    // s_cbranch_execz -> join
+        ];
+        joined.extend(MRT0_DONE);
+        joined.push(0x887E_097E); // join: s_or_b32 exec_lo, exec_lo, s9
+        joined.push(S_ENDPGM);
+        // The same with the end of the path without an export in a block
+        // of its own: if (v0 == 0) { color (done); end }; end. The lanes of
+        // the first end survive with their target written; those of the
+        // second are discarded and need none.
+        let mut apart = vec![
+            0x7D84_0080u32, // v_cmp_eq_u32 vcc, 0, v0
+            0xBE89_3C6A,    // s_and_saveexec_b32 s9, vcc_lo
+            0xBF88_0003,    // s_cbranch_execz -> else
+        ];
+        apart.extend(MRT0_DONE);
+        apart.push(S_ENDPGM);
+        apart.push(0x887E_097E); // else: s_or_b32 exec_lo, exec_lo, s9
+        apart.push(S_ENDPGM);
+        for program in [&joined, &apart] {
+            for killing in [false, true] {
+                let t = stored_pixel_outputs(program, 0, &outputs[..1], killing);
+                assert_eq!(t.declared, [("SV_Target".to_owned(), Some(0), 4)]);
+                // Nothing to note: no surviving lane is without it.
+                assert_eq!(t.notes, [""; 0]);
+            }
+        }
+    }
+
+    /// The interpolation mode a host container gives SV_Position: its
+    /// record among PSV0's signature elements (one row, row 0, four
+    /// channels from the first, kind 3, type, mode).
+    fn position_mode(dxil: &[u8]) -> u8 {
+        let host = Container::parse(dxil).unwrap();
+        let psv = host.part(FourCC::PSV0).unwrap().data;
+        let at = psv
+            .windows(4)
+            .position(|w| w == [1, 0, 0x44, 3])
+            .expect("SV_Position");
+        psv[at + 5]
+    }
+
+    /// With a conservative depth output DXIL wants the position centroid.
+    /// That follows the outputs the shader declares: a conservative depth
+    /// the container lists and no export writes is not declared, and the
+    /// position is then the pixel centre's, as in a container that never
+    /// listed it.
+    #[test]
+    fn the_position_is_centroid_only_with_a_declared_conservative_depth() {
+        let position = SigElement {
+            cols: 4,
+            ..pixel_output("SV_Position", 3, Some(0))
+        };
+        let at_least = pixel_output("SV_DepthGreaterEqual", 19, None);
+        let mut color = MRT0_DONE.to_vec();
+        color.push(S_ENDPGM);
+        let with = emit_pixel_program(
+            &color,
+            0,
+            std::slice::from_ref(&position),
+            &[rgba_target(0), at_least.clone()],
+            false,
+        )
+        .unwrap();
+        let without = emit_pixel_program(
+            &color,
+            0,
+            std::slice::from_ref(&position),
+            &[rgba_target(0)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(position_mode(&without.dxil), 4);
+        assert_eq!(position_mode(&with.dxil), 4);
+        assert_eq!(with.dxil, without.dxil);
+
+        // Exported, it is declared, and the position is centroid.
+        let mut both = MRTZ.to_vec();
+        both.extend(color);
+        let exported =
+            emit_pixel_program(&both, 1, &[position], &[rgba_target(0), at_least], false).unwrap();
+        assert_eq!(position_mode(&exported.dxil), 5);
+    }
+
+    /// `s_barrier` waits for the waves of a thread group. Pixel and vertex
+    /// waves belong to none, and DXIL has a group sync only in compute,
+    /// mesh and amplification shaders (Microsoft's validator refuses it
+    /// elsewhere): such a program is refused.
+    #[test]
+    fn a_barrier_outside_compute_and_mesh_programs_is_refused() {
+        const WHY: &str = "a thread-group barrier outside compute and mesh programs";
+        let pixel = [
+            0xBF8A_0000u32, // s_barrier
+            0xF800_180F,
+            0x0000_0000, // exp mrt0 v0, v0, v0, v0 done vm
+            0xBF81_0000,
+        ];
+        let target = SigElement {
+            cols: 4,
+            ..pixel_output("SV_Target", 16, Some(0))
+        };
+        let e = declared_pixel_outputs(&pixel, 0, &[target], false).unwrap_err();
+        assert_eq!(refusal(e), WHY);
+
+        let vertex = [
+            0xBF8A_0000u32, // s_barrier
+            0xF800_08CF,
+            0x0000_0000, // exp pos0 v0, v0, v0, v0 done
+            0xBF81_0000,
+        ];
+        let native = NativeProgram {
+            stage: HwStage::Vs,
+            wave64: false,
+            vgprs: 8,
+            layout: vec![],
+            used: vec![],
+            io: StageIo::Vs {
+                inputs: vec![],
+                outputs: vec![],
+            },
+            code: vertex.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        };
+        let position = SigElement {
+            cols: 4,
+            ..pixel_output("SV_Position", 3, Some(0))
+        };
+        let osg1 = container::signature(&[position], false);
+        let bytes = crate::dxbc::build(&[(FourCC::OSG1, &osg1)]);
+        let c = Container::parse(&bytes).unwrap();
+        let translate = |native: &NativeProgram| {
+            let p = ir::build(&native.patched_code(), native.wave64, native.vgprs).unwrap();
+            let st = structure::structure(&p).unwrap();
+            let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+            let io = io::raise(&p, native).unwrap();
+            emit(&c, native, &p, &st, &io, &res)
+        };
+        assert_eq!(refusal(translate(&native).unwrap_err()), WHY);
+        // The same program without the barrier translates.
+        let plain = NativeProgram {
+            code: native.code[4..].to_vec(),
+            ..native
+        };
+        translate(&plain).unwrap();
+    }
+
     #[test]
     fn immediate_sampler_slots_distinguish_comparison_uses() {
         let words = [
@@ -1415,6 +2603,7 @@ mod tests {
         let ps = super::HostShader {
             stage: crate::HwStage::Ps,
             dxil: constant_color(),
+            output_notes: Vec::new(),
             user_data: Vec::new(),
             samplers: Vec::new(),
             static_samplers: Vec::new(),
@@ -1433,6 +2622,7 @@ mod tests {
             std::env::var(var).ok().map(|p| super::HostShader {
                 stage,
                 dxil: std::fs::read(p).unwrap(),
+                output_notes: Vec::new(),
                 user_data: Vec::new(),
                 samplers: Vec::new(),
                 static_samplers: Vec::new(),

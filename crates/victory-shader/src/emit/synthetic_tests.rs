@@ -107,6 +107,7 @@ fn build_wave(words: &[u32], wave64: bool) -> Result<HostShader, crate::ShaderEr
     Ok(HostShader {
         stage: HwStage::Cs,
         dxil: lowered.dxil,
+        output_notes: lowered.output_notes,
         user_data: lowered.user_data,
         static_samplers: lowered
             .samplers
@@ -902,6 +903,7 @@ fn pops_wait_loop_exits_immediately_for_inactive_lanes() {
         HostShader {
             stage: native.stage,
             dxil: l.dxil,
+            output_notes: l.output_notes,
             user_data: l.user_data,
             samplers: l.samplers,
             static_samplers: Vec::new(),

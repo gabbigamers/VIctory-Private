@@ -79,6 +79,10 @@ struct Tally {
     no_per_lane: usize,
     /// Emulated forms made; of those, validated and given a pipeline.
     emulated: [usize; 3],
+    /// Pixel outputs whose declaration in the container and exports in
+    /// the program do not agree (`HostShader::output_notes`): reason →
+    /// programs, the first one, and programs by output.
+    noted: BTreeMap<emit::OutputReason, (usize, String, BTreeMap<String, usize>)>,
     /// Reason → programs stopped by it, and the first one.
     failed: BTreeMap<String, (usize, String)>,
     /// With `--list`: one line per program and outcome.
@@ -151,6 +155,16 @@ impl Tally {
             *mine += theirs;
         }
         self.lines.extend(other.lines);
+        for (reason, (n, example, outputs)) in other.noted {
+            let noted = self
+                .noted
+                .entry(reason)
+                .or_insert((0, example, BTreeMap::new()));
+            noted.0 += n;
+            for (output, n) in outputs {
+                *noted.2.entry(output).or_default() += n;
+            }
+        }
         for (reason, (n, example)) in other.failed {
             self.failed.entry(reason).or_insert((0, example)).0 += n;
         }
@@ -303,6 +317,15 @@ pub fn run(
         "             {} emitted of {} mesh programs; {} validated, {} pipelines",
         t.ms_emitted, t.ms_programs, t.ms_validated, t.ms_pipelines
     );
+    // Pixel outputs whose declaration and exports do not agree. The
+    // programs are among the emitted ones: each reason says what the
+    // shader does (`emit::OutputReason`).
+    for (reason, (n, example, outputs)) in &t.noted {
+        println!(
+            "             pixel outputs {}: {n} programs (e.g. {example}); by output {outputs:?}",
+            reason.text()
+        );
+    }
     // The compute programs a host must run the console's wave size for
     // (or that must carry the wave themselves), by size and reason; and
     // those the per-lane form refuses, which only the emulated form could
@@ -459,6 +482,18 @@ pub fn warm(paths: Vec<PathBuf>, jobs: Option<usize>, pipelines: bool) -> Result
         cached + translated + refused,
         started.elapsed().as_secs_f64()
     );
+    // Of those that translate, cached or not, the containers whose shader
+    // notes a pixel output, by reason (`emit::OutputReason`): each
+    // distinct container went through the cache once.
+    for (reason, n) in emit::OutputReason::ALL
+        .into_iter()
+        .zip(victory_gpu::shader_cache::output_notes())
+    {
+        println!(
+            "             pixel outputs {}: {n} containers",
+            reason.text()
+        );
+    }
     if pipelines {
         crate::prebuild::run(&paths, threads)?;
     }
@@ -722,6 +757,26 @@ fn check(
 ) {
     if let Some(keep) = &checks.keep {
         lock(keep).push((label(), shader.clone()));
+    }
+    for reason in emit::OutputReason::ALL {
+        let of_reason = shader.output_notes.iter().filter(|n| n.reason == reason);
+        let outputs: Vec<&str> = of_reason.map(|n| n.output.as_str()).collect();
+        if outputs.is_empty() {
+            continue;
+        }
+        if t.list {
+            let (label, reason, outputs) = (label(), reason.text(), outputs.join(" "));
+            t.lines
+                .push(format!("{label}  pixel outputs {reason}: {outputs}"));
+        }
+        let noted = t
+            .noted
+            .entry(reason)
+            .or_insert_with(|| (0, label(), BTreeMap::new()));
+        noted.0 += 1;
+        for output in outputs {
+            *noted.2.entry(output.to_owned()).or_default() += 1;
+        }
     }
     // `VICTORY_EMIT_DUMP` with `--list`: every emitted shader as a file.
     if t.list

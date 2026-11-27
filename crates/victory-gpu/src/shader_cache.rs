@@ -20,12 +20,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use victory_pipeline::{Cache, Converter};
-use victory_shader::emit::{HostShader, StaticSampler, UserData};
+use victory_shader::emit::{HostShader, OutputNote, OutputReason, StaticSampler, UserData};
 use victory_shader::{HwStage, RootType};
 
 static CACHE: OnceLock<Cache> = OnceLock::new();
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
+/// Shaders by the reasons of their notes: one count per reason, in the
+/// order of [`OutputReason::ALL`].
+type Noted = [AtomicU64; OutputReason::ALL.len()];
+static NOTED: Noted = [const { AtomicU64::new(0) }; OutputReason::ALL.len()];
 
 /// Keeps translated shaders in a folder of `dir` from now on: the folder
 /// of this translator, `None` if it cannot be opened.
@@ -47,6 +51,27 @@ pub fn use_shader_cache(dir: PathBuf) -> Option<PathBuf> {
 /// Shaders found in the cache and translated since the start.
 pub fn counts() -> (u64, u64) {
     (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed))
+}
+
+/// Translations since the start, from the cache or not, whose shader
+/// notes a pixel output ([`HostShader::output_notes`]): per reason, in
+/// the order of [`OutputReason::ALL`], the shaders with a note of it.
+pub fn output_notes() -> [u64; OutputReason::ALL.len()] {
+    counted(&NOTED)
+}
+
+fn counted(noted: &Noted) -> [u64; OutputReason::ALL.len()] {
+    std::array::from_fn(|reason| noted[reason].load(Ordering::Relaxed))
+}
+
+/// Counts `shader` once under each reason it has a note of, however
+/// many of its outputs have that note.
+fn count_notes(noted: &Noted, shader: &HostShader) {
+    for reason in OutputReason::ALL {
+        if shader.output_notes.iter().any(|n| n.reason == reason) {
+            noted[reason.code()].fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// What a translation depends on besides its container: the translator
@@ -117,10 +142,27 @@ pub fn host_shader(container: &[u8]) -> (Result<HostShader, String>, bool) {
         emulated_waves: crate::waves::emulated(),
     };
     let translate = |c: &[u8]| victory_shader::emit::translate_with(c, options).map_err(|e| e.to_string());
-    match CACHE.get() {
+    counted_translation(CACHE.get(), &NOTED, container, translate)
+}
+
+/// The translation of `container` by `translate`, from `cache` when
+/// there is one, and whether it came from there. It is counted in `noted`
+/// by its notes either way: a run's counts do not depend on what an
+/// earlier run left in the cache.
+fn counted_translation(
+    cache: Option<&Cache>,
+    noted: &Noted,
+    container: &[u8],
+    translate: impl Fn(&[u8]) -> Result<HostShader, String> + Send + Sync,
+) -> (Result<HostShader, String>, bool) {
+    let (shader, hit) = match cache {
         Some(cache) => cached(cache, build(), container, translate),
         None => (translate(container), false),
+    };
+    if let Ok(s) = &shader {
+        count_notes(noted, s);
     }
+    (shader, hit)
 }
 
 /// The cache entry's converter: the build and the container in, the
@@ -255,6 +297,7 @@ fn encode(translation: &Result<HostShader, String>) -> Vec<u8> {
     let HostShader {
         stage,
         dxil,
+        output_notes,
         user_data,
         samplers,
         static_samplers,
@@ -326,6 +369,12 @@ fn encode(translation: &Result<HostShader, String>) -> Vec<u8> {
         word(&mut out, text.len() as u32);
         out.extend(text.as_bytes());
     }
+    word(&mut out, output_notes.len() as u32);
+    for note in output_notes {
+        word(&mut out, note.reason.code() as u32);
+        word(&mut out, note.output.len() as u32);
+        out.extend(note.output.as_bytes());
+    }
     out
 }
 
@@ -394,9 +443,18 @@ fn decode(bytes: &[u8]) -> Option<Result<HostShader, String>> {
         refusal: String::from_utf8(r.list()?).ok()?,
         per_lane: String::from_utf8(r.list()?).ok()?,
     };
+    let n = r.word()? as usize;
+    let mut output_notes = Vec::with_capacity(n.min(256));
+    for _ in 0..n {
+        output_notes.push(OutputNote {
+            reason: *OutputReason::ALL.get(r.word()? as usize)?,
+            output: String::from_utf8(r.list()?).ok()?,
+        });
+    }
     r.0.is_empty().then_some(Ok(HostShader {
         stage,
         dxil,
+        output_notes,
         user_data,
         samplers,
         static_samplers,
@@ -421,6 +479,15 @@ mod tests {
         HostShader {
             stage: HwStage::Ps,
             dxil: b"DXBC and the rest".to_vec(),
+            // One note of every reason.
+            output_notes: OutputReason::ALL
+                .into_iter()
+                .zip(["SV_Target1", "SV_Target0", "SV_Target2", "SV_Depth"])
+                .map(|(reason, output)| OutputNote {
+                    reason,
+                    output: output.into(),
+                })
+                .collect(),
             user_data: vec![UserData {
                 index: 8,
                 slot: 1,
@@ -451,6 +518,77 @@ mod tests {
                 per_lane: "another".into(),
             },
         }
+    }
+
+    /// A shader counts once under each reason it has a note of, whatever
+    /// the number of outputs with that note, and under no other; one
+    /// without notes counts nowhere.
+    #[test]
+    fn shaders_are_counted_by_the_reasons_of_their_notes() {
+        let note = |reason, output: &str| OutputNote {
+            reason,
+            output: output.into(),
+        };
+        let with = |output_notes| HostShader {
+            output_notes,
+            ..shader()
+        };
+        let noted: Noted = Default::default();
+        assert_eq!(counted(&noted), [0; 4]);
+        count_notes(&noted, &with(Vec::new()));
+        assert_eq!(counted(&noted), [0; 4]);
+        // Two outputs with one reason and one with another.
+        let two = with(vec![
+            note(OutputReason::PastElement, "SV_Target0"),
+            note(OutputReason::SomePaths, "SV_Depth"),
+            note(OutputReason::PastElement, "SV_Target1"),
+        ]);
+        count_notes(&noted, &two);
+        assert_eq!(counted(&noted), [0, 1, 0, 1]);
+        count_notes(&noted, &two);
+        count_notes(
+            &noted,
+            &with(vec![note(OutputReason::NeverWritten, "SV_Target0")]),
+        );
+        assert_eq!(counted(&noted), [0, 2, 1, 2]);
+        // One note of every reason.
+        count_notes(&noted, &shader());
+        assert_eq!(counted(&noted), [1, 3, 2, 3]);
+        // The counts are in the order of the reasons' codes.
+        for (place, reason) in OutputReason::ALL.into_iter().enumerate() {
+            let noted: Noted = Default::default();
+            count_notes(&noted, &with(vec![note(reason, "SV_Target0")]));
+            let mut one = [0; 4];
+            one[place] = 1;
+            assert_eq!(counted(&noted), one, "{}", reason.text());
+        }
+    }
+
+    /// A translation is counted by its notes when it is made, when it
+    /// comes from the cache and without a cache; a refusal is not counted.
+    #[test]
+    fn translations_are_counted_from_the_cache_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path()).unwrap();
+        let container = b"a console container".as_slice();
+        let translate = |_: &[u8]| Ok(shader());
+        let noted: Noted = Default::default();
+        let made = counted_translation(Some(&cache), &noted, container, translate);
+        assert_eq!(made, (Ok(shader()), false));
+        assert_eq!(counted(&noted), [1; 4]);
+        let read = counted_translation(Some(&cache), &noted, container, translate);
+        assert_eq!(read, (Ok(shader()), true));
+        assert_eq!(counted(&noted), [2; 4]);
+        let alone = counted_translation(None, &noted, container, translate);
+        assert_eq!(alone, (Ok(shader()), false));
+        assert_eq!(counted(&noted), [3; 4]);
+
+        let fail = |_: &[u8]| Err::<HostShader, _>("unsupported".to_owned());
+        for cache in [Some(&cache), None] {
+            let refused = counted_translation(cache, &noted, b"other", fail);
+            assert_eq!(refused.0, Err("unsupported".to_owned()));
+        }
+        assert_eq!(counted(&noted), [3; 4]);
     }
 
     #[test]
