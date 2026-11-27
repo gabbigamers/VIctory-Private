@@ -404,7 +404,8 @@ fn rebuild(
 struct Lane {
     /// Symbol bits - 1 at the full alphabet.
     width: u8,
-    /// 0 header, 1 length (low byte), 2 length high byte, 3 payload.
+    /// 0 header, 1 length (low byte), 2 length high byte, 3 payload, 4 the
+    /// lane has delivered its symbols and read its fragment.
     phase: u8,
     long: bool,
     reset: bool,
@@ -415,6 +416,10 @@ struct Lane {
     stalled: bool,
     x: u32,
     left: u32,
+    /// Symbols the lane has still to decode. At none it reads what is left
+    /// of its fragment and then takes no more input, as the lane of
+    /// Microsoft's `mdu_minirans.v` does when its output count runs out.
+    owed: usize,
 }
 
 impl Lane {
@@ -422,10 +427,11 @@ impl Lane {
     /// decode at most one symbol.
     fn step(&mut self, t: &Models) -> Result<(), Error> {
         if self.phase != 3 {
+            // A lane that is done has asked for nothing and has nothing latched.
             let Some(b) = self.latch.take() else {
                 return Ok(());
             };
-            self.need = true;
+            self.need = self.phase != 4;
             match self.phase {
                 0 => {
                     // The top two bits shrink the alphabet; width >= 3.
@@ -444,22 +450,26 @@ impl Lane {
                     self.left = u32::from(b) + 1;
                     self.phase = 3;
                 }
-                _ => {
+                2 => {
                     self.left = (u32::from(b) << 8 | self.left) + 257;
                     self.phase = 3;
                 }
+                _ => {}
             }
             return Ok(());
         }
         let mut x = self.x;
+        let mut read = false;
         if x < LOW
             && let Some(b) = self.latch.take()
         {
             self.left = self.left.wrapping_sub(1);
             x = x << 8 | u32::from(b);
+            read = true;
         }
         self.need = self.left != 0 && self.latch.is_none();
-        if x > LOW {
+        if x > LOW && self.owed != 0 {
+            self.owed -= 1;
             let freq = &t.freq[usize::from(self.model)];
             let start = &t.start[usize::from(self.model)];
             let slot = x & 0xffff;
@@ -478,17 +488,21 @@ impl Lane {
             };
             self.x = (x >> 16).wrapping_mul(f).wrapping_add(rem);
             self.out = Some(sym as u8);
-        } else if self.left != 0 {
+        } else if self.left != 0 || (read && x < LOW) {
             // At exactly 2^24 the lane neither reads nor decodes again; only a
-            // lane that has delivered its symbols may end up there.
+            // lane that has delivered its symbols may end up there. A fragment
+            // whose last byte leaves the state short ends in the next step.
             self.x = x;
+        } else if self.owed == 0 {
+            // The lane is done: it reads no further header.
+            self.phase = 4;
+            self.need = false;
         } else {
-            // The fragment ends; a byte read in this step does not reach the carried state.
+            // The fragment ends. Without the reset bit the next goes on from
+            // this state, with every byte this one read.
             self.phase = 0;
             self.need = self.latch.is_none();
-            if self.reset {
-                self.x = 0;
-            }
+            self.x = if self.reset { 0 } else { x };
         }
         Ok(())
     }
@@ -527,6 +541,7 @@ fn lanes(
     for (lane, &width) in lanes.iter_mut().zip(widths) {
         lane.width = width;
         lane.need = true;
+        lane.owed = blocks * per;
     }
     let stride = widths.len() * per;
     let full = (1u32 << widths.len()) - 1;
@@ -543,7 +558,7 @@ fn lanes(
             }
             let waiting = lane.out.is_some() && done & bit != 0;
             if lane.need && !waiting && taken < ROUND_BYTES {
-                // Past the end nothing arrives; in a valid stream only finished lanes ask there.
+                // Past the end nothing arrives; in a valid stream no lane asks there.
                 if let Some(b) = fetch(j) {
                     lane.latch = Some(b);
                     taken += 1;
@@ -1369,9 +1384,7 @@ mod tests {
         out
     }
 
-    /// Interleaves per-lane fragments the way the decoder takes bytes. A lane
-    /// that has finished still asks: a filler fragment (two payload bytes)
-    /// brings its state to 2^24 with a byte latched, which parks it for good.
+    /// Interleaves per-lane fragments the way the decoder takes bytes.
     fn stream(t: &Tables, widths: &[u8], per: usize, records: &[Vec<u8>]) -> Vec<u8> {
         let stride = widths.len() * per;
         let mut queues: Vec<std::collections::VecDeque<u8>> = (0..widths.len())
@@ -1380,9 +1393,7 @@ mod tests {
                     .iter()
                     .flat_map(|r| r[j * per..j * per + per].to_vec())
                     .collect();
-                let mut bytes = fragment(widths[j], &syms);
-                bytes.extend([0, 1, 0, 0]);
-                bytes.into()
+                fragment(widths[j], &syms).into()
             })
             .collect();
         let mut out = Vec::new();
@@ -1390,7 +1401,7 @@ mod tests {
         let fetch = |j: usize| {
             let b = queues[j]
                 .pop_front()
-                .expect("a parked lane asked for input");
+                .expect("a finished lane asked for input");
             out.push(b);
             Some(b)
         };
@@ -1438,7 +1449,6 @@ mod tests {
         let mut b1 = vec![0, 1, zigzag(1), zigzag(1)];
         b1.extend((0..8).map(|_| 1 | 1 << 3));
         let src = stream(&t, &BC4_LANES, 1, &[b0, b1]);
-        assert_eq!(src, FILLER_STREAM);
         let mut dst = [0u8; 16];
         decode(4, &src, &mut dst, &t).unwrap();
         let block = |e0: u8, e1: u8, ix: &dyn Fn(usize) -> usize| {
@@ -1662,6 +1672,7 @@ mod tests {
                             model,
                             x,
                             left: 1,
+                            owed: 1,
                             ..Default::default()
                         };
                         lane.step(&t.models).unwrap();
@@ -1729,11 +1740,8 @@ mod tests {
     /// The reference decoder (part of bcpack-rs, `bcpack/differential.rs`)
     /// reads the same symbols out of what this module's writer writes, and
     /// every byte of it: shape 0 of Microsoft's models is the uniform model
-    /// the writer codes with, and a lane's one fragment ends at 2^24. Not
-    /// today: the writer ends every lane with a filler fragment (`stream`),
-    /// which the reference does not take.
+    /// the writer codes with, and a lane's one fragment ends at 2^24.
     #[test]
-    #[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
     fn the_reference_decodes_what_the_test_writer_writes() {
         let t = Tables::parse(&tables()).unwrap();
         for bc in [1, 3, 4, 5, 6, 7] {
@@ -1758,10 +1766,10 @@ mod tests {
         }
     }
 
-    /// The two-block BC4 stream the writer writes for the records of
-    /// `bc4_blocks_with_and_without_references`: each lane ends with a filler
-    /// fragment (header 0, two zero bytes) that parks it. Other crates' tests
-    /// hold this one as a constant.
+    /// A two-block BC4 stream as the writer wrote it while finished lanes
+    /// still asked for input: each lane ends with a filler fragment (header
+    /// 0, two zero bytes) that parked it. Other crates' tests hold this one
+    /// as a constant.
     #[rustfmt::skip]
     const FILLER_STREAM: [u8; 88] = [
         0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 4, 4, 4, 4, 1, 1, 1, 1, 0x10, 0x10, 0x10, 0x10,
@@ -1771,10 +1779,11 @@ mod tests {
         0, 0, 0, 0, 0, 0, 0, 0,
     ];
 
-    /// `FILLER_STREAM` decodes to the blocks of
+    /// The fillers of `FILLER_STREAM` lie behind every lane's last symbol,
+    /// so it decodes as before, to the blocks of
     /// `bc4_blocks_with_and_without_references`.
     #[test]
-    fn the_filler_stream_decodes() {
+    fn a_stream_with_filler_fragments_still_decodes() {
         let t = Tables::parse(&tables()).unwrap();
         let mut dst = [0u8; 16];
         decode(4, &FILLER_STREAM, &mut dst, &t).unwrap();
@@ -1835,8 +1844,8 @@ mod tests {
     /// A table file of either size is read: the whole set as it is, the
     /// constants alone with the built-in models. The made-up set's models
     /// are shape 0 of the built-in ones at every shape, so the stream of
-    /// `the_filler_stream_decodes`, coded with shape 0, decodes to the same
-    /// blocks with both. Any other size is refused.
+    /// `a_stream_with_filler_fragments_still_decodes`, coded with shape 0,
+    /// decodes to the same blocks with both. Any other size is refused.
     #[test]
     fn a_table_file_is_a_whole_set_or_the_constants_alone() {
         let set = tables();

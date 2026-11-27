@@ -34,7 +34,13 @@ headers are the record, and this file does not change them.
     bcpack-rs. Compared the same way, all five are equal.
   * `crates/bcpack-reference/src/rans.rs`: a port of its `decoder` module by
     bcpack-rs. Tests only.
-* `crates/victory-formats/src/bcpack.rs` holds no code or table of it.
+* `crates/victory-formats/src/bcpack.rs` holds no code or table of it. Two
+  rules of that file's lane decoder were changed on 2026-11-27 after its
+  one-lane `decoder` module was simulated unmodified and compared (a lane
+  stops asking for input once it has produced `out_target` symbols; the
+  state a fragment hands on includes every byte the fragment read). What
+  the module does and does not settle, and what changed for streams the
+  earlier decoder accepted, is in `docs/bcpack-lane-corrections.md`.
 
 ```
 MIT License

@@ -7,12 +7,12 @@
 //!
 //! The entropy stage is compared symbol for symbol and byte for byte, on the
 //! lanes of all six formats. The reference's lane is a port of Microsoft's
-//! `mdu_minirans.v`, which is the authority where the two differ. Two
-//! differences in what a lane does are held by `known_difference` tests at
-//! the end of the entropy section, each beside the test of the corrected
-//! behaviour. The corrections are not in this decoder: they await the owner's
-//! decision (docs/progress.md), and the tests that need them are ignored
-//! until then.
+//! `mdu_minirans.v`. Where the two differed, that file's one-lane module was
+//! simulated and asked: on one lane it sides with the reference in both
+//! cases (the symbol count on one reading of its start signal; the kept byte
+//! by decoded symbols), and says nothing about several lanes sharing a
+//! stream (docs/bcpack-lane-corrections.md). The two cases are changed here
+//! and kept as tests at the end of the entropy section.
 //!
 //! The block stage is compared for BC1 only. The reference's rebuild of BC3,
 //! BC4, BC5 and BC7 is of undetermined origin and is not vendored
@@ -182,6 +182,7 @@ fn a_payload_step_decodes_what_the_reference_does() {
                     model,
                     x,
                     left: 1,
+                    owed: 1,
                     ..Default::default()
                 };
                 lane.step(&models).unwrap();
@@ -223,7 +224,6 @@ fn flushed(widths: &[u8], target: usize, longest: usize, rng: &mut Rng) -> Vec<V
 /// Every format's lanes, from one block to thousands, with fragments from
 /// one symbol to a whole lane, any model and any narrowing.
 #[test]
-#[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
 fn streams_of_flushed_fragments_decode_alike() {
     for (bc, _) in FORMATS {
         let (widths, per) = layout(bc).unwrap();
@@ -588,7 +588,6 @@ fn the_writer_writes_what_the_reference_encoder_does() {
 /// Fragments that keep the zero bytes after their last symbol: the lane
 /// reads them, to a state of exactly 2^24, before its next header.
 #[test]
-#[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
 fn fragments_with_their_last_bytes_decode_alike() {
     let shape = Shape {
         trim: false,
@@ -623,7 +622,6 @@ fn fragments_with_their_last_bytes_decode_alike() {
 /// with the read that lets their last symbol decode, some one byte into the
 /// two the next symbol needs.
 #[test]
-#[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
 fn fragments_that_hand_the_state_on_decode_alike() {
     let mut carried = [0; 2];
     for (split_reads, carried) in [false, true].into_iter().zip(&mut carried) {
@@ -668,11 +666,10 @@ fn fragments_that_hand_the_state_on_decode_alike() {
 /// more input (the Verilog's `output_remaining` and `done`). Here every lane
 /// of a one-block BC4 stream has one fragment of one symbol, 0, under model
 /// 0. Lanes 0 to 7 are served first, eight bytes a round, and finish before
-/// lanes 8 to 11 have had a byte. This decoder reads the next header on a
-/// finished lane, so lanes 0 to 7 take the other lanes' bytes and the stream
-/// is refused: the known difference after this test.
+/// lanes 8 to 11 have had a byte. The decoder used to read the next header
+/// on a finished lane, so lanes 0 to 7 took the other lanes' bytes and the
+/// stream was refused.
 #[test]
-#[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
 fn a_lane_that_has_delivered_its_symbols_takes_no_more_input() {
     let (widths, per) = layout(4).unwrap();
     let zero = || Fragment {
@@ -699,60 +696,6 @@ fn a_lane_that_has_delivered_its_symbols_takes_no_more_input() {
     assert_eq!(records, [0; 12]);
 }
 
-/// The entropy stage with each lane's bytes given to that lane alone, in
-/// whatever order the lanes ask: no lane can take another's input.
-fn entropy_lane_by_lane(
-    widths: &[u8],
-    per: usize,
-    blocks: usize,
-    bytes: &[Vec<u8>],
-) -> (Result<(), Error>, Vec<u8>) {
-    let models = Models::builtin().unwrap();
-    let mut queues: Vec<std::collections::VecDeque<u8>> = bytes
-        .iter()
-        .map(|lane| lane.iter().copied().collect())
-        .collect();
-    let mut records = vec![0u8; blocks * widths.len() * per];
-    let fetch = |j: usize| queues[j].pop_front();
-    let result = lanes(&models, widths, per, blocks, fetch, &mut records);
-    (result, records)
-}
-
-/// A known difference between this decoder as it is and the reference
-/// (docs/bcpack-rs-evaluation.md, section 5, "Symbol budget per lane"), on
-/// the 72-byte stream of the test above. The reference decodes it and takes
-/// every byte: a lane that has delivered its symbols asks for nothing. This
-/// decoder refuses it: a lane whose fragment has ended asks for its next
-/// header whether or not it has symbols left to deliver, so lanes 0 to 7,
-/// served first, take the bytes of lanes 8 to 11. Given each lane's bytes
-/// apart it decodes them.
-#[test]
-fn known_difference_a_finished_lane_takes_the_other_lanes_input() {
-    let (widths, per) = layout(4).unwrap();
-    let zero = Fragment {
-        symbols: vec![0],
-        q: 0,
-        z: 0,
-    };
-    let lanes: Vec<Vec<Fragment>> = widths.iter().map(|_| vec![zero.clone()]).collect();
-    let stream = encode::encode_lanes(widths, &lanes).unwrap();
-    let reference = rans::decode_slice(&stream, widths, 1).unwrap();
-    assert_eq!((reference.symbols, reference.consumed), (vec![0; 12], 72));
-    let (result, _, taken) = entropy(widths, per, 1, &stream);
-    assert_eq!(
-        (result, taken),
-        (Err(Error("the stream ends early or is corrupt")), 72)
-    );
-    let apart: Vec<Vec<u8>> = widths
-        .iter()
-        .map(|&width| encode::encode_fragment(width, &zero).unwrap())
-        .collect();
-    assert_eq!(
-        entropy_lane_by_lane(widths, per, 1, &apart),
-        (Ok(()), vec![0; 12])
-    );
-}
-
 /// A fragment that hands its state on and ends with a read keeps the byte
 /// it read, and ends one step later (the Verilog's PROCESSING state stores
 /// the state with the input whatever comes next, and passes through
@@ -760,10 +703,9 @@ fn known_difference_a_finished_lane_takes_the_other_lanes_input() {
 /// codes symbols 255 and 0 under model 15 of the 8-bit alphabet, whose
 /// symbol 255 has frequency 1: after it the state is two bytes short, the
 /// first fragment ends after one of them and the second holds the other.
-/// This decoder drops the first and asks for the next header a step early:
-/// the known difference after this test.
+/// The decoder used to drop the first and to ask for the next header a step
+/// early.
 #[test]
-#[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
 fn a_fragment_that_ends_on_a_read_keeps_the_byte() {
     let (widths, per) = layout(1).unwrap();
     let run = |symbols: &[u16], q| Run {
@@ -791,56 +733,12 @@ fn a_fragment_that_ends_on_a_read_keeps_the_byte() {
     assert_decodes_alike(widths, per, 2, &stream, "a fragment that ends on a read");
 }
 
-/// A known difference between this decoder as it is and the reference
-/// (docs/bcpack-rs-evaluation.md, section 5, "Fragment end without the flush
-/// bit"), on the stream of the test above. The reference decodes 255 and 0 on
-/// lane 0. This decoder delivers the 255 and refuses the stream: the state it
-/// carries into the second fragment is the one before the first fragment's
-/// last byte, so that byte is lost and the second symbol never comes. It
-/// does the same given each lane's bytes apart, so this is not the difference
-/// of `known_difference_a_finished_lane_takes_the_other_lanes_input`.
-#[test]
-fn known_difference_a_fragment_that_ends_on_a_read_loses_the_byte() {
-    let (widths, per) = layout(1).unwrap();
-    let run = |symbols: &[u16], q| Run {
-        symbols: symbols.to_vec(),
-        q,
-        z: 0,
-    };
-    let lane0 = [run(&[255], 15), run(&[0], 15)];
-    let (bytes, _) = rans_stream(widths[0], &lane0, rans::L);
-    let mut lanes = vec![
-        [
-            fragment_bytes(&lane0[0], false, &bytes[..5]),
-            fragment_bytes(&lane0[1], true, &bytes[5..]),
-        ]
-        .concat(),
-    ];
-    for &width in &widths[1..] {
-        lanes.push(lane_bytes(width, &[run(&[0, 0], 0)], PLAIN, &mut Rng(1)));
-    }
-    let (stream, decoded) = interleave(widths, 2, &lanes);
-    assert_eq!(decoded.unwrap().lane(0), [255, 0]);
-    let reference = rans::decode_slice(&stream, widths, 2).unwrap();
-    assert_eq!(
-        (reference.lane(0), reference.consumed),
-        (&[255, 0][..], stream.len())
-    );
-    let refused = Err(Error("the stream ends early or is corrupt"));
-    let (result, records, _) = entropy(widths, per, 2, &stream);
-    assert_eq!((result, records[0]), (refused, 255));
-    let (result, records) = entropy_lane_by_lane(widths, per, 2, &lanes);
-    assert_eq!((result, records[0]), (refused, 255));
-}
-
 /// A fragment that hands on a state of exactly 2^24 while its lane owes
 /// symbols: at that state a lane neither reads nor decodes (the Verilog
-/// waits there for good), and both refuse the stream. Without the correction
-/// that `a_fragment_that_ends_on_a_read_keeps_the_byte` waits for, this
-/// decoder goes on from the state before the fragment's last byte and decodes
-/// the next fragment.
+/// waits there for good), and both refuse the stream. Before the correction
+/// above this decoder went on from the state before the fragment's last
+/// byte and decoded the next fragment.
 #[test]
-#[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
 fn a_state_of_exactly_2_24_handed_on_stalls_both() {
     let (widths, per) = layout(4).unwrap();
     let run = |symbols: &[u16]| Run {
@@ -874,7 +772,6 @@ fn a_state_of_exactly_2_24_handed_on_stalls_both() {
 /// What the reference refuses and this decoder accepts. Neither is changed
 /// here: the decoder has no notion of where a stream ends.
 #[test]
-#[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
 fn what_the_reference_checks_and_this_decoder_does_not() {
     let (widths, per) = layout(5).unwrap();
     let blocks = 30;
@@ -1141,7 +1038,6 @@ fn bc1_index_references_before_the_first_block_differ() {
 /// entropy stages. For BC1, whose block stage the reference has here, the
 /// stream is decoded to blocks by both, with made-up constants.
 #[test]
-#[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
 fn streams_decode_alike_and_bc1_streams_to_the_same_blocks() {
     for (bc, _) in FORMATS {
         let (widths, per) = layout(bc).unwrap();
