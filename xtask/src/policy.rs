@@ -30,7 +30,7 @@ const ALLOWED_NAMES: &[&str] = &[
 /// Paths explicitly exempted, with a reason. Keep this empty if at all possible.
 const EXCEPTIONS: &[(&str, &str)] = &[(
     "crates/victory-formats/src/bcpack-tables.bin",
-    "the BCPack format's constant tables: nothing decodes without them and they cannot be derived (owner's decision, 2026-11-23; docs/asset-policy.md)",
+    "constant tables of the BCPack format's block stage (index rank tables, BC7 control words, dictionaries): nothing decodes without them and their origin is not recorded in this repository; kept by the owner's decision of 2026-11-23 until it is established. The entropy models are not in the file: they are attributed MIT-licensed source, crates/victory-formats/src/bcpack/models.rs (docs/asset-policy.md)",
 )];
 
 /// Signatures of formats that must never be committed.

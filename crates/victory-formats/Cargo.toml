@@ -9,3 +9,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# A second BCPack implementation for the differential tests: part of
+# bcpack-rs, vendored (crates/bcpack-reference/README.md). Tests only.
+bcpack-reference = { path = "../bcpack-reference" }

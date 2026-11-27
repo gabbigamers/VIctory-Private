@@ -194,7 +194,7 @@ that need no title files; the items marked "owner's machine, title" wait.
 | # | Blocker | Audit | Next step | Where |
 |---|---|---|---|---|
 | 1 | A lane stopped by the loop limit keeps running with a truncated loop's values | A-C4 | **fixed and host-tested** (2026-11-26); to run on Windows: the DXIL validator and the hardware and WARP cases its tests now carry. Counters and a defined end per stage follow (C7) | owner's machine, no title |
-| 2 | BCPack: a codebook difference against the independent decoder, untested block formats, no end-state check | A-C15 | differential tests against `bcpack-rs` on synthetic streams | any host |
+| 2 | BCPack: a codebook difference against the independent decoder, untested block formats, no end-state check | A-C15 | the entropy stage (all six lane layouts) and BC1 blocks are compared with the vendored part of `bcpack-rs` on synthetic streams; two differences in the lane decoder are reproduced and their corrections held as a separate commit until validated against Microsoft's module. The block stages of BC3, BC4, BC5, BC6H and BC7 are compared with nothing from outside | any host |
 | 3 | Lane-dependent compute programs declare the console's wave size; a host with narrower waves drops them, and the trigger is wider than needed | A-C1, A-C3, G2 | refusal reason and tally; narrow the trigger; lane-carrying lowering | any host; counts need the title |
 | 4 | A host with a smaller view heap gets shaders that redirect past it | A-C2, G3 | heap layout as a tested function of the host's size | any host; `gpu-info` for the card's limit |
 | 5 | Fused multiply-add and other float behaviour follow the host | A-C9, A-C10, G4, G5 | probe run on the target card; exact lowering where it differs | owner's machine, no title; then any host |
@@ -204,7 +204,7 @@ that need no title files; the items marked "owner's machine, title" wait.
 | 9 | No commit check at start; the title's own 30 s rule ends a stalled run | A-S1, A-S2 | start-up check with a clear message | any host |
 | 10 | Pipeline library held and rewritten whole | A-S3, G8 | measure, then map the file | owner's machine; then any host |
 | 11 | Where memory and a frame's time go | A-M1 to A-M4, A-P1 to A-P8 | M0, P0, then M1 and P1 | owner's machine, title |
-| 12 | The BCPack tables' origin; notices; identifiers in source | A-B6, A-B7, A-B8 | owner's decision; the derivable section and a notices file can be done now | any host |
+| 12 | The BCPack tables' origin; notices; identifiers in source | A-B6, A-B7, A-B8 | the derivable section now comes from attributed source and `THIRD_PARTY_NOTICES.md` exists; still the owner's: where the remaining 75,678 bytes of tables came from, and identifiers in source | owner |
 
 ## Measuring
 
@@ -300,9 +300,11 @@ Only what cannot be done from a cloud session.
    probes have no recorded full run on an NVIDIA card.
 6. The design decision records (0001, 0003, 0005, 0007) and the named
    measurement runs the code cites, if they exist outside the repository.
-7. A decision on `bcpack-tables.bin`: where its tables came from, and
-   whether the section that can be generated from MIT-licensed tables
-   should be (audit, A-B6).
+7. Where the tables left in `bcpack-tables.bin` came from (index rank
+   tables, BC7 control words, dictionaries; audit, A-B6). The entropy
+   models are no longer in the file: they come from attributed
+   MIT-licensed source. The file's history does not say: it arrives whole
+   in the decoder's first commit with no source named.
 
 ## Session log
 
@@ -439,4 +441,50 @@ Only what cannot be done from a cloud session.
   - **A stop is a defect.** A loop-limit stop that was not expected is a
     correctness defect to be reported and investigated, never counted as
     the shader having run (C7).
+
+### 2026-11-27
+
+* BCPack, in the tree (reviewed three times: the change, its finalising,
+  and the corrections to each):
+  * The entropy models are attributed source,
+    `crates/victory-formats/src/bcpack/models.rs`: the frequency table of
+    Microsoft's `mdu_minirans.v` (MIT), taken through `bcpack-rs`, with
+    both notices. They are no longer the first 2,304 bytes of
+    `bcpack-tables.bin`. The file's other 75,678 bytes are byte for byte
+    what they were and the decoder reads them in one place
+    (`Constants::shipped`). The asset policy's exception and the policy
+    check now say which part has a recorded origin and which has not.
+    `THIRD_PARTY_NOTICES.md` is new.
+  * Part of `bcpack-rs` is vendored as `crates/bcpack-reference`, a
+    dev-dependency of `victory-formats` and of nothing else: its entropy
+    layer, model tables, format helpers, synthetic encoder and BC1
+    rebuild, with no data file. Its BC7 and BC3/4/5 rebuild files are not
+    taken: they share code with VIctory's decoder, which by the history
+    had it first ([bcpack-rs-evaluation.md](bcpack-rs-evaluation.md)).
+  * Differential tests on synthetic streams
+    (`crates/victory-formats/src/bcpack/differential.rs`, tier 1): the
+    entropy stage of all six lane layouts, and the block stage of BC1.
+    Agreement there is with another project's reading of the format, not
+    proof of either.
+  * The runtime lane decoder is unchanged by this commit: shown by text
+    (its region differs from the previous commit in a type's name) and by
+    execution (old and new builds over the same streams: results, error
+    text, buffers and every byte request equal, twice, by two people's
+    separate harnesses).
+* BCPack, held back: two corrections to `Lane::step` (a per-lane symbol
+  count, so a lane that has delivered its symbols takes no more input; and
+  the byte kept when a fragment without the reset bit ends on a read).
+  The owner's decision of 2026-11-26 is to adopt them if validation shows
+  they handle valid synthetic streams correctly, as a commit of their own
+  that can be reverted. Until that commit: nine tests that need them are
+  ignored with a reason that points here, and two tests named
+  `known_difference_...` hold what the decoder and the vendored port each
+  do today with one small stream per difference. What a reviewer measured
+  for that decision: on streams the port accepts, the corrected decoder
+  never refuses or changes one the present decoder accepts, except where
+  the present decoder's symbols already differ from the port's; on streams
+  in the present decoder's own byte order that the port refuses, it
+  decodes other records for 2,320 and refuses 44. Which byte order real
+  streams have is the unpublished part (the feeder), so that cannot be
+  settled here.
 

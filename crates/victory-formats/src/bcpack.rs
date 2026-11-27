@@ -9,10 +9,20 @@
 //! back references (to one of the last 256 blocks, or to a per-format
 //! dictionary that stands in for blocks -1 to -255) and the residuals of the
 //! endpoints and indices against them. The models, the index rank tables,
-//! the BC7 control codes and the dictionaries are constants of the format,
-//! kept in `bcpack-tables.bin` beside this file ([`Tables::builtin`]).
+//! the BC7 control codes and the dictionaries are constants of the format
+//! ([`Tables::builtin`]). The models are Microsoft's, from attributed source
+//! (`bcpack/models.rs`). The rest is `bcpack-tables.bin` beside this file,
+//! whose origin is not recorded; the decoder reads it only through
+//! [`Constants`].
 
 use std::fmt;
+
+// The table in it is another project's text and stays as it is there.
+#[rustfmt::skip]
+mod models;
+
+#[cfg(test)]
+mod differential;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error(pub &'static str);
@@ -34,15 +44,22 @@ const LOW: u32 = 1 << 24;
 /// Input bytes per schedule round.
 const ROUND_BYTES: usize = 8;
 
-/// Bytes of the table file (see [`Tables::parse`]).
-pub const TABLES_SIZE: usize = MODELS * BUCKETS * 2
-    + 256
+/// Bytes of the models in a table set: 128 x 9 u16 frequencies.
+pub const MODELS_SIZE: usize = MODELS * BUCKETS * 2;
+
+/// Bytes of the constants in a table set, which is the size of
+/// `bcpack-tables.bin` (see [`Constants::parse`]).
+pub const CONSTANTS_SIZE: usize = 256
     + 64
     + 256
     + 64
     + 64
     + 512 * 2
     + DICTIONARY * (6 + 16 + 8 + 32 + 2 + 16 + 4 + 32 + 25 + 33 + 50 + 66);
+
+/// Bytes of a whole table set, the models and then the constants (see
+/// [`Tables::parse`]).
+pub const TABLES_SIZE: usize = MODELS_SIZE + CONSTANTS_SIZE;
 
 /// Endpoints and indices of BC1, BC3, BC4 and BC5: small unsigned values,
 /// summed per element modulo the element's width.
@@ -77,8 +94,16 @@ struct Bc7Ix {
     ix: [[i16; 16]; 2],
 }
 
-/// The format's constant tables.
+/// The format's constant tables: the entropy stage's models and the block
+/// stage's constants.
 pub struct Tables {
+    models: Models,
+    constants: Constants,
+}
+
+/// The 128 static models of the entropy stage: model `16 * g + q` codes an
+/// alphabet of `g + 1` bits with shape `q`.
+struct Models {
     freq: [[u32; BUCKETS]; MODELS],
     /// Each bucket's first slot; 65536 past the model's last, and one more
     /// 65536 at the end so a bucket always has a next start.
@@ -88,6 +113,14 @@ pub struct Tables {
     bucket: Box<[[u8; 256]; MODELS]>,
     /// ceil(2^32 / freq): exact division for the offsets inside a bucket.
     recip: [[u64; BUCKETS]; MODELS],
+}
+
+/// The block stage's constants: the index rank tables, the BC7 control words
+/// and the per-format dictionaries. This is the one place the decoder depends
+/// on `bcpack-tables.bin` ([`Constants::shipped`]): the origin of that file's
+/// values is not recorded in this repository (docs/asset-policy.md, "The one
+/// exception"), and nothing but this struct reads them.
+struct Constants {
     rank1: [u8; 256],
     rank3a: [u8; 64],
     rank3c: [u8; 256],
@@ -119,20 +152,39 @@ impl Reader<'_> {
 }
 
 impl Tables {
-    /// The tables VIctory ships with.
+    /// The tables VIctory ships with: Microsoft's models and the constants
+    /// of `bcpack-tables.bin`.
     pub fn builtin() -> Result<Tables, Error> {
-        Tables::parse(include_bytes!("bcpack-tables.bin"))
+        Ok(Tables {
+            models: Models::builtin()?,
+            constants: Constants::shipped()?,
+        })
     }
 
-    /// Reads the table file: 128 x 9 u16 model frequencies (per bucket, the
-    /// frequency of each of its symbols), the rank tables (BC1 256 B, BC3
-    /// alpha 64 B and colour 256 B, BC4 64 B, BC5 64 B), 512 u16 BC7 control
-    /// words, then 255 dictionary entries per format in format order: BC1
-    /// 6 + 16 B, BC3 8 + 32 B, BC4 2 + 16 B, BC5 4 + 32 B, BC6H (u8 mode,
-    /// 12 u16, u8 mode, 16 i16), BC7 (u16 control, 24 u16, 2 u8, 32 i16).
-    /// Little-endian, no padding. Every model must tile 65536.
+    /// Reads a whole table set: the models ([`Models::parse`]) and then the
+    /// constants ([`Constants::parse`]), [`TABLES_SIZE`] bytes.
     pub fn parse(bytes: &[u8]) -> Result<Tables, Error> {
         if bytes.len() != TABLES_SIZE {
+            return Err(Error("table file has the wrong size"));
+        }
+        let (models, constants) = bytes.split_at(MODELS_SIZE);
+        Ok(Tables {
+            models: Models::parse(models)?,
+            constants: Constants::parse(constants)?,
+        })
+    }
+}
+
+impl Models {
+    /// Microsoft's models, from `bcpack/models.rs`.
+    fn builtin() -> Result<Models, Error> {
+        Models::parse(&model_section())
+    }
+
+    /// Reads 128 x 9 u16 model frequencies (per bucket, the frequency of
+    /// each of its symbols), little-endian. Every model must tile 65536.
+    fn parse(bytes: &[u8]) -> Result<Models, Error> {
+        if bytes.len() != MODELS_SIZE {
             return Err(Error("table file has the wrong size"));
         }
         let mut r = Reader(bytes);
@@ -164,6 +216,45 @@ impl Tables {
                 *b = start[m][1..].iter().filter(|&&s| s <= first).count() as u8;
             }
         }
+        Ok(Models {
+            freq,
+            start,
+            bucket,
+            recip,
+        })
+    }
+}
+
+/// The models of `bcpack/models.rs` in the layout [`Models::parse`] reads:
+/// model `16 * eab + q` is `FREQ_TABLE[eab][q]`, buckets 0 to 8. The source
+/// table also holds a ninth alphabet size and a tenth bucket, for 9-bit
+/// symbols; no lane of a BCPack stream is that wide.
+fn model_section() -> [u8; MODELS_SIZE] {
+    let mut section = [0; MODELS_SIZE];
+    let models = models::FREQ_TABLE.iter().take(MODELS / 16).flatten();
+    let frequencies = models.flat_map(|model| &model[..BUCKETS]);
+    for (bytes, f) in section.as_chunks_mut().0.iter_mut().zip(frequencies) {
+        *bytes = f.to_le_bytes();
+    }
+    section
+}
+
+impl Constants {
+    /// The constants VIctory ships with, `bcpack-tables.bin`.
+    fn shipped() -> Result<Constants, Error> {
+        Constants::parse(include_bytes!("bcpack-tables.bin"))
+    }
+
+    /// Reads the rank tables (BC1 256 B, BC3 alpha 64 B and colour 256 B,
+    /// BC4 64 B, BC5 64 B), 512 u16 BC7 control words, then 255 dictionary
+    /// entries per format in format order: BC1 6 + 16 B, BC3 8 + 32 B, BC4
+    /// 2 + 16 B, BC5 4 + 32 B, BC6H (u8 mode, 12 u16, u8 mode, 16 i16), BC7
+    /// (u16 control, 24 u16, 2 u8, 32 i16). Little-endian, no padding.
+    fn parse(bytes: &[u8]) -> Result<Constants, Error> {
+        if bytes.len() != CONSTANTS_SIZE {
+            return Err(Error("table file has the wrong size"));
+        }
+        let mut r = Reader(bytes);
         let rank1 = r.bytes();
         let rank3a = r.bytes();
         let rank3c = r.bytes();
@@ -228,11 +319,7 @@ impl Tables {
                 (ep, ix)
             })
             .collect();
-        Ok(Tables {
-            freq,
-            start,
-            bucket,
-            recip,
+        Ok(Constants {
             rank1,
             rank3a,
             rank3c,
@@ -253,30 +340,54 @@ impl Tables {
 /// the block count. The stream carries no size: bytes after the last one the
 /// lanes need are ignored, a stream that runs out is an error.
 pub fn decode(bc: u8, src: &[u8], dst: &mut [u8], tables: &Tables) -> Result<(), Error> {
-    let block = match bc {
-        1 | 4 => 8,
-        3 | 5 | 6 | 7 => 16,
-        _ => return Err(Error("unsupported BC format")),
+    let Some((widths, per)) = layout(bc) else {
+        return Err(Error("unsupported BC format"));
     };
+    let block = 8 * per;
     if dst.is_empty() || !dst.len().is_multiple_of(block) {
         return Err(Error("destination is not a whole number of blocks"));
     }
     let blocks = dst.len() / block;
-    let (widths, per): (&[u8], usize) = match bc {
+    let stride = widths.len() * per;
+    let mut records = vec![0u8; blocks * stride];
+    let mut next = src.iter().copied();
+    lanes(
+        &tables.models,
+        widths,
+        per,
+        blocks,
+        |_| next.next(),
+        &mut records,
+    )?;
+    rebuild(bc, &records, stride, dst, block, &tables.constants)
+}
+
+/// A format's lanes: each lane's symbol bits - 1 at the full alphabet, and
+/// the symbols a lane holds per block (one per 8 unpacked bytes).
+fn layout(bc: u8) -> Option<(&'static [u8], usize)> {
+    Some(match bc {
         1 => (&[7, 7, 4, 5, 4, 4, 5, 4, 7, 7, 7, 7], 1),
         3 => (&[3, 3, 7, 5, 5, 5, 5, 4, 5, 4, 7, 7], 2),
         4 => (&[7, 7, 7, 7, 5, 5, 5, 5, 5, 5, 5, 5], 1),
         5 => (&[3, 3, 7, 7, 5, 5, 5, 5, 5, 5, 5, 5], 2),
         6 => (&[3, 3, 7, 7, 7, 4, 4, 4, 5, 5, 5, 7, 7, 7, 7, 4], 2),
-        _ => (&[3, 3, 7, 7, 7, 7, 7, 6, 6, 4, 5, 7, 7, 7, 7, 4], 2),
-    };
-    let stride = widths.len() * per;
-    let mut records = vec![0u8; blocks * stride];
-    let mut next = src.iter().copied();
-    lanes(tables, widths, per, blocks, |_| next.next(), &mut records)?;
+        7 => (&[3, 3, 7, 7, 7, 7, 7, 6, 6, 4, 5, 7, 7, 7, 7, 4], 2),
+        _ => return None,
+    })
+}
+
+/// The block stage: one record of `stride` symbols per block of `block`
+/// bytes, as [`lanes`] leaves them.
+fn rebuild(
+    bc: u8,
+    records: &[u8],
+    stride: usize,
+    dst: &mut [u8],
+    block: usize,
+    t: &Constants,
+) -> Result<(), Error> {
     let records = records.chunks_exact(stride);
     let out = dst.chunks_exact_mut(block);
-    let t = tables;
     match bc {
         1 => plain(records, out, &t.bc1, &BC1, |s| bc1_residual(t, s), bc1_pack),
         3 => plain(records, out, &t.bc3, &BC3, |s| bc3_residual(t, s), bc3_pack),
@@ -309,7 +420,7 @@ struct Lane {
 impl Lane {
     /// One step: take the latched byte (header, length or payload) and
     /// decode at most one symbol.
-    fn step(&mut self, t: &Tables) -> Result<(), Error> {
+    fn step(&mut self, t: &Models) -> Result<(), Error> {
         if self.phase != 3 {
             let Some(b) = self.latch.take() else {
                 return Ok(());
@@ -387,7 +498,7 @@ impl Lane {
 /// below it. The window table gives the bucket of the window's first slot;
 /// later buckets that start inside the window are stepped over.
 #[inline]
-fn bucket_of(t: &Tables, model: u8, slot: u32) -> usize {
+fn bucket_of(t: &Models, model: u8, slot: u32) -> usize {
     let start = &t.start[usize::from(model)];
     let mut b = usize::from(t.bucket[usize::from(model)][(slot >> 8) as usize]);
     while start[b + 1] <= slot {
@@ -404,7 +515,7 @@ fn bucket_of(t: &Tables, model: u8, slot: u32) -> usize {
 // on one core); if texture streaming needs more, run the schedule only to
 // split the input per lane and decode the lanes apart.
 fn lanes(
-    t: &Tables,
+    t: &Models,
     widths: &[u8],
     per: usize,
     blocks: usize,
@@ -570,7 +681,7 @@ fn pairs(rank: &[u8; 64], s: &[u8], ix: &mut [u8]) {
     }
 }
 
-fn bc1_residual(t: &Tables, s: &[u8]) -> Plain {
+fn bc1_residual(t: &Constants, s: &[u8]) -> Plain {
     let mut v = Plain::default();
     for (k, bits) in [5, 6, 5, 5, 6, 5].into_iter().enumerate() {
         v.ep[k] = zz(s[2 + k], bits);
@@ -579,7 +690,7 @@ fn bc1_residual(t: &Tables, s: &[u8]) -> Plain {
     v
 }
 
-fn bc3_residual(t: &Tables, s: &[u8]) -> Plain {
+fn bc3_residual(t: &Constants, s: &[u8]) -> Plain {
     // Colour lanes carry each channel's two endpoints together.
     let mut v = Plain {
         ep: [
@@ -599,14 +710,14 @@ fn bc3_residual(t: &Tables, s: &[u8]) -> Plain {
     v
 }
 
-fn bc4_residual(t: &Tables, s: &[u8]) -> Plain {
+fn bc4_residual(t: &Constants, s: &[u8]) -> Plain {
     let mut v = Plain::default();
     v.ep[..2].copy_from_slice(&[zz(s[2], 8), zz(s[3], 8)]);
     pairs(&t.rank4, &s[4..12], &mut v.ix[..16]);
     v
 }
 
-fn bc5_residual(t: &Tables, s: &[u8]) -> Plain {
+fn bc5_residual(t: &Constants, s: &[u8]) -> Plain {
     let mut v = Plain::default();
     for k in 0..4 {
         v.ep[k] = zz(s[4 + k], 8);
@@ -757,7 +868,7 @@ fn bc7_precision(ctrl: u16) -> [u8; 4] {
 fn bc7<'a>(
     records: impl Iterator<Item = &'a [u8]>,
     out: impl Iterator<Item = &'a mut [u8]>,
-    t: &Tables,
+    t: &Constants,
 ) -> Result<(), Error> {
     let mut history = vec![(Bc7Ep::default(), Bc7Ix::default()); HISTORY];
     let zero = (Bc7Ep::default(), Bc7Ix::default());
@@ -1167,6 +1278,40 @@ mod tests {
 
     use super::*;
 
+    /// The models built from `bcpack/models.rs` have the layout the first
+    /// 2,304 bytes of the table file had: 128 models of 9 little-endian u16,
+    /// model `16 * (bits - 1) + shape`, per bucket the frequency of each of
+    /// its symbols and zero for the buckets the alphabet lacks.
+    #[test]
+    fn the_model_section_is_128_models_of_9_frequencies() {
+        let section = model_section();
+        assert_eq!(
+            (section.len(), CONSTANTS_SIZE, TABLES_SIZE),
+            (2304, 75_678, 77_982)
+        );
+        for (m, entry) in section.as_chunks::<18>().0.iter().enumerate() {
+            let source = &models::FREQ_TABLE[m / 16][m % 16];
+            let mut slots = 0;
+            for (b, f) in entry.as_chunks().0.iter().enumerate() {
+                let f = u16::from_le_bytes(*f);
+                assert_eq!(f, source[b], "model {m} bucket {b}");
+                assert_eq!(f != 0, b < m / 16 + 2, "model {m} bucket {b}");
+                slots += u32::from(f) << b.saturating_sub(1);
+            }
+            // Nothing of the model is left out: the source's tenth bucket is
+            // for 9-bit symbols.
+            assert_eq!((slots, source[9]), (1 << 16, 0), "model {m}");
+        }
+        // One bit, shape 0: both symbols at 32768. Shape 1: 38761 and 26775.
+        assert_eq!(section[..4], [0, 0x80, 0, 0x80]);
+        assert_eq!(section[18..22], [0x69, 0x97, 0x97, 0x68]);
+        assert_eq!(section[22..36], [0; 14]);
+        // Shape 0 is uniform at every size: eight bits, 256 a symbol.
+        let uniform: Vec<u8> = [1u8; 9].iter().flat_map(|&f| [0, f]).collect();
+        assert_eq!(section[16 * 7 * 18..][..18], uniform);
+        assert!(Models::parse(&section).is_ok());
+    }
+
     /// Tables we made: uniform models, identity ranks, a BC7 code per mode,
     /// empty dictionaries.
     fn tables() -> Vec<u8> {
@@ -1249,7 +1394,7 @@ mod tests {
             out.push(b);
             Some(b)
         };
-        lanes(t, widths, per, records.len(), fetch, &mut check).unwrap();
+        lanes(&t.models, widths, per, records.len(), fetch, &mut check).unwrap();
         assert_eq!(check, records.concat());
         out
     }
@@ -1293,6 +1438,7 @@ mod tests {
         let mut b1 = vec![0, 1, zigzag(1), zigzag(1)];
         b1.extend((0..8).map(|_| 1 | 1 << 3));
         let src = stream(&t, &BC4_LANES, 1, &[b0, b1]);
+        assert_eq!(src, FILLER_STREAM);
         let mut dst = [0u8; 16];
         decode(4, &src, &mut dst, &t).unwrap();
         let block = |e0: u8, e1: u8, ix: &dyn Fn(usize) -> usize| {
@@ -1317,7 +1463,15 @@ mod tests {
         let src = stream(&t, &BC4_LANES, 1, &records);
         let mut got = vec![0u8; records.len() * 12];
         let mut next = src.iter().copied();
-        lanes(&t, &BC4_LANES, 1, records.len(), |_| next.next(), &mut got).unwrap();
+        lanes(
+            &t.models,
+            &BC4_LANES,
+            1,
+            records.len(),
+            |_| next.next(),
+            &mut got,
+        )
+        .unwrap();
         assert_eq!(got, records.concat());
     }
 
@@ -1355,6 +1509,26 @@ mod tests {
         w.put(1, 1);
         w.put(1, 1);
         assert_eq!(dst, w.v.to_le_bytes());
+    }
+
+    /// A BC7 control code the table has no word for is refused. The made-up
+    /// table defines code 0 alone; a record's code is the low five bits of
+    /// lane 15's first symbol and the low four of its second.
+    #[test]
+    fn an_unused_bc7_control_code_is_refused() {
+        let t = Tables::parse(&tables()).unwrap();
+        for code in [1usize, 31, 32, 511] {
+            let mut s = [0u8; 32];
+            (s[30], s[31]) = ((code & 31) as u8, (code >> 5) as u8);
+            let mut dst = [0u8; 16];
+            assert_eq!(
+                rebuild(7, &s, 32, &mut dst, 16, &t.constants),
+                Err(Error("unused BC7 control code")),
+                "code {code}"
+            );
+        }
+        let mut dst = [0u8; 16];
+        assert_eq!(rebuild(7, &[0; 32], 32, &mut dst, 16, &t.constants), Ok(()));
     }
 
     #[test]
@@ -1427,11 +1601,11 @@ mod tests {
             Tables::parse(&narrow).unwrap(),
         ] {
             for model in 0..MODELS as u8 {
-                let start = &t.start[usize::from(model)];
+                let start = &t.models.start[usize::from(model)];
                 for slot in 0..1u32 << 16 {
                     let scan = start[1..].iter().filter(|&&s| s <= slot).count();
                     assert_eq!(
-                        bucket_of(&t, model, slot),
+                        bucket_of(&t.models, model, slot),
                         scan,
                         "model {model} slot {slot}"
                     );
@@ -1443,6 +1617,7 @@ mod tests {
     /// One rANS decode as first written: scan for the bucket, divide for the
     /// symbol, rebuild its frequency and start from the symbol.
     fn reference_decode(t: &Tables, model: u8, x: u32) -> (u8, u32) {
+        let t = &t.models;
         let (freq, start) = (&t.freq[usize::from(model)], &t.start[usize::from(model)]);
         let slot = x & 0xffff;
         let b = start[1..BUCKETS].iter().filter(|&&s| s <= slot).count();
@@ -1489,7 +1664,7 @@ mod tests {
                             left: 1,
                             ..Default::default()
                         };
-                        lane.step(&t).unwrap();
+                        lane.step(&t.models).unwrap();
                         let (sym, next) = reference_decode(&t, model, x);
                         assert_eq!(
                             (lane.out, lane.x),
@@ -1545,10 +1720,70 @@ mod tests {
                 let src = stream(&t, widths, per, &records);
                 let mut got = vec![0u8; records.concat().len()];
                 let mut next = src.iter().copied();
-                lanes(&t, widths, per, blocks, |_| next.next(), &mut got).unwrap();
+                lanes(&t.models, widths, per, blocks, |_| next.next(), &mut got).unwrap();
                 assert_eq!(got, records.concat(), "{widths:?} x{per}, {blocks} blocks");
             }
         }
+    }
+
+    /// The reference decoder (part of bcpack-rs, `bcpack/differential.rs`)
+    /// reads the same symbols out of what this module's writer writes, and
+    /// every byte of it: shape 0 of Microsoft's models is the uniform model
+    /// the writer codes with, and a lane's one fragment ends at 2^24. Not
+    /// today: the writer ends every lane with a filler fragment (`stream`),
+    /// which the reference does not take.
+    #[test]
+    #[ignore = "needs the lane-decoder changes that await the owner's decision (docs/progress.md)"]
+    fn the_reference_decodes_what_the_test_writer_writes() {
+        let t = Tables::parse(&tables()).unwrap();
+        for bc in [1, 3, 4, 5, 6, 7] {
+            let (widths, per) = layout(bc).unwrap();
+            for blocks in [1, 2, 17, 300, 1000] {
+                let records = random_records(widths, per, blocks, false);
+                let src = stream(&t, widths, per, &records);
+                let reference =
+                    bcpack_reference::rans::decode_slice(&src, widths, blocks * per).unwrap();
+                assert_eq!(reference.consumed, src.len(), "BC{bc}, {blocks} blocks");
+                for (j, lane) in reference.symbols.chunks_exact(blocks * per).enumerate() {
+                    for (i, &symbol) in lane.iter().enumerate() {
+                        let record = &records[i / per];
+                        assert_eq!(
+                            symbol,
+                            u16::from(record[j * per + i % per]),
+                            "BC{bc} lane {j}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The two-block BC4 stream the writer writes for the records of
+    /// `bc4_blocks_with_and_without_references`: each lane ends with a filler
+    /// fragment (header 0, two zero bytes) that parks it. Other crates' tests
+    /// hold this one as a constant.
+    #[rustfmt::skip]
+    const FILLER_STREAM: [u8; 88] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 4, 4, 4, 4, 1, 1, 1, 1, 0x10, 0x10, 0x10, 0x10,
+        2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0x14, 5, 0x20, 0x68, 0xb0, 0xf8, 3, 3, 2, 2,
+        0x24, 0x24, 0x24, 0x24, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4,
+        0x10, 0x10, 0x10, 0x10, 0, 0, 0, 0, 0x20, 0x68, 0xb0, 0xf8, 0x24, 0x24, 0x24, 0x24,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+
+    /// `FILLER_STREAM` decodes to the blocks of
+    /// `bc4_blocks_with_and_without_references`.
+    #[test]
+    fn the_filler_stream_decodes() {
+        let t = Tables::parse(&tables()).unwrap();
+        let mut dst = [0u8; 16];
+        decode(4, &FILLER_STREAM, &mut dst, &t).unwrap();
+        let block = |e0: u8, e1: u8, add: usize| {
+            let bits = (0..16).fold(0u64, |a, p| a | BC4_CODE[(p + add) & 7] << (16 + 3 * p));
+            (u64::from(e0) | u64::from(e1) << 8 | bits).to_le_bytes()
+        };
+        assert_eq!(dst[..8], block(138, 125, 0));
+        assert_eq!(dst[8..], block(139, 126, 1));
     }
 
     /// Decode throughput on synthetic streams (no game data):
@@ -1583,15 +1818,64 @@ mod tests {
         }
     }
 
+    /// The tables of a file given to `reference_chunks`: a whole table set
+    /// ([`TABLES_SIZE`] bytes, which `bcpack-tables.bin` was while it held
+    /// the models), or the constants alone ([`CONSTANTS_SIZE`] bytes, which
+    /// it is now), read with the models of `bcpack/models.rs`.
+    fn table_file(bytes: &[u8]) -> Result<Tables, Error> {
+        if bytes.len() != CONSTANTS_SIZE {
+            return Tables::parse(bytes);
+        }
+        Ok(Tables {
+            models: Models::builtin()?,
+            constants: Constants::parse(bytes)?,
+        })
+    }
+
+    /// A table file of either size is read: the whole set as it is, the
+    /// constants alone with the built-in models. The made-up set's models
+    /// are shape 0 of the built-in ones at every shape, so the stream of
+    /// `the_filler_stream_decodes`, coded with shape 0, decodes to the same
+    /// blocks with both. Any other size is refused.
+    #[test]
+    fn a_table_file_is_a_whole_set_or_the_constants_alone() {
+        let set = tables();
+        let (models, constants) = set.split_at(MODELS_SIZE);
+        assert_eq!((set.len(), constants.len()), (TABLES_SIZE, CONSTANTS_SIZE));
+        let whole = table_file(&set).unwrap();
+        let alone = table_file(constants).unwrap();
+        let builtin = Models::builtin().unwrap();
+        assert!(whole.models.freq != builtin.freq);
+        assert!(alone.models.freq == builtin.freq);
+        for m in (0..MODELS).step_by(16) {
+            assert_eq!(whole.models.freq[m], builtin.freq[m], "model {m}");
+        }
+        let decoded = |t: &Tables| {
+            let mut dst = [0u8; 16];
+            decode(4, &FILLER_STREAM, &mut dst, t).unwrap();
+            dst
+        };
+        assert_eq!(decoded(&whole), decoded(&alone));
+        assert!(decoded(&alone) != [0; 16]);
+        for wrong in [&set[1..], models, &constants[1..], &[][..]] {
+            assert_eq!(
+                table_file(wrong).err(),
+                Some(Error("table file has the wrong size"))
+            );
+        }
+    }
+
     /// Compares with reference outputs made outside the repository:
-    /// `VICTORY_BCPACK_TABLES` (the table file) and `VICTORY_BCPACK_CASES`, a
-    /// directory of `<name>.bc<n>` packed chunks with `<name>.out` beside them.
+    /// `VICTORY_BCPACK_TABLES`, a table file (a whole table set of
+    /// [`TABLES_SIZE`] bytes, or the constants alone as `bcpack-tables.bin`
+    /// holds them, see `table_file`), and `VICTORY_BCPACK_CASES`, a directory
+    /// of `<name>.bc<n>` packed chunks with `<name>.out` beside them.
     #[test]
     #[ignore = "needs the format tables and reference chunks"]
     fn reference_chunks() {
         let tables = std::env::var_os("VICTORY_BCPACK_TABLES").expect("VICTORY_BCPACK_TABLES");
         let cases = std::env::var_os("VICTORY_BCPACK_CASES").expect("VICTORY_BCPACK_CASES");
-        let t = Tables::parse(&std::fs::read(tables).unwrap()).unwrap();
+        let t = table_file(&std::fs::read(tables).unwrap()).unwrap();
         let mut n = 0;
         for entry in std::fs::read_dir(cases).unwrap() {
             let path = entry.unwrap().path();

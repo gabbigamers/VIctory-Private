@@ -25,14 +25,24 @@ In any form (files, string literals, fixtures, snapshots, docs):
 
 ## The one exception
 
-`crates/victory-formats/src/bcpack-tables.bin` (about 78 KB): the constant
-tables of the BCPack format (entropy models, index rank tables, control
-codes, per-format dictionaries). A BCPack stream cannot be decoded without
-exactly these tables and they cannot be derived, so they ship with VIctory
-by the project owner's decision (2026-11-23), entered as an exception in
-`xtask/src/policy.rs`. They are part of the format, not our work, and the
-repository's licence does not cover them. Nothing else of this kind is
-accepted.
+`crates/victory-formats/src/bcpack-tables.bin` (75,678 bytes): constant
+tables of the BCPack format's block stage, which are the index rank tables,
+the BC7 control words and the per-format dictionaries. A BCPack stream
+cannot be decoded without them. Their origin is not recorded in this
+repository. They ship with VIctory by the project owner's decision
+(2026-11-23), entered as an exception in `xtask/src/policy.rs`, and stay
+under that exception until their origin is established. They are not our
+work and the repository's licence does not cover them. The decoder reads
+them in one place (`Constants` in `crates/victory-formats/src/bcpack.rs`).
+
+The format's entropy models are not part of the exception. Until 2026-11-26
+they were the first 2,304 bytes of the file. They are now source,
+`crates/victory-formats/src/bcpack/models.rs`: the frequency table of
+Microsoft's `mdu_minirans.v` (silicon-rans, MIT licence), taken from
+bcpack-rs (MIT OR Apache-2.0), with both notices in that file and in
+`THIRD_PARTY_NOTICES.md`. The remaining bytes of the file are unchanged.
+
+Nothing else of this kind is accepted.
 
 ## Access controls
 

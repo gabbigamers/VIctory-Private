@@ -1,0 +1,15 @@
+# Test-only reference for victory-formats' BCPack decoder: part of bcpack-rs,
+# vendored (README.md). A dev-dependency of victory-formats and of nothing
+# else; it is not part of any VIctory build.
+[package]
+name = "bcpack-reference"
+description = "Part of bcpack-rs (Ahmet Dedeler), vendored as a second implementation for differential tests of the BCPack decoder: the entropy stage and the BC1 block stage. Not built into VIctory."
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Ahmet-Dedeler/bcpack-rs"
+publish = false
+
+[lib]
+name = "bcpack_reference"
+path = "src/lib.rs"
