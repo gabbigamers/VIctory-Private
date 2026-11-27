@@ -1328,3 +1328,67 @@ Only what cannot be done from a cloud session.
     stopped`; on a card, that the driver compiles the exit block and
     the vertex and mesh end blocks, drops a discarded lane's view
     writes and removes a primitive whose position is NaN.
+* Stopped lanes, at the push: the engineers' work was interrupted twice
+  by a usage limit (the integrator finished; the independent check of
+  the integration did not run). The coordinator ran the four checks on
+  the integrated commit in a fresh build directory of its own (910 host
+  tests; the validator: 830 containers, the two known rejections; the
+  Windows type-check; the asset policy) and compared the containers of
+  the shader crate's host tests with the pushed head's by hash: 547 of
+  548 byte-identical, the one gone from the test this change replaces,
+  283 new ones all from the stopped-lane tests. The owner had edited
+  `README.md` on the branch meanwhile; the commit touches no line of it
+  and was placed on top.
+* How work is read from here on, at the owner's word of 2026-11-27
+  (least calendar time, the most progress for the usage there is, no
+  loss of correctness or of independent review): `CLAUDE.md` at the root
+  (the standing rules, the checks, how work is organised),
+  `docs/INDEX.md` (which section answers which question; which crate
+  holds what) and `docs/STATUS.md` (one page: what is on the branch and
+  in what state, what is in work, the order of what is next, what is
+  decided, what waits on the owner). An engineer reads those three and
+  then only the sections the index names; this record is searched, not
+  read whole. Concurrency follows independence: independent changes run
+  side by side, each in a worktree and a build directory of its own;
+  integration is one change at a time. The review of every change by
+  someone who did not write it stays. The separate check of a whole
+  chain after a clean rebase is replaced by the coordinator's own
+  mechanical checks (parent, the four checks, the hash comparison), as
+  done for the stopped lanes above.
+* The owner's direction of 2026-11-27 for after the work now active:
+  three cooperating subsystems that extend the semantic compatibility
+  architecture and do not replace it.
+  * Dependency-aware GPU scheduling: the real resource dependencies
+    between the guest's graphics, compute, copy and ray-tracing work;
+    finer synchronisation, safe asynchronous execution and overlap of
+    independent work, with guest-visible order, coherency and rendering
+    kept and anything unknown or ambiguous left conservative; native
+    structure builds and traversal part of the model. Measured: the
+    processor's submission overhead, the card's idle time, queue waits,
+    barrier costs, frame time.
+  * Predictive world streaming: the title's own streaming requests
+    observed and future demand anticipated; advisory only, never in
+    place of an authoritative request; speculative resources
+    cancellable, bounded and reclaimed before required ones; original
+    assets, resolution, detail and streaming semantics kept. Measured:
+    prediction accuracy, cache hits, wasted bandwidth, streaming
+    latency, memory overhead, frame-time stability.
+  * Intelligent unified memory management: the ownership, accounting
+    and paging that exist extended into placement and residency, with
+    authoritative content generations, access patterns, dirty ranges,
+    aliases, lifetimes and synchronisation needs; placement between
+    system memory, video memory, processor-visible video memory and
+    recoverable caches on disk; only demonstrably redundant allocations
+    and transfers removed; separate memories never assumed to behave
+    like the console's one; authoritative data never discarded and
+    nothing still referenced by GPU work invalidated; the paging's
+    known limit resolved (a missed page in work that is not repeated).
+  One shared understanding of resource identity, ownership, residency,
+  access dependencies, content generations and execution lifetime; the
+  existing implementation investigated before any new abstraction;
+  each experimental behaviour under its own switch with a safe
+  fallback. Order chosen: a read-only investigation of what exists
+  first; then memory management (it carries the correctness fix and
+  the other two rest on its residency and generations); then
+  scheduling (it needs the dependency model and the native path);
+  then streaming (it needs the residency manager to bound it).
