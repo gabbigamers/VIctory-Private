@@ -352,7 +352,8 @@ Only what cannot be done from a cloud session.
   defined termination; any stop is a correctness failure to investigate
   (C7); the regression tests that run full-length loops stay in the default
   test run. `lower.rs` is to be split into modules as a change of its own
-  that alters no behaviour, apart from functional changes.
+  that alters no behaviour, apart from functional changes (done on
+  2026-11-27, below).
 * Memory inventory completed and verified (67 claims: 40 confirmed, 27
   corrected, none refuted): [memory.md](memory.md) now holds the breakdown
   by owner and kind, what each log counter does and does not count, the
@@ -405,9 +406,9 @@ Only what cannot be done from a cloud session.
   GPU. Open for the owner under C7: a stopped pixel returns instead of
   running on as a helper lane, so neighbours' derivatives may be
   undefined; loops that share a header block share one count, so a genuine
-  nest of inner times outer over 2^20 iterations is stopped. `lower.rs` is
-  745 bytes under the asset-policy size limit: its split comes before the
-  next functional change to it.
+  nest of inner times outer over 2^20 iterations is stopped. `lower.rs` was
+  745 bytes under the asset-policy size limit, so its split came before
+  the next functional change to it (2026-11-27, below).
 * Memory counters (M1c) in: each of the fifteen owners of
   `victory_gpu::account` is now added to where its memory is allocated and
   taken from where it is released, mostly by a count held as a field of
@@ -487,4 +488,28 @@ Only what cannot be done from a cloud session.
   decodes other records for 2,320 and refuses 44. Which byte order real
   streams have is the unpublished part (the feeder), so that cannot be
   settled here.
+* `lower.rs` split, as a change of its own that alters no behaviour.
+  The lowering was one file of 523,543 bytes, 745 under the asset policy's
+  limit; it is now `emit/lower.rs` (41 KB: the types, shared helpers and
+  the driver) and fifteen files under `emit/lower/` by what the code does
+  (operands, arithmetic, 16-bit values, lane masks, cross-lane operations,
+  the `ds` family, stage inputs and outputs, scalar instructions, scalar
+  loads, descriptors, memory, buffers, vector instructions, images,
+  control flow), the largest 76 KB. Moved by script as whole items, no
+  body edited. Shown a pure move three ways, by the engineer and again by
+  a reviewer with separate tools: every original line accounted for (the
+  differences are imports, module and `impl` wrappers, 97 items raised
+  from private to `pub(super)` and one comment that said "above");
+  the same 193 tests with the same bodies; byte-identical output for the
+  1,077 lowerings of the host suite and 5,387 more of generated programs.
+  The compiler's intermediate form of every body is also identical, for
+  the host and for the Windows target. `lower.rs` re-imports a dozen names
+  of `emit` only so that moved bodies that reach them through `super`
+  still resolve; tidying that edits bodies and is left for a change that
+  does not claim to be a move. Not run on Windows.
+* Next for the lowering, each as its own reviewed change (the owner's
+  decisions of 2026-11-26): a count per loop with an overall safeguard; a
+  stopped pixel lane kept on as a helper, bounded and without effects; a
+  defined end for the other stages; stops counted and reported by shader
+  and stage.
 
