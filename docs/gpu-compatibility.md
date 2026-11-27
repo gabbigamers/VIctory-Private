@@ -142,7 +142,7 @@ evidence, never on expectation.
 
 | Host | Status | Evidence | Known losses |
 |---|---|---|---|
-| NVIDIA Blackwell, RTX 5070 Ti 16 GB (primary target) | Expected; owner reports the title runs at about 15 fps | owner's report, build and scene not recorded | G2 and G3 expected by analogy with the report below; not asked on this card yet |
+| NVIDIA Blackwell, RTX 5070 Ti 16 GB (primary target) | Expected; owner reports the title runs at about 15 fps; the synthetic ray-tracing probe ran on it (not one of the five words: see [hardware-runs.md](hardware-runs.md)) | owner's report, build and scene not recorded; the probe's short run of 2026-11-27 on driver 32.0.16.1692, which read ray tracing tier 1.2: native and hybrid paths agree with the CPU reference on three synthetic classes under the crate's policy | G2 and G3 expected by analogy with the report below; not asked on this card yet |
 | NVIDIA Blackwell, other | Expected | a test comment names an RTX 5090D for one pipeline check | as above |
 | NVIDIA Ada Lovelace | Expected | a probe recorded in the `xbox-hle-lab` reference for an RTX 4070 Ti SUPER: waves of 32 to 32 lanes, binding tier 3, mesh shaders, ray tracing; a code comment records an out-of-memory abort on an RTX 4050 Laptop while loading the pipeline library | G2 (64-lane waves), G3, G8 |
 | NVIDIA Ampere | Expected | none | unknown |

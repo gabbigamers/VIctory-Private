@@ -1539,3 +1539,38 @@ Only what cannot be done from a cloud session.
     rule is accepted); `cargo test -p victory-gpu rt:: caps::` on
     Windows (the record's file tests ran on Linux only); a run with
     `VICTORY_PERF_LOG` for the new column at 0.
+* The first run on hardware, 2026-11-27, the owner's: `victory rt-probe`,
+  short run under the debug layer, on the RTX 5070 Ti (driver
+  32.0.16.1692; the probe read ray tracing tier 1.2). 105 dispatches,
+  318,112 rays, 21 rows ran and none failed; the native and the hybrid
+  path each judged 11,600 rays over `static-soup`, `dynamic-refit` and
+  `dynamic-rebuild` with no defect, no unwritten record, no refused ray
+  and no differing record in the checking dispatches (5 rays of the
+  refit class ambiguous, on both paths). Recorded, at the owner's word,
+  as successful synthetic execution on hardware under the present
+  validation policy (the crate's comparison): not validation in the
+  title, and not acceptance under the proposed rule of equivalence. The
+  entry with its figures, what it shows and what it does not is
+  `docs/hardware-runs.md`.
+  * The validation layer's two warnings, read against the code: 1424 (a
+    wait for fence value zero, which no submission has: a wait asked for
+    before anything was submitted; no result depends on it) and 1328
+    (buffers the shaders write are created in the unordered-access state,
+    which Direct3D ignores for a buffer). Both are being fixed with the
+    probe's next change.
+  * The working set of 7.2 GB against 0.32 GB of private commit was
+    already there before the first build and is read from the right
+    counters; it is pages that are no private commit of the process, and
+    nothing in the probe maps memory of that size. Its source (device,
+    driver or validation layer) is not known. The probe's next change
+    samples the private and shareable parts at the process's start,
+    after the layer, after the device and after the first pipeline, and
+    breaks the working set down by kind of region.
+  * Seen in the figures, for later: creating a ray-query pipeline took
+    0.38 and 0.47 s of processor time (2.7 s for the first pipeline of
+    the process), under the debug layer. If that holds without the layer
+    it weighs on how many variants of a trace program are made, and when.
+* The selection record, at its push: the coordinator ran the four checks
+  on the integrated commit in a fresh build directory (1,043 host tests;
+  877 containers, none rejected; the Windows type-check; the asset
+  policy) and found all 877 containers byte-identical to the head's.

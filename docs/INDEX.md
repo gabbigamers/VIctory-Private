@@ -16,6 +16,7 @@ a task needs. A section is given as `document § heading`.
 | Known defects and risks found by the audit | `audit-2026-11-26.md` (A-C correctness, A-S stability, A-M memory, A-P performance, A-B build) |
 | Rules for GPU-related code; what a host must provide | `gpu-compatibility.md § Rules`, `§ What the translation needs of a host`, `§ Checklist for a GPU-related change` |
 | Which hardware is expected, reported, tested | `gpu-compatibility.md § Hardware status` |
+| What has actually run on a device, and what each run shows | `hardware-runs.md` |
 | 64-lane programs on 32-lane hosts | `gpu-compatibility.md § The console's wave on any host (G2)` |
 | Rules before touching an allocation; the four quantities | `memory.md § Before an allocation is removed or consolidated`, `§ Four quantities` |
 | Who allocates what, which gauge counts it | `memory.md § What allocates` (rows T, G, V, C, R), `§ Cases` |
