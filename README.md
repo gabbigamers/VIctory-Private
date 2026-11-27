@@ -20,14 +20,15 @@ otherwise. See [docs/architecture.md](docs/architecture.md).
 | The prologue | Not Tested |
 
 ## Architecture:
-
-| Features |
+|-------|-------|
+| Features | Behavior |
 | Native x86-64 Execution | Executes Xbox Series X|S CPU code directly on Windows |
 | Semantic Compatibility Layer | Translates guest operations into functionally equivalent native PC operations |
 | Vendor-Independent Design | Capability-based hardware support, with NVIDIA prioritized for development |
 
 ## Ray Tracing:
-| Features |
+|-------|-------|
+| Features | Behavior |
 | Native DXR Backend (Experimental) | Utilizes dedicated hardware for ray traversal and triangle intersections | 
 | Hybrid Ray Tracing (Experimental) | Combines hardware traversal with guest-compatible intersection calculations |
 | Software Ray Tracing Fallback | Retains translated compute-based traversal for unsupported workloads |
@@ -37,7 +38,8 @@ otherwise. See [docs/architecture.md](docs/architecture.md).
 | Semantic Traversal Recognition (In Development) | Identifies guest ray-tracing workloads for native substitution |
 
 ## Shader Translation:
-| Features |
+|-------|-------|
+| Features | Behavior |
 | RDNA-to-DXIL Translation | Recompiles console GPU instructions into DirectX-compatible shaders |
 | Wave64 Emulation (Experimental) | Enables supported 64-lane workloads on 32-lane GPU architectures |
 | Shader Execution Safeguards | Provides individual loop limits and cumulative execution protection |
@@ -45,7 +47,8 @@ otherwise. See [docs/architecture.md](docs/architecture.md).
 | DXIL Validation | Validates generated shader containers using Microsoft's official validator |
 
 ## Memory Management:
-| Features |
+|-------|-------|
+| Features | Behavior |
 | Memory Ownership Tracking | Tracks resource ownership, lifetime, consumers and allocation dependencies |
 | Memory Budget Management | Adapts resource allocation to available system RAM and VRAM |
 | On-Demand Memory Paging (Experimental) | Creates host-backed memory pages when guest shader accesses require them |
@@ -54,6 +57,8 @@ otherwise. See [docs/architecture.md](docs/architecture.md).
 | Scratch Memory Pooling | Reuses temporary ray-tracing allocations to reduce allocation overhead |
 
 ## Rendering & Streaming:
+|-------|-------|
+| Features | Behavior |
 | BCPack Texture Decompression | Implements corrected texture decoding backed by extensive synthetic validation |
 | Native Direct3D 12 Rendering | Translates console graphics workloads into host GPU commands |
 | Mesh Shader Support | Supports modern geometry rendering pipelines |
@@ -63,6 +68,8 @@ otherwise. See [docs/architecture.md](docs/architecture.md).
 | Xbox Series X|S Profiles | Supports both console rendering configurations |
 
 ## Validation & Diagnostics:
+|-------|-------|
+| Features | Behavior |
 | Independent Ray-Tracing Reference | Provides mathematical CPU reference implementations for intersection correctness |
 | Synthetic Workload Validation | Tests rendering operations independently of game execution |
 | Performance Instrumentation | Records CPU execution, GPU execution, frame pacing and memory consumption |
@@ -70,6 +77,8 @@ otherwise. See [docs/architecture.md](docs/architecture.md).
 | Regression Testing | Protects existing functionality against unintended implementation changes |
 
 ## Development Objectives:
+|-------|-------|
+| Features | Behavior |
 | Full Rendering Fidelity | Preserve original geometry, textures, materials, lighting and shadows |
 | Sustained 30 FPS | Target consistent native rendering without frame generation |
 | 16 GB RAM Compatibility | Reduce physical memory requirements without sacrificing rendering quality |
