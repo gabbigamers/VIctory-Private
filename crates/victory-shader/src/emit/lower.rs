@@ -14,7 +14,7 @@ use super::container::SigElement;
 use super::shader::{Shader, flags};
 use super::{
     HEAP_VIEWS, NULL_BUFFER_VIEW, ROOT_SRV_VIEW, ROOT_UAV_VIEW, ROOT_VIEW_OFFSET, VIEW_MARK_NONE,
-    VIEW_READS, VIEW_WRITE_BITS, bitcode, loop_limit, shader, wave,
+    VIEW_READS, VIEW_WRITE_BITS, bitcode, loop_limit, loop_total_limit, shader, wave,
 };
 #[cfg(all(test, windows))]
 use super::validator;
@@ -97,8 +97,8 @@ pub(crate) struct Lowered {
     /// The function as the module writes it.
     #[cfg(test)]
     pub flow: super::bitcode::Flow,
-    /// Where in [`Lowered::flow`] a lane stopped by [`LOOP_LIMIT`] leaves
-    /// the program, if any block can stop one.
+    /// Where in [`Lowered::flow`] a lane stopped by [`LOOP_LIMIT`] or by
+    /// [`LOOP_TOTAL_LIMIT`] leaves the program, if any block can stop one.
     #[cfg(test)]
     pub limit_stop: Option<usize>,
 }
@@ -125,9 +125,35 @@ enum Stop {
 }
 
 pub(crate) fn lower(parts: &Parts) -> Result<Lowered, ShaderError> {
+    lower_limited(parts, Limits::in_force())
+}
+
+/// What a lane's back edges are counted against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Limits {
+    /// [`LOOP_LIMIT`]: the iterations of one loop, per entry into it.
+    pub each: u32,
+    /// [`LOOP_TOTAL_LIMIT`]: the back edges a lane takes in all.
+    pub total: u32,
+}
+
+impl Limits {
+    /// The limits every translation uses ([`loop_limit`],
+    /// [`loop_total_limit`]).
+    fn in_force() -> Self {
+        Limits {
+            each: loop_limit(),
+            total: loop_total_limit(),
+        }
+    }
+}
+
+/// [`lower`] with the limits given: the tests of the counting run loops
+/// against small ones.
+fn lower_limited(parts: &Parts, limits: Limits) -> Result<Lowered, ShaderError> {
     let mut bad = HashMap::new();
     loop {
-        match Lower::new(parts, &bad).run() {
+        match Lower::new(parts, &bad, limits).run() {
             Ok(l) => return Ok(l),
             Err(Stop::Retry(v, why)) => {
                 if bad.insert(v, why).is_some() {
@@ -244,10 +270,20 @@ struct Lower<'a> {
     /// The program's constant table (the code from the first byte read
     /// through `s_getpc_b64` on): global, first byte, dwords.
     code_table: Option<(V, u32, u32)>,
-    /// Loop headers' iteration counters (see [`LOOP_LIMIT`]): the phi by
-    /// IR block, and its incoming (value, DXIL block) pairs.
-    counters: HashMap<usize, (V, Vec<(V, usize)>)>,
-    /// The block a loop stopped by [`LOOP_LIMIT`] leaves the program from.
+    /// What back edges are counted against.
+    limits: Limits,
+    /// Loop headers' iteration counts (see [`LOOP_LIMIT`]), by IR block.
+    counters: HashMap<usize, limit::Header>,
+    /// The lane's count of all its back edges (see [`LOOP_TOTAL_LIMIT`])
+    /// as each IR block holds it from its start to its end: a phi, or
+    /// nothing where the lane has taken none. Only set for blocks a back
+    /// edge can still follow ([`Lower::count_loops`]).
+    total: Vec<Option<V>>,
+    /// The phis of that count, by IR block, each with its incoming (value,
+    /// DXIL block) pairs.
+    totals: HashMap<usize, limit::Counter>,
+    /// The block a lane stopped by [`LOOP_LIMIT`] or [`LOOP_TOTAL_LIMIT`]
+    /// leaves the program from.
     abort: Option<usize>,
     /// The 16/64-bit round mode (MODE bits 3:2) each block starts with, and
     /// the one in force at the instruction being lowered (see [`round16`]).
@@ -314,26 +350,73 @@ fn round16(p: &crate::ir::Program) -> Vec<Option<u8>> {
     }
 }
 
-/// Iterations after which a loop is left (per entry into it), unless
-/// [`super::loop_limit`] says otherwise. The console runs a loop as long as
-/// its data says; data the host has not mirrored yet (a null view reads
-/// zeros) can make that four billion iterations, which hangs the host GPU
-/// until the driver resets it. A lane the limit stops (it would have gone
-/// round its loop once more) leaves the program as killed: it goes to the
-/// abort block, where a pixel discards, and runs nothing that follows the
-/// loop. A latch with an unconditional back edge branches there itself; one
-/// with a conditional back edge leaves the loop first, and the block after
-/// it sends the stopped lanes there ([`Lower::limit_exit`]). A lane whose
-/// own condition ends the loop, also on the last iteration the limit
-/// allows, goes on as it would without a limit.
+/// Iterations after which a loop is left, per lane and per entry into the
+/// loop, unless [`super::loop_limit`] says otherwise. The console runs a
+/// loop as long as its data says; data the host has not mirrored yet (a
+/// null view reads zeros) can make that four billion iterations, which
+/// hangs the host GPU until the driver resets it. A lane the limit stops
+/// (it would have gone round its loop once more) leaves the program as
+/// killed: it goes to the abort block, where a pixel discards, and runs
+/// nothing that follows the loop. A latch with an unconditional back edge
+/// branches there itself; one with a conditional back edge leaves the loop
+/// first, and the block after it sends the stopped lanes there
+/// ([`Lower::limit_exit`]). A lane whose own condition ends the loop, also
+/// on the last iteration the limit allows, goes on as it would without a
+/// limit.
 ///
-/// The count is the header block's: every back edge to it counts, and only
-/// an entry from outside starts it at 0. An outer loop whose body begins
-/// with its inner loop shares that loop's header, so there the limit is on
-/// the inner iterations of all outer ones together.
+/// Each loop has its own count ([`Lower::header_loops`] says which back
+/// edges make one loop). It starts at 0 wherever the lane enters the loop
+/// from outside it, goes up by one on each of the loop's back edges, and
+/// is not moved by the back edges of the loops inside it. A loop in
+/// another therefore starts again at 0 each time the outer loop comes
+/// round to it, also where the two begin at the same block (an outer loop
+/// whose body begins with its inner loop), and the outer loop's count
+/// stays where it is while the inner loop goes round. What bounds a lane
+/// in a nest is [`LOOP_TOTAL_LIMIT`].
+///
+/// The loops are read from the control-flow graph, and there a
+/// conditional `continue` that falls through towards its loop's end is an
+/// inner loop that begins at the same block (as is a conditional
+/// `continue` of an outer loop taken from inside an inner one). It has a
+/// count of its own, which starts again each time the loop's end is
+/// taken, so a loop written that way is not left after this many
+/// iterations: what bounds it is [`LOOP_TOTAL_LIMIT`], four times as many.
 // shortcut: a genuine loop of more iterations than this is cut short too
 // (its lanes are killed).
 pub(super) const LOOP_LIMIT: u32 = 1 << 20;
+
+/// Back edges after which a lane is stopped, over all its loops and every
+/// entry into each, unless [`super::loop_total_limit`] says otherwise: a
+/// lane takes a back edge only while the back edges it has taken, that one
+/// included, are fewer than this. The counts per loop alone would let a
+/// nest run for the product of its loops' limits (2^40 iterations two
+/// deep); this is what bounds a lane's work in all. A lane it stops ends
+/// exactly as one [`LOOP_LIMIT`] stops: the same branch of the same latch
+/// tests both, and the stopped lane goes to the same block.
+///
+/// The value is four times [`LOOP_LIMIT`], between two needs that no value
+/// meets together. It has to be far enough above [`LOOP_LIMIT`] that a
+/// genuine nest is not stopped: a nest whose loops each stay under their
+/// own limit runs to its end while the lane goes round fewer than 2^22
+/// times in all, which 2,048 by 2,048 iterations two deep just do. And it
+/// is the most that any program can make one lane run, so it has to be
+/// low: lanes running to [`LOOP_LIMIT`] made draws of 0.3 to 1.3 s where
+/// that was seen ([`Lower::helper_reads_own`]), every doubling of this
+/// value doubles what a program reaching it in as many lanes costs, and
+/// Windows by default resets a device that does not answer for two
+/// seconds. Four times keeps a nest's worst case a small multiple of a
+/// single loop's. Either stop is a defect to look into
+/// (`docs/progress.md`, C7), and unlike a device reset it leaves the run
+/// alive to say which program it was.
+///
+/// It stops lanes that ran to their end while only the loops were
+/// counted: any lane that goes round 2^22 times or more in all with each
+/// of its loops under [`LOOP_LIMIT`], as in a nest of 2,048 by 2,049
+/// iterations whose loops begin at blocks of their own, or in five long
+/// loops one after another (four cannot reach it).
+// shortcut: a genuine nest that goes round more often than this in one
+// lane is cut short too (its lanes are killed).
+pub(super) const LOOP_TOTAL_LIMIT: u32 = 4 * LOOP_LIMIT;
 
 /// Lane masks read as numbers (`s_bcnt1`, `s_ff1`, `v_mbcnt`, scalar
 /// compares, bit tests) are ballots of the lanes' booleans, taken where the
@@ -459,7 +542,7 @@ fn unsupported(offset: usize, what: Why) -> Stop {
 }
 
 impl<'a> Lower<'a> {
-    fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>) -> Self {
+    fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>, limits: Limits) -> Self {
         let p = x.p;
         let mut phi_at = HashMap::new();
         for (b, block) in p.blocks.iter().enumerate() {
@@ -639,7 +722,10 @@ impl<'a> Lower<'a> {
             sections: HashMap::new(),
             section_out: HashSet::new(),
             code_table: None,
+            limits,
             counters: HashMap::new(),
+            total: vec![None; p.blocks.len()],
+            totals: HashMap::new(),
             abort: None,
             round16: round16(p),
             mode16: Some(0),
@@ -659,18 +745,9 @@ impl<'a> Lower<'a> {
                 self.s.m.new_block()
             });
         }
-        // Loop headers count iterations (`LOOP_LIMIT`).
-        for &b in &order {
-            let header = p.blocks[b]
-                .preds
-                .iter()
-                .any(|&q| self.block[q].is_some() && self.rpo[b] <= self.rpo[q]);
-            if header {
-                let blk = self.block[b].expect("reachable");
-                let phi = self.s.m.phi(blk, self.s.t.i32);
-                self.counters.insert(b, (phi, Vec::new()));
-            }
-        }
+        // Loop headers count iterations (`LOOP_LIMIT`), and the lane all
+        // its back edges (`LOOP_TOTAL_LIMIT`).
+        self.count_loops(&order);
         self.cur = self.s.entry;
         self.find_sections();
         self.inputs()?;
@@ -856,7 +933,7 @@ impl<'a> Lower<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lowered, Parts, lower, packed_half};
+    use super::{Limits, Lowered, Parts, lower, lower_limited, packed_half};
     use crate::native::{
         ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
     };
@@ -915,6 +992,17 @@ mod tests {
         used: Vec<UsedResource>,
         wave64: bool,
     ) -> Result<Lowered, crate::ShaderError> {
+        lower_wave_limited(words, layout, used, wave64, None)
+    }
+
+    /// [`lower_wave`] with the loop limits `limits`, if any.
+    fn lower_wave_limited(
+        words: &[u32],
+        layout: Vec<RootParam>,
+        used: Vec<UsedResource>,
+        wave64: bool,
+        limits: Option<Limits>,
+    ) -> Result<Lowered, crate::ShaderError> {
         let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let sgprs: u32 = layout.iter().map(|p| p.sgprs).sum();
         let native = NativeProgram {
@@ -934,7 +1022,7 @@ mod tests {
         let st = structure::structure(&p).unwrap();
         let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
         let io = io::raise(&p, &native).unwrap();
-        let lowered = lower(&Parts {
+        let parts = Parts {
             native: &native,
             p: &p,
             st: &st,
@@ -945,7 +1033,11 @@ mod tests {
             prims: vec![],
             mesh_stride: 0,
             view_marks: false,
-        })?;
+        };
+        let lowered = match limits {
+            Some(limits) => lower_limited(&parts, limits),
+            None => lower(&parts),
+        }?;
         // Every program these tests lower is a well-formed function.
         lowered.flow.check().unwrap();
         Ok(lowered)
@@ -967,6 +1059,14 @@ mod tests {
     /// (s0..s3) into v1..v4, runs `body`, and stores v0 to a raw buffer from a
     /// descriptor table, so the vector instructions in `body` have an effect.
     pub(super) fn lower_valu(body: &[u32]) -> Result<Lowered, crate::ShaderError> {
+        lower_valu_limited(body, None)
+    }
+
+    /// [`lower_valu`] with the loop limits `limits`, if any.
+    pub(super) fn lower_valu_limited(
+        body: &[u32],
+        limits: Option<Limits>,
+    ) -> Result<Lowered, crate::ShaderError> {
         let mut words = vec![
             0xBE85_0380, // s_mov_b32 s5, 0
             0xF408_0202, // s_load_dwordx4 s[8:11], s[4:5], 0
@@ -994,11 +1094,8 @@ mod tests {
             user_data: 4,
             slot: 1,
         };
-        lower_with(
-            &words,
-            vec![constants, root(RootType::Table, 4, 1)],
-            vec![buffer],
-        )
+        let layout = vec![constants, root(RootType::Table, 4, 1)];
+        lower_wave_limited(&words, layout, vec![buffer], false, limits)
     }
 
     #[test]

@@ -244,12 +244,23 @@ pub use shader::{
 /// The loop limit without an override: 2^20.
 pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 
+/// The limit on all of a lane's loops together without an override: 2^22.
+pub const DEFAULT_LOOP_TOTAL_LIMIT: u32 = lower::LOOP_TOTAL_LIMIT;
+
 /// The iteration count after which a translated loop is left, per lane and
 /// per entry into the loop: [`DEFAULT_LOOP_LIMIT`]. A lane that would go
 /// round once more ends there as killed: a pixel is discarded, and nothing
-/// after the loop runs in it. Loops that begin at the same instruction (an
-/// outer loop whose body starts with its inner loop) are counted as one:
-/// the limit is then on the inner iterations of all outer ones together.
+/// after the loop runs in it. Each loop has its own count, which starts at
+/// 0 whenever the lane enters that loop from outside it. A loop inside
+/// another is counted afresh each time the outer loop comes round to it,
+/// also where the two begin at the same instruction (an outer loop whose
+/// body starts with its inner loop), and the inner loop's iterations are
+/// not counted as the outer loop's. What a lane's loops may run together
+/// is [`loop_total_limit`]. The loops are the control-flow graph's: a loop
+/// with a conditional `continue` that falls through towards its end is two
+/// loops there, the `continue` an inner one that is counted afresh each
+/// time the loop's end is taken, so such a loop is bounded by
+/// [`loop_total_limit`] and not by this limit.
 ///
 /// With the `diagnostics` feature, `VICTORY_SHADER_LOOP_LIMIT` (decimal or
 /// `0x` hex, at least 1) sets it instead. A loop that hits the limit in
@@ -261,16 +272,45 @@ pub fn loop_limit() -> u32 {
     static LIMIT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| {
         if cfg!(feature = "diagnostics") {
-            parse_loop_limit(std::env::var("VICTORY_SHADER_LOOP_LIMIT").ok().as_deref())
+            let value = std::env::var("VICTORY_SHADER_LOOP_LIMIT").ok();
+            parse_limit(value.as_deref(), lower::LOOP_LIMIT)
         } else {
             lower::LOOP_LIMIT
         }
     })
 }
 
-/// `VICTORY_SHADER_LOOP_LIMIT`'s value; the default when it is unset,
+/// The number of back edges after which a lane is stopped, over all its
+/// loops and every entry into each: [`DEFAULT_LOOP_TOTAL_LIMIT`]. A lane
+/// goes round a loop again only while the times it has gone round any
+/// loop, that one included, are fewer than this; a lane that would go
+/// round once more ends as one [`loop_limit`] stops does. It bounds what a
+/// nest of loops can make a lane run, which the limit of each loop does
+/// not: that alone allows the product of the loops' limits.
+///
+/// With the `diagnostics` feature, `VICTORY_SHADER_LOOP_TOTAL_LIMIT`
+/// (decimal or `0x` hex, at least 1) sets it instead, read as
+/// `VICTORY_SHADER_LOOP_LIMIT` is. Neither value is checked against the
+/// other: a loop's count is never above the lane's, so with this limit at
+/// or below the loop limit it is the one that stops a lane. The value is
+/// part of the translation, so the shader cache must key on it
+/// (`victory-gpu`'s does).
+pub fn loop_total_limit() -> u32 {
+    static LIMIT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        if cfg!(feature = "diagnostics") {
+            let value = std::env::var("VICTORY_SHADER_LOOP_TOTAL_LIMIT").ok();
+            parse_limit(value.as_deref(), lower::LOOP_TOTAL_LIMIT)
+        } else {
+            lower::LOOP_TOTAL_LIMIT
+        }
+    })
+}
+
+/// The value of `VICTORY_SHADER_LOOP_LIMIT` or
+/// `VICTORY_SHADER_LOOP_TOTAL_LIMIT`; `default` when it is unset,
 /// unreadable or 0. Pure, for testing.
-fn parse_loop_limit(value: Option<&str>) -> u32 {
+fn parse_limit(value: Option<&str>, default: u32) -> u32 {
     let parsed = value
         .map(str::trim)
         .and_then(|v| match v.strip_prefix("0x") {
@@ -279,7 +319,7 @@ fn parse_loop_limit(value: Option<&str>) -> u32 {
         });
     match parsed {
         Some(n) if n > 0 => n,
-        _ => lower::LOOP_LIMIT,
+        _ => default,
     }
 }
 
@@ -638,18 +678,28 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
 #[cfg(test)]
 mod tests {
     use super::bitcode::Attr;
-    use super::lower::LOOP_LIMIT;
-    use super::parse_loop_limit;
+    use super::lower::{LOOP_LIMIT, LOOP_TOTAL_LIMIT};
+    use super::parse_limit;
 
     #[test]
-    fn the_loop_limit_switch_parses_or_falls_back() {
-        assert_eq!(parse_loop_limit(None), LOOP_LIMIT);
-        assert_eq!(parse_loop_limit(Some("4096")), 4096);
-        assert_eq!(parse_loop_limit(Some(" 0x1000 ")), 4096);
-        assert_eq!(parse_loop_limit(Some("1")), 1);
-        for bad in ["", "0", "-5", "lots", "0x", "4294967296"] {
-            assert_eq!(parse_loop_limit(Some(bad)), LOOP_LIMIT, "{bad:?}");
+    fn the_loop_limit_switches_parse_or_fall_back() {
+        for default in [LOOP_LIMIT, LOOP_TOTAL_LIMIT] {
+            assert_eq!(parse_limit(None, default), default);
+            assert_eq!(parse_limit(Some("4096"), default), 4096);
+            assert_eq!(parse_limit(Some(" 0x1000 "), default), 4096);
+            assert_eq!(parse_limit(Some("1"), default), 1);
+            for bad in ["", "0", "-5", "lots", "0x", "4294967296"] {
+                assert_eq!(parse_limit(Some(bad), default), default, "{bad:?}");
+            }
         }
+    }
+
+    /// The limits as their documentation and the README give them. The
+    /// one on a lane's loops together is the larger: at or below the
+    /// other, no loop could reach its own.
+    #[test]
+    fn the_loop_limits_are_the_documented_ones() {
+        assert_eq!((LOOP_LIMIT, LOOP_TOTAL_LIMIT), (1 << 20, 1 << 22));
     }
     use super::container::SigElement;
     use super::shader::Shader;

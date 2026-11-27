@@ -112,18 +112,19 @@ correctness findings (paths under `crates/victory-shader/src/`):
 
 | Where | Item | What the shortcut leaves open |
 |---|---|---|
-| `emit/lower.rs:354` | const `LOOP_LIMIT` | "a genuine loop of more iterations than this is cut short too" (the loop limit of 2^20; audit A-C4, A-P3; the rule that applies now is milestone C7 in [progress.md](../progress.md), see below) |
-| `emit/lower.rs:1176-1177` | fn `shape` | an f16 sum is taken in f32 and rounded once, where the console rounds each step |
-| `emit/lower.rs:2220-2221` | fn `narrow16` | rounding toward an infinity, or a mode not known at that point, rounds to nearest even |
-| `emit/lower.rs:2589-2591` | fn `atom` | "some lane of the quad is set" is taken as true; wrong if such a section had a side effect |
-| `emit/lower.rs:2896-2898` | fn `cross_lane` | no wave size for mesh shaders, so host lanes cannot follow the console's there |
-| `emit/lower.rs:2957-2959` | fn `mesh_prologue` | mesh output counts are the declared maxima (audit A-C14) |
-| `emit/lower.rs:3589-3591` | fn `sop` | the float MODE register is not modelled |
-| `emit/lower.rs:6253` | fn `valu_op` | "DXIL has no fused f32 multiply-add; FMad lets the driver fuse" (G4, audit A-C9) |
-| `emit/lower.rs:7038-7039` | fn `valu16_op` | fused f16 multiply-adds as FMad in f32: the sum rounds twice |
+| `emit/lower.rs:384` | const `LOOP_LIMIT` | "a genuine loop of more iterations than this is cut short too" (the loop limit of 2^20; audit A-C4, A-P3; the rule that applies now is milestone C7 in [progress.md](../progress.md), see below) |
+| `emit/lower.rs:417` | const `LOOP_TOTAL_LIMIT` | "a genuine nest that goes round more often than this in one lane is cut short too" (the limit of 2^22 back edges on all of a lane's loops together, added 2026-11-27; the same rule of milestone C7 applies) |
+| `emit/lower/crosslane.rs:114` | fn `shape` | an f16 sum is taken in f32 and rounded once, where the console rounds each step |
+| `emit/lower/half.rs:16` | fn `narrow16` | rounding toward an infinity, or a mode not known at that point, rounds to nearest even |
+| `emit/lower/masks.rs:239` | fn `atom` | "some lane of the quad is set" is taken as true; wrong if such a section had a side effect |
+| `emit/lower/crosslane.rs:238` | fn `cross_lane` | no wave size for mesh shaders, so host lanes cannot follow the console's there |
+| `emit/lower/stage.rs:284` | fn `mesh_prologue` | mesh output counts are the declared maxima (audit A-C14) |
+| `emit/lower/scalar.rs:34` | fn `sop` | the float MODE register is not modelled |
+| `emit/lower/valu.rs:334` | fn `valu_op` | "DXIL has no fused f32 multiply-add; FMad lets the driver fuse" (G4, audit A-C9) |
+| `emit/lower/half.rs:428` | fn `valu16_op` | fused f16 multiply-adds as FMad in f32: the sum rounds twice |
 | `resource.rs:1814` | fn `lane_phi` | what a lane holds after some passes of a loop is not traced |
 | `resource.rs:1896-1900` | fn `waterfall` | "only the accesses are proven"; other per-lane work in such a loop is taken to run once for each lane |
-| `emit/mod.rs:477-478` | fn `emit_with` | older containers fall back to the group's lane count for the mesh stride |
+| `emit/mod.rs:521` | fn `emit_with` | older containers fall back to the group's lane count for the mesh stride |
 
 The loop limit is the one shortcut here that a dated decision of the
 owner now governs. [progress.md](../progress.md) (milestone C7 under

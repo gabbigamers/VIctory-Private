@@ -116,7 +116,7 @@ Tracks are worked in this order where they compete.
 | C3 | Ray-tracing structures built: ray-traced shadows and indirect light | open |
 | C4 | Known picture defects gone: the local-light shadow mask, the pink band over nearer bodies, the stand-in head | open |
 | C5 | Map completeness at fixed places | not started |
-| C7 | No loop-limit stop in a run. A translated loop cut short by the iteration limit is a correctness failure to be investigated (why does the loop not end: data with no host copy, a mistranslation, a loop that really is longer), never an accepted way to render. Stops are counted and reported by shader and stage, and a stopped lane ends in a defined, stage-appropriate way with no output left undefined | fix for conditional back edges committed, host-tested, not yet run on Windows. Next, after `lower.rs` is split and as changes of their own (owner's decisions of 2026-11-26, in the session log): a count per loop with an overall safeguard kept, stopped pixel lanes kept on as helpers where that is bounded and free of side effects, a defined end for the other stages, stops counted and reported by shader and stage |
+| C7 | No loop-limit stop in a run. A translated loop cut short by the iteration limit is a correctness failure to be investigated (why does the loop not end: data with no host copy, a mistranslation, a loop that really is longer), never an accepted way to render. Stops are counted and reported by shader and stage, and a stopped lane ends in a defined, stage-appropriate way with no output left undefined | fix for conditional back edges committed, host-tested, not yet run on Windows. A count per loop and a limit on all of a lane's loops together (2^22 back edges, a value that awaits the owner's answer) are in, reviewed, host-tested, not yet run on Windows (session log, 2026-11-27). Next, as changes of their own (owner's decisions of 2026-11-26, in the session log): stopped pixel lanes kept on as helpers where that is bounded and free of side effects, a defined end for the other stages, stops counted and reported by shader and stage |
 | C6 | Host independence: the wave-size, heap-size, fused multiply-add and float-behaviour dependencies removed (G2 to G5 in [gpu-compatibility.md](gpu-compatibility.md)) | open; G1 (one capability record) started |
 
 Ledger (measured runs only):
@@ -508,12 +508,172 @@ Only what cannot be done from a cloud session.
   of `emit` only so that moved bodies that reach them through `super`
   still resolve; tidying that edits bodies and is left for a change that
   does not claim to be a move. Not run on Windows.
+* Loop counting, as a change of its own (the owner's decisions of
+  2026-11-26), reviewed once and corrected. What a stopped lane does and
+  how a stop is reported are as they were.
+  * **A count per loop.** Each loop counts its iterations from where a lane
+    enters it; the one count per header block is gone. Which back edges
+    make one loop is read from the control-flow graph. A back edge's
+    natural loop is its header with what reaches the edge's source without
+    passing the header. The back edges to one header are placed by how
+    their natural loops lie in one another: a back edge's place is the
+    length of the longest chain of back edges to that header, the natural
+    loop of each properly inside the next's, that ends properly inside its
+    own. The back edges of one place count for one loop, and a back edge
+    starts the counts of the places below its own again. Two back edges of
+    which one is properly inside the other therefore always have two
+    counts, two with the same natural loop have one, and two of which each
+    has a block the other lacks have one unless the chains inside them
+    differ in length. An outer loop whose body begins with its inner loop
+    is two loops with two counts at the one header: the inner count starts
+    again when the outer loop goes round, and the outer count stays while
+    the inner loop goes round. A `continue` that ends an arm of a branch
+    shares the count of the loop's end, and in a nest with one header it
+    counts for the inner loop. Irreducible flow does not reach the
+    lowering: `ir::build` splits it or refuses it, and structurisation
+    refuses it again.
+  * **What the graph cannot tell.** A conditional `continue` that falls
+    through towards the loop's end is the same graph as an inner loop
+    sharing the header and is counted as one (so is a conditional
+    `continue` of an outer loop taken from inside an inner one). That stops
+    no lane that one count for both would let run, but such a loop is no
+    longer left after 2^20 iterations: the count of the `continue` starts
+    again each time the loop's end is taken, and what bounds a lane that
+    takes both in turn is the limit on all its loops, four times as many.
+  * **A limit on a lane's loops together**, `LOOP_TOTAL_LIMIT`, 2^22 (four
+    times the loop limit): a lane takes a back edge only while it has
+    taken fewer than that in all, and one it stops ends as one the loop
+    limit stops. The constant's documentation gives the reason for the
+    value and what it cannot do: it is the most one lane can be made to
+    run, lanes running to the loop limit already made draws of 0.3 to
+    1.3 s where that was seen (the comment on helper lanes in
+    `lower/crosslane.rs`), and no value is both far above the loop limit
+    and safe for a pass with that many lanes. It stops lanes that ran to
+    their end at `ae1c915`: a lane that takes 2^22 or more back edges in
+    all is stopped though each of its loops is under its own limit. A nest
+    of 2,048 by 2,049 iterations whose loops begin at blocks of their own
+    stored its result there and stores nothing now; so would five long
+    loops one after another. Under C7 each such stop is a defect to look
+    into. A diagnostics build reads `VICTORY_SHADER_LOOP_TOTAL_LIMIT` as it
+    reads `VICTORY_SHADER_LOOP_LIMIT`, and the shader cache's key and the
+    pipeline library's tag take the value in the same places.
+  * **Shape.** A latch stays one conditional branch in its own block. Its
+    condition gains a second unsigned compare, joined to the first by
+    `and` (round while both counts are below) or `or` (out when either is
+    at its limit). A program with a loop gains one phi at each header (the
+    lane's count) and one more for each further loop that begins there,
+    one add, one compare and one `and` or `or` at each back edge, and one
+    phi at a join where paths bring different counts of the lane before a
+    later loop. A program without a loop is written as before.
+  * **The review** (an independent one, with its own harness and its own
+    model of the counting) confirmed the shape, the byte identity and the
+    unchanged results, and found the first rule for the loops of one
+    header wrong. That rule made one loop of every chain of back edges of
+    which neither is inside the next, so a nest with one header was one
+    loop with one count again as soon as its inner loop had a second back
+    edge from an arm: that edge is apart from the inner loop's end and
+    from the outer one's, and linked the two. The places above replace
+    it, and the reviewer's program is a test. The review also asked for a
+    test of three loops at one header (two faults in the counting passed
+    every test without one), for the newly stopped lanes and the bound of
+    a loop with a `continue` to be written down (both above), and for the
+    list of shortcuts in `docs/decisions/0003-shader-translation.md` to
+    gain the one on `LOOP_TOTAL_LIMIT` (done at the commit).
+  * **Shown**, in the cloud container (tier 1) on this commit's tree
+    against `ae1c915`:
+    * 23 tests in `lower/limit.rs`, where there were 14. Each checks the
+      written function and runs one lane of it. They cover a loop in a
+      loop with headers of their own; loops sharing a header (a nest of
+      2,048 by 1,024 iterations completes, an inner loop and an outer loop
+      one past the limit are stopped); the same nest with a back edge from
+      an arm of the inner loop; three loops at one header; two back edges
+      of one loop, apart and with the same natural loop; the lane's limit
+      in a nest and in a loop after it, at the last back edge it allows
+      and one more; leaving by the latch, a `break` and a second exit; and
+      the lane's count through a join after a loop in one arm. Two tests
+      were replaced because they pinned the old count:
+      `a_loop_limit_counts_loops_sharing_a_header_together`, by one that
+      shows the two loops counted apart, and
+      `a_loop_limit_stop_with_two_latches`, whose program is a conditional
+      `continue` that falls through, by one for that reading and one for
+      two back edges of one loop.
+    * Fifteen of the programs are also lowered with five pairs of small
+      limits (the limits are parameters of an internal function) and run
+      for every input up to two past the loop limit, 33,467 lanes, against
+      a model of each program written from its loops alone: every limit
+      is hit exactly, missed by one and passed by one.
+    * Every run has a step budget of the lane's limit times the function's
+      blocks and instructions (1.2 to 2.6 times 10^8 steps at the default
+      limits, 29 to 63,000 at the small ones), and every lane ends within
+      it, the stopped ones included.
+    * Twenty deliberate faults in the counting and in the placing of back
+      edges each fail at least two tests, the first rule put back among
+      them.
+    * The reviewer's model (natural loops, places and counts from the
+      graph, written apart from the lowering) against this tree, through
+      the reviewer's harness in a scratch copy: 12 hand-built shapes,
+      10,000 random programs and the three loops at one header, 19,996
+      lowerings with small limits and 649,219 lanes, no difference. Against
+      the first rule the places change 19 of the 19,905 random lowerings
+      and two of their lanes, both from stopped to running on.
+    * Byte identity, by a temporary hook in scratch copies of both trees
+      that recorded every lowering of the shader crate's host tests, 21
+      loop programs of the limit tests and 3,000 generated ones: 4,062
+      distinct programs. Of the 1,383 without a loop, 956 are lowered to
+      the same bytes and 427 refused with the same error. Of the 2,679
+      with loops, 14 are refused with the same error and 2,665 grow by 24
+      to 292 bytes (median 88, about 27 a back edge).
+    * Unchanged results, by the one-lane interpreter over every lowered
+      program with a loop, eight sets of inputs each, before and after:
+      the 15,611 lanes that end under both limits make the same calls
+      with the same arguments (stores included); 40 that reach an
+      instruction the interpreter does not run are the same up to it;
+      5,669 exceed the interpreter's budget before a limit is near and
+      are not compared. With the loop limit at 24 through the diagnostics
+      switch and the lane's limit out of reach, over the fixed and
+      generated programs: 14,953 lanes that end and 6,195 that are stopped
+      do the same in both trees, and 91 lanes of programs whose loops
+      share a header, which the one count stopped, now run to their end
+      (1 not compared).
+    * The shader crate's host tests take 51 s of processor time where
+      they took 18 s (measured with another session's load on the same
+      four cores; about 30 s of wall time there): the loops run to 2^20
+      cost three more instructions an iteration in the interpreter, and
+      the new cases at the real limits run about 38 times 2^20 iterations
+      more.
+  * **Not verified.** Nothing of this ran on Windows. The DXIL validator
+    has seen none of the new shapes, and no driver a latch with two
+    compares or a header with two or three counts; the tests carry the
+    validator, hardware and WARP runs through the same helpers as before
+    (type-checked at tier 2 only). The key and tag changes in
+    `victory-gpu` are in Windows-only files (type-checked at tier 2
+    only). The GPU runs are one lane a dispatch: lanes of one wave leaving
+    a loop at different times are not what they exercise. The interpreter
+    runs no float and no memory instruction, so programs are compared up
+    to the first one a lane reaches.
+  * **For the owner.** The value 2^22 is a judgement between two needs
+    with no measurement of either on the target machine, and it now stops
+    lanes that ran before (above): it awaits the owner's answer. Whether a
+    conditional `continue` that falls through should count with its loop
+    cannot be decided from the graph, only by choosing one reading; the
+    one chosen lets such a loop run to the lane's limit. The list of
+    `// shortcut:` comments in `docs/decisions/0003-shader-translation.md`
+    was brought up to date at the commit: the new one on
+    `LOOP_TOTAL_LIMIT`, and the places of the ten the split of `lower.rs`
+    had moved.
+  * **Checked at the commit**, on the tree rebased onto the pushed head:
+    529 host tests, the Windows type-check, the asset policy, and
+    Microsoft's validator on Linux (tier 1b) over the 440 distinct
+    containers the shader crate's host tests finish with this change, 84
+    more than before it: every container with a loop is accepted, the
+    latch with two compares, headers with two and three counts and the
+    join of the lane's count among them. The two it rejects are the two
+    known ones from the opcode census, unchanged. Not run on Windows, on
+    a card or on WARP.
 * Next for the lowering, each as its own reviewed change (the owner's
-  decisions of 2026-11-26): a count per loop with an overall safeguard; a
-  stopped pixel lane kept on as a helper, bounded and without effects; a
-  defined end for the other stages; stops counted and reported by shader
-  and stage.
-
+  decisions of 2026-11-26): a stopped pixel lane kept on as a helper,
+  bounded and without effects; a defined end for the other stages; stops
+  counted and reported by shader and stage.
 * Ray tracing: the owner's decisions of 2026-11-27. An experimental
   native DXR backend is to be developed, not only investigated: inline
   RayQuery (DXR 1.1), host bottom- and top-level structures built from the

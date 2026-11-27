@@ -2,6 +2,7 @@
 //! take, and the phis, with what decides whether a value joined at one
 //! is read.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::{Lower, MaskData, Stop, Val, Why, unsupported};
@@ -12,7 +13,7 @@ use crate::ir::{Block, EXEC, Exit, Inst, Phi, Reg, Value};
 use crate::resource::Site;
 use crate::structure::{Atom, Bool, LaneExit};
 #[cfg(doc)]
-use super::LOOP_LIMIT;
+use super::{LOOP_LIMIT, LOOP_TOTAL_LIMIT};
 
 /// The scalar instruction defining an SSA value in this block and its operands.
 fn scalar_def<'a, const N: usize>(
@@ -189,12 +190,12 @@ impl<'a> Lower<'a> {
             .map_or(self.x.p.blocks[b].offset, |i| i.machine.offset);
         let term = match self.x.st.exits[b] {
             LaneExit::Jump(t) if self.counters.contains_key(&t) && self.rpo[t] <= self.rpo[b] => {
-                let ok = self.count_iteration(t, pred::IULT);
+                let ok = self.count_iteration(b, t, true);
                 let abort = self.abort_block();
                 Term::CondBr(ok, self.block[t].expect("reachable"), abort)
             }
             LaneExit::Jump(t) => {
-                self.enter_loop(b, t, self.cur);
+                self.enter(b, t, self.cur);
                 Term::Br(self.block[t].expect("reachable"))
             }
             LaneExit::Branch {
@@ -217,7 +218,8 @@ impl<'a> Lower<'a> {
                         (c, taken, not_taken)
                     }
                 };
-                // A back edge is taken only below the iteration limit.
+                // A back edge is taken only below the loop's iteration limit
+                // and the lane's limit on all its back edges.
                 let back =
                     |l: &Self, to: usize| l.counters.contains_key(&to) && l.rpo[to] <= l.rpo[b];
                 // The latch's other side and the value of `cond` in the
@@ -233,11 +235,11 @@ impl<'a> Lower<'a> {
                 // AMD driver.)
                 let latch = match leaves {
                     Some((_, false)) => {
-                        let ok = self.count_iteration(taken, pred::IULT);
+                        let ok = self.count_iteration(b, taken, true);
                         self.s.m.bin(self.cur, Bin::And, cond, ok)
                     }
                     Some((_, true)) => {
-                        let stop = self.count_iteration(not_taken, pred::IUGE);
+                        let stop = self.count_iteration(b, not_taken, false);
                         self.s.m.bin(self.cur, Bin::Or, cond, stop)
                     }
                     None => cond,
@@ -271,7 +273,7 @@ impl<'a> Lower<'a> {
                 }
                 for (to, from) in [(taken, arrives[0]), (not_taken, arrives[1])] {
                     if !back(self, to) {
-                        self.enter_loop(b, to, from);
+                        self.enter(b, to, from);
                     }
                 }
                 Term::CondBr(latch, t, f)
@@ -292,33 +294,75 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
-    /// A forward edge into loop header `to` (from DXIL block `via`) starts
-    /// its count at 0.
-    fn enter_loop(&mut self, _from: usize, to: usize, via: usize) {
-        if let Some((_, incoming)) = self.counters.get_mut(&to) {
+    /// A forward edge from IR block `from` into `to`, arriving from DXIL
+    /// block `via`. Every loop that begins at `to` is entered from outside
+    /// it and starts its count at 0, and a phi there of the lane's count of
+    /// all its back edges takes what `from` holds.
+    fn enter(&mut self, from: usize, to: usize, via: usize) {
+        if let Some(header) = self.counters.get_mut(&to) {
             let z = self.s.m.i32(0);
-            incoming.push((z, via));
+            for count in &mut header.counts {
+                count.incoming.push((z, via));
+            }
+        }
+        if self.totals.contains_key(&to) {
+            let all = self.total_at(from);
+            let total = self.totals.get_mut(&to).expect("a phi");
+            total.incoming.push((all, via));
         }
     }
 
-    /// A back edge to header `to` (a back edge keeps its block, no
-    /// critical-edge block): the count goes up; the result compares it with
-    /// [`LOOP_LIMIT`] by `p` (below: go on; at or above: stop).
-    pub(super) fn count_iteration(&mut self, to: usize, p: u8) -> V {
-        let c = self.cur;
-        let (phi, _) = self.counters[&to];
-        let one = self.s.m.i32(1);
-        let next = self.s.m.bin(c, Bin::Add, phi, one);
-        let limit = self.s.m.i32(super::loop_limit());
-        self.counters
-            .get_mut(&to)
-            .expect("header")
-            .1
-            .push((next, c));
-        self.s.m.cmp(c, p, next, limit)
+    /// The lane's count of all its back edges as IR block `b` holds it.
+    fn total_at(&mut self, b: usize) -> V {
+        match self.total[b] {
+            Some(phi) => phi,
+            None => self.s.m.i32(0),
+        }
     }
 
-    /// The block a lane stopped by [`LOOP_LIMIT`] leaves through.
+    /// A back edge from IR block `from` to header `to`, taken from the
+    /// current block (a back edge keeps its block, no critical-edge block).
+    /// The count of the loop the edge belongs to goes up; the loops inside
+    /// that one which begin at the same header start again at 0, and the
+    /// ones around it keep their counts. The lane's count of all its back
+    /// edges goes up too. The result joins two compares, of the loop's
+    /// count with [`LOOP_LIMIT`] and of the lane's with
+    /// [`LOOP_TOTAL_LIMIT`]: with `round`, whether both are below (go on);
+    /// without, whether either is at its limit or above (stop).
+    pub(super) fn count_iteration(&mut self, from: usize, to: usize, round: bool) -> V {
+        let c = self.cur;
+        let (zero, one) = (self.s.m.i32(0), self.s.m.i32(1));
+        let header = &self.counters[&to];
+        let own = header.of[&from];
+        let phi = header.counts[own].phi;
+        let next = self.s.m.bin(c, Bin::Add, phi, one);
+        let all = self.total_at(from);
+        let all = self.s.m.bin(c, Bin::Add, all, one);
+        let header = self.counters.get_mut(&to).expect("header");
+        for (n, count) in header.counts.iter_mut().enumerate() {
+            let value = match n.cmp(&own) {
+                Ordering::Less => zero,
+                Ordering::Equal => next,
+                Ordering::Greater => count.phi,
+            };
+            count.incoming.push((value, c));
+        }
+        let total = self.totals.get_mut(&to).expect("header");
+        total.incoming.push((all, c));
+        let each = self.s.m.i32(self.limits.each);
+        let most = self.s.m.i32(self.limits.total);
+        let (p, join) = if round {
+            (pred::IULT, Bin::And)
+        } else {
+            (pred::IUGE, Bin::Or)
+        };
+        let own = self.s.m.cmp(c, p, next, each);
+        let all = self.s.m.cmp(c, p, all, most);
+        self.s.m.bin(c, join, own, all)
+    }
+
+    /// The block a lane stopped by [`LOOP_LIMIT`] or [`LOOP_TOTAL_LIMIT`]
+    /// leaves through.
     pub(super) fn abort_block(&mut self) -> usize {
         if let Some(a) = self.abort {
             return a;
@@ -951,8 +995,10 @@ impl<'a> Lower<'a> {
             }
             self.s.m.set_phi(v, incoming);
         }
-        for (phi, incoming) in std::mem::take(&mut self.counters).into_values() {
-            self.s.m.set_phi(phi, incoming);
+        let headers = std::mem::take(&mut self.counters).into_values();
+        let counts = headers.flat_map(|header| header.counts);
+        for count in counts.chain(std::mem::take(&mut self.totals).into_values()) {
+            self.s.m.set_phi(count.phi, count.incoming);
         }
         while let Some((v, b, i)) = self.pending_masks.pop() {
             let phi = &p.blocks[b].phis[i];
