@@ -636,3 +636,22 @@ Only what cannot be done from a cloud session.
   optimisation and validation. The four DXR documents are being revised
   to this; until that lands, where they say host triangles are "never
   passed" or put the hybrid first, this entry governs.
+* Ray tracing: the owner's further direction of 2026-11-27: a semantic
+  compatibility layer between the guest's ray-tracing work and native
+  host DXR, in place of an instruction-level replacement. It translates
+  what the guest means (structure construction, traversal semantics, ray
+  parameters, geometry identifiers, intersection results, material
+  filtering) into the native equivalent; it does not reproduce the
+  guest hardware's internals where a native operation is equivalent.
+  Differences in numbers, behaviour and representation are met by
+  light adaptations in the shader, resolved when a shader is translated
+  or a pipeline created wherever that is possible, not per ray. The
+  three execution paths (native, hybrid, software) sit under one
+  interface that picks, for each workload, the fastest implementation
+  that has been validated for it; hybrid and software remain only for
+  what native DXR cannot represent adequately. Native equivalence is
+  not assumed until tests show it. Validation: synthetic geometry,
+  reference shaders written independently, Microsoft's validator, and
+  measured GPU benchmarks. Unchanged: NVIDIA first but vendor-independent,
+  16 GB of system memory, sustained 30 frames a second, no loss of
+  rendering quality.
