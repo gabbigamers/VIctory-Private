@@ -662,6 +662,7 @@ dependencies = [
  "victory-hle",
  "victory-loader",
  "victory-pe",
+ "victory-rt-probe",
  "victory-shader",
  "walkdir",
 ]
@@ -762,6 +763,16 @@ dependencies = [
 [[package]]
 name = "victory-rt"
 version = "0.1.0"
+
+[[package]]
+name = "victory-rt-probe"
+version = "0.1.0"
+dependencies = [
+ "victory-gpu",
+ "victory-rt",
+ "victory-shader",
+ "windows",
+]
 
 [[package]]
 name = "victory-shader"
@@ -924,5 +935,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "victory-rt-probe",
  "walkdir",
 ]

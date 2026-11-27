@@ -284,10 +284,12 @@ pub enum Owner {
     RtStructures,
     /// R3: the video memory of `crate::rt` that is no structure: its build
     /// scratch chunks, in use or kept for reuse, its buffer for compacted
-    /// sizes, and the output buffers a validation run's dispatches write.
+    /// sizes, and the output buffers a validation run's dispatches write
+    /// (R5: the synthetic probe's hit buffer, one class's at a time).
     RtScratch,
     /// R4: the system-memory buffers of `crate::rt`: chunks of instance
-    /// descriptions, geometry it uploads itself (a validation run's; a
+    /// descriptions, what it uploads itself (a validation run's geometry
+    /// and, R5, the synthetic probe's ray list and poison records; a
     /// title's geometry is its buffer copies), and its read-back buffers
     /// (compacted sizes, timestamps, results read back). Not its query heap
     /// or command allocators (runtime memory), and nothing in video memory

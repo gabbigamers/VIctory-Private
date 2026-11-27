@@ -6,9 +6,17 @@ and which path runs when. Facts: [ray-tracing-research.md](ray-tracing-research.
 Semantics and the equivalence rule: [dxr-compatibility.md](dxr-compatibility.md).
 Testing and measuring: [dxr-validation.md](dxr-validation.md).
 
-**Nothing here is built and nothing was run on hardware; every part is
-speculative.** The only things done are tool runs in a Linux container
-(research, "Checked with Microsoft's tools"). `gpu/` is
+**Nothing here was run on hardware, and the layer itself (recogniser,
+description, generators, selection, registry) is speculative.** What
+exists beside it, each with its own document and state: ray queries in
+the emitter with three prototype shaders
+([dxr-shader-emission.md](dxr-shader-emission.md)), a host backend that
+no run calls ([dxr-host-backend.md](dxr-host-backend.md)), a CPU
+reference ([dxr-validation-reference.md](dxr-validation-reference.md)),
+and a first version of the synthetic probe, which runs those shaders over
+that backend ahead of step 3 of the order below (dxr-validation.md, "The
+first version"). The tool runs in a Linux container are in research,
+"Checked with Microsoft's tools". `gpu/` is
 `crates/victory-gpu/src/`, `emit/` is `crates/victory-shader/src/emit/`,
 `res:` is `crates/victory-shader/src/resource.rs`, `spec:` is the DXR
 specification by line, `av:` and `lab:` are a fork and the reference notes.
@@ -166,9 +174,15 @@ default `software`; the last two force a path for measuring, on eligible
 workloads only, each use logged as not validated;
 `VICTORY_RT_CLASS=<class>` narrows a forced path to one workload class.
 The host module in the tree today (`crates/victory-gpu/src/rt/`, called by
-nothing yet) reads `software|hardware|auto` and takes any other value,
+no run) reads `software|hardware|auto` and takes any other value,
 `native` and `hybrid` included, as `software` with a note in the device
-report; the values above replace `hardware` when the layer is built.
+report; the values above replace `hardware` when the layer is built. The
+synthetic probe is behind the same switch: it opens the module, on a
+queue of its own (`Rt::open_on`), only where the switch says `hardware`
+or `auto`, by the device's capabilities then, and writes the switch's
+value into its file; with the switch unset it opens no device and makes
+nothing. Whether a tool the owner starts by name should need the switch
+at all is the owner's to say; until then it does.
 
 | When | What is decided | Evidence |
 |---|---|---|
@@ -254,6 +268,10 @@ sustained 30 frames a second, no loss of picture).
 
 All rows but the last are the smallest version: validator acceptance and
 agreement between two models; nothing about a driver, a card or speed.
+Step 4's probe has a first version outside this table, in
+`crates/victory-rt-probe` (the command in `apps/victory/src/rtprobe.rs`,
+the summary in `xtask/src/rt_summary.rs`): host tests for all of it but
+`hardware.rs`, which is type-checked for Windows only.
 
 ## Order of work, and what would change it
 
@@ -262,7 +280,7 @@ agreement between two models; nothing about a driver, a card or speed.
 | 1 | **Wave sizes** of each tracer and builder stage, and `gpu-info` on the card: whether G2 comes first on the target |
 | 2 | **Groundwork** for `progress.md` C3 and the boundary, logging only: a structure view's address, `DispatchX` flags, calls per export and what each is given, the magnitude of vertex coordinates |
 | 3 | **The smallest version** above, on synthetic programs |
-| 4 | **The synthetic probe** on the owner's machine, native path first; it writes the probe's part of the validation record |
+| 4 | **The synthetic probe** on the owner's machine, native path first; it writes the probe's part of the validation record. A first version exists ahead of step 3: it runs the three prototype shaders, not generated variants, has run on nothing, and writes result files but no validation record, since neither the record nor the rule's comparison exists (dxr-validation.md, "The first version") |
 | 5 | **A census of trace loops** (title files; counts only leave the machine): the description's fields per loop, compare forms, ray biases, how often a cap fires, one bottom level's id bytes |
 | 6 | **Host structures from build descriptions**; GPU time by kind |
 | 7 | **Native variants** for the classes steps 4 and 5 leave, compared on the title on the same rays; then the hybrid for what was sent to it |

@@ -1,0 +1,25 @@
+[package]
+name = "victory-rt-probe"
+description = "The synthetic ray-tracing probe: victory-rt's scenes through the host ray-tracing backend, compared with the CPU reference and the software model, each cost measured apart."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+victory-rt.workspace = true
+victory-gpu.workspace = true
+victory-shader = { workspace = true, features = ["host"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[lints]
+workspace = true

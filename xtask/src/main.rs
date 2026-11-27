@@ -2,6 +2,7 @@
 
 mod perf;
 mod policy;
+mod rt_summary;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,6 +39,19 @@ enum Cmd {
         #[arg(long)]
         against: Option<PathBuf>,
     },
+    /// Summarise a result table of `victory rt-probe` (docs/dxr-validation.md):
+    /// correctness counts, the card's time of traversal, of builds and of
+    /// refits, processor time, waits and memory, each apart. The probe's
+    /// times select no path and say nothing about a title.
+    RtSummary {
+        /// The run's result table (`rt-probe.csv`).
+        file: PathBuf,
+        /// An earlier run of the same seed to compare with: the counts of
+        /// every row and the hit records beside the two tables must be
+        /// equal; times are shown side by side.
+        #[arg(long)]
+        against: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -45,6 +59,7 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Cmd::Policy { staged } => policy::run(&root, staged),
         Cmd::PerfSummary { log, against } => perf::run(&log, against.as_deref()),
+        Cmd::RtSummary { file, against } => rt_summary::run(&file, against.as_deref()),
         Cmd::InstallHooks => {
             let status = Command::new("git")
                 .args(["config", "core.hooksPath", ".githooks"])

@@ -1447,3 +1447,50 @@ Only what cannot be done from a cloud session.
   The corrector's deliberate faults and its comparison of generated
   programs with the earlier head were made before the rebase and were
   not repeated on this base.
+* Ray tracing, the synthetic probe, a first version: `victory rt-probe`
+  (`crates/victory-rt-probe`) and its summary `cargo xtask rt-summary`;
+  step 4 of the order of work, built ahead of step 3. Implemented.
+  Tested (host tests): everything that needs no device. Type-checked for
+  Windows only: the Direct3D side (`hardware.rs`, the debug layer among
+  it), the command, one new accessor of the host backend.
+  Hardware-validated: nothing. **It has run on no device, no WARP
+  adapter and under no debug layer; there is no figure of any kind.**
+  Speculative: that a device accepts any call sequence of `hardware.rs`.
+  * By default nothing changes: no run starts the probe, the shader
+    crate is untouched, and the probe has no memory owner or log column
+    of its own (the backend's three owners count its buffers;
+    `memory.md`, R5). Behind `VICTORY_RT_BACKEND=hardware` (or `auto`):
+    without it the command prints `rt-probe: NOT RUN`, makes no folder
+    and opens no device. The coordinator keeps it so.
+  * What it does: `victory-rt`'s ten scene classes through host
+    structures of `victory-gpu`'s `rt` module and the three prototype
+    shaders; each path's hit records against that crate's CPU reference,
+    under the crate's policy and not yet the proposed rule, so no row is
+    a pass under the rule; GPU times, processor time, waits and memory
+    by owner, each in a column of its own. The scenes hold 28 to 405
+    triangles: the times exercise the instrument, measure no cost and
+    select nothing.
+  * Tested (host tests; 60 in the crate, 10 for the summary), over a
+    brute-force stand-in on the CPU: no defect in any class, path or
+    frame; a stale refit, an unwritten record, a dispatch that does not
+    write all it lists and a differing record are each caught; every
+    measurement column is held against what the stand-in reported for
+    that quantity. Nothing here is about a driver.
+  * The review found (8 findings, all upheld and corrected): two runs
+    called equal with no hit record compared; a row reading `pass`
+    beside records no thread wrote; measurement columns no test pinned;
+    timed dispatches never checked (one untimed dispatch over poisoned
+    records now follows each series: it shows a dispatch of that size
+    writes every record, not that each timed one did); one write error
+    losing a run; the backend opened with the switch unset; column
+    definitions and two figures.
+  * Checked on the integrated commit: 996 host tests; the validator, 877
+    containers, 0 rejected, the probe adding none; the Windows
+    type-check; the asset policy. The corrector's twelve deliberate
+    faults were not repeated. Next change to the probe, not in this
+    one: result files written class by class (today a run that hangs
+    or is killed has written nothing).
+  * For the owner's machine: the commands of `dxr-validation.md`, "What
+    the owner runs", the short run under `--debug-layer` first. A stop
+    at a Direct3D call is the expected first result; the line it stops
+    at and any `validation layer` lines are what to send.

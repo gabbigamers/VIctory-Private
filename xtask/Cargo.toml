@@ -12,5 +12,10 @@ anyhow.workspace = true
 clap.workspace = true
 walkdir.workspace = true
 
+[dev-dependencies]
+# Tests only: the result table and the hit files `rt-summary` reads are
+# written by the probe's own writers there, so the two cannot drift apart.
+victory-rt-probe.workspace = true
+
 [lints]
 workspace = true

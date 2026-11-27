@@ -6,10 +6,16 @@ programs first and with no file of any title. Companion to
 and [dxr-compatibility.md](dxr-compatibility.md), which holds the rule
 this procedure applies.
 
-**None of this has been run on hardware, and the probe does not exist.**
-The rule, its tolerance and its thresholds are a proposal written on
-2026-11-27, before any measurement, and await the owner's acceptance;
-after that a change is a dated revision. `emit/` is
+**None of this has been run on hardware.** A first version of the probe
+exists (`victory rt-probe`; "The first version" below says what it runs
+and where it departs from this specification): implemented; its logic
+tested (host tests); its three shaders accepted by Microsoft's validator on
+Linux; its Direct3D part type-checked for Windows only. It is behind the
+switch a run's hardware ray tracing is behind: without
+`VICTORY_RT_BACKEND=hardware` (or `auto`) it opens no device. The rule, its
+tolerance and its thresholds are a proposal written on 2026-11-27, before
+any measurement, and await the owner's acceptance; after that a change is
+a dated revision. `emit/` is
 `crates/victory-shader/src/emit/`, `gpu/` is `crates/victory-gpu/src/`,
 `ref:` is the reference-shader directory named in
 [ray-tracing-research.md](ray-tracing-research.md).
@@ -25,22 +31,242 @@ after that a change is a dated revision. `emit/` is
 
 ## What must be built first
 
-Absent from the tree today (`apps/victory/src/main.rs` has no `rt-probe`;
-no `RayQuery` anywhere in `crates/`):
+Still absent from the tree (the first version below runs without them,
+and is the less for it):
 
 * The smallest version of the layer (dxr-architecture.md): region
   analysis, the workload description, a recogniser and a native generator
-  for the synthetic programs, `RayQuery` in the emitter.
-* The CPU reference outside the Windows-only test module
-  (`emit/mod.rs:199-229`): **R-bits**, the emulation's model in single
-  precision (`emit/bvh_tests.rs:41-155`); **R-ref**, the same geometry
-  in double precision with the classes of the rule; and the host test
-  that computes the tolerance constant k from the two.
-* A scene generator that knows each triangle's surface, material,
-  neighbours, bottom level and instance; a builder of guest-format trees;
-  a host build helper (prebuild sizes, builds, barriers, timestamp pairs).
+  for the synthetic programs. `RayQuery` is in the emitter
+  (`emit/rayquery.rs`), with three prototype shaders that no translated
+  program reaches.
+* **R-ref**, the geometry in double precision with the classes of the
+  rule, and the host test that computes the tolerance constant k.
+  **R-bits**, the emulation's model in single precision, exists outside
+  the Windows-only test module as `crates/victory-rt` (`node.rs`), beside
+  an exact reference with a tolerance of its own that is not the rule's
+  ([dxr-validation-reference.md](dxr-validation-reference.md)).
+* A scene generator that knows each triangle's surface, material and
+  neighbours (`victory-rt`'s knows bottom level and instance); the scene
+  classes of "Scenes". A builder of guest-format trees
+  (`victory-rt`, `console.rs`; its top level is our own) and a host build
+  helper (`gpu/rt/`: sizes, builds, barriers, timestamp pairs;
+  type-checked for Windows only) exist.
 * `victory gpu-info` printing the tier as a number, and "unknown" when
   the query fails (`gpu/caps.rs:177-181, 200-228`).
+
+## The first version (`victory rt-probe`)
+
+Step 4 of the order of work (dxr-architecture.md), built from what is in
+the tree ahead of step 3: no region is recognised and no variant is
+generated yet. `crates/victory-rt-probe` holds it; `apps/victory` has the
+command, `xtask` the summary. State: implemented; everything that needs
+no device tested (host tests: the scene as build inputs, the mapping of
+rays, record decoding with refusals, the statistics, the result files,
+the run itself over a brute-force stand-in on the CPU, the summary and
+its comparison of two files); the three containers accepted by
+Microsoft's validator on Linux; the Direct3D part
+(`crates/victory-rt-probe/src/hardware.rs` over `gpu/rt/device.rs`)
+type-checked for Windows only. **Nothing has run on a device, and no
+figure of any kind exists.**
+
+Where it departs from the rest of this document, and why:
+
+| Specified | First version | Why |
+|---|---|---|
+| Synthetic guest programs through the real translator, one per workload class; the paths N, N-d, N2, NR, H-node, H-desc, S | The three prototype shaders of `emit/rayquery.rs`, written with the emitter: `native` (the triangles shader over host triangles), `hybrid` (the procedural shader over one host box a triangle, the vertices beside), `null` (writes misses, traces nothing). `software-gpu` is a path the file names with status `not built` | nothing recognises a region or generates a variant, and no shader walks console-format nodes outside a translated title loop. These rows show a host's structures, traversal and triangle test, and the hybrid's shader-side test: not a translated program |
+| A production and an instrumented container per variant | one container a path: the record per ray is the shader's only output, so the container that is timed is the container that is compared; `container_hash` is its header digest | the prototype shaders store nothing else |
+| S on the device, equal to R-bits bit for bit, as the reference there | the CPU model of the software traversal (`victory-rt`) beside each path's answers (`model_*` columns) | S is not built. The model's top level and the node fields the test does not read are our own |
+| R-ref in double precision, the rule's classes, k | `victory-rt`'s exact reference with its own tolerance and verdicts. **Every verdict is "under the crate's policy, not yet the rule"**; the file's header says so (`policy`, `k`) | the crate and the rule are not reconciled (dxr-validation-reference.md, "Against the proposed rule"). The probe's use of the crate is one module (`adapter.rs`), where the reconciliation will be met |
+| The scene classes of "Scenes": to 10^6 triangles, seams, `far`, the cost classes | `victory-rt`'s ten classes: 28 to 405 triangles, 1 to 48 instances, 1,200 to 2,000 rays each; `dynamic-refit` and `dynamic-rebuild` have four frames | those are the scenes there are. **Scenes this small say nothing of cost**: their times exercise the instrument. No `scale`, `seam`, `far`, `refit`, `many-small` or `burst` class exists |
+| Every class's rays through the variant in the test-only interpreter first | each ray is screened on the CPU (`rayquery::ray_refusal`) before a list is made: a ray it names is in no list a device reads, and is counted with its reason (`refused_before`). `SKIP_CLOSEST_HIT_SHADER` is cleared and the mask cut to eight bits there, counted | no translated variant exists to interpret. The rule the screen serves is kept: no illegal ray reaches a device |
+| Levels 2 and 3; N against NR; each constant halved and doubled | not built | no program stores anything after a region; the reference HLSL (`crates/victory-shader/tests/dxc-reference/`) is compiled on Linux and run by nothing |
+| `rt-translate.csv`, `rt-record` | not written. Written instead: each path's hit records in `victory-rt`'s result format | no translator runs in the probe, and no validation record exists |
+| `rays_per_s`; `video_local_mb_delta`, `working_set_mb_delta`, `commit_mb_delta`; medians of build times | not written. The count and the time, and the figure before and the figure after, stand in columns of their own; a frame's builds are measured once and summed by kind | no column is one figure divided by, or taken from, another |
+| `--out rt-probe.csv` in the working directory | `--out` names a file outside the repository, or the command refuses | the repository's asset policy lists what it may hold, and a result file is not on the list |
+| The timed dispatches alone | after each series of timed dispatches one more dispatch, of the same records over poisoned hit records, in no time of the file: the **check** ("A run" below) | a timed submission holds the dispatch and nothing else, so its records cannot be poisoned first, and what the hit buffer holds after it may be an earlier dispatch's. Without the check nothing shows that a dispatch of `timed_rays` records writes every record |
+
+**Refusals.** A refusal is the record the shaders write for one: a kind
+with bit 31 (`rayquery::HIT_REFUSED`) and one or both of the two reasons
+in the low bits, the other seven words 0. It is counted by reason
+(`refused_geometry`, `refused_range`) and its ray is **not judged for
+that path, never read as a miss**. Every listed ray is traced by both
+paths, so a ray the native path refuses has the hybrid's record beside it
+(`refused_taken_by_next` where that is a hit or a miss); a ray no built
+path took is counted (`refused_unanswered`): the hybrid's next path is
+the software traversal on the GPU, which is not built. A verdict speaks
+of the rays judged and says nothing of the refused ones; the counts stand
+in the columns before it.
+
+**Records that are neither answer nor refusal.** Before each dispatch
+whose records are read, the hit records are overwritten with a poison
+word, so that a record no thread wrote is neither a stale hit nor a miss.
+The poison has bit 31 and is not what a shader writes for a refusal; no
+other record with bit 31 is either (no reason, a reason bit the probe
+does not know, other words that are not 0). **None of these is taken out
+of the comparison**: each is counted (`unwritten`, `refused_malformed`)
+and judged with the answers, where it is a record that is no hit and no
+miss, a defect (`malformed`). A row whose dispatch left records unwritten
+therefore cannot read `pass` on the records that were written.
+
+**A run**, per scene class, with the class's rays as one list in upload
+memory:
+
+1. The null shader: one dispatch over the listed rays, the timed
+   dispatches, then the check; every record read must be a miss
+   (`null_not_miss`).
+2. Each tracing path, native then hybrid, one at a time so that the
+   memory counted is one path's. Per frame: the scene is turned into
+   build inputs on the CPU; bottom levels and the top level are built,
+   refitted or kept as the frame asks, each structure between timestamps
+   of its own, in one submission that is waited for; one dispatch lists
+   every ray once and its records are read back (the answers); then the
+   timed dispatches, each a submission of its own that holds a timestamp,
+   the dispatch and a timestamp and nothing else, list `timed_rays`
+   records (the class's rays, begun again as often as it takes); then the
+   check. With `--loop`, the loop mode follows, with a check of its own.
+   Then the path's structures are given up.
+3. Each path's answers are compared, frame by frame, with the CPU
+   reference and the CPU model through `victory-rt`'s comparison.
+
+**The check.** One more dispatch after the timed ones: the same shader
+and structures and the `timed_rays` records a timed one lists, over
+poisoned hit records, in no time of the file. Its records are read back
+and held against the answers (`repeat_differing`; a record it left
+unwritten counts). It shows that a dispatch of that many records writes
+every record and gives the same answers. It does not show that each timed
+dispatch did: those differ from it by the copy that poisons, and their
+own records are not read. The loop's check is one more dispatch over the
+listed rays after the last iteration (`loop_last_differing`).
+
+A step that fails on the device fails its row, with what failed in
+`note`; the row keeps the columns of the steps before it (its verdict
+among them, where the answers had come back, and its records in the hit
+file), has none of the failed step or of those after it, and holds in its
+memory columns what was held when it failed; the path's
+later frames are `not run`; the run goes on with the next path and class.
+Nothing is retried and nothing a device did not do is filled in.
+
+**What runs nothing.** Each of these prints `rt-probe: NOT RUN:` with the
+reason, writes no file and ends the command with an error:
+`VICTORY_RT_BACKEND` not asking for the hardware backend (unset is
+software, as in a run; only `hardware` and `auto` open it, and with
+neither not even the output folder is made); a place a result file cannot
+be written to, found before the device is opened; a device below ray
+tracing tier 1.1 (or without shader model 6.6, or `ID3D12Device5`), with
+what it reports and what is missing; `--debug-layer` where the layer is
+not installed.
+
+**Memory.** The probe's allocations are bounded, owned and counted by the
+backend's three owners; the case is R5 of [memory.md](memory.md).
+
+### The columns of `rt-probe.csv`
+
+One row per scene class, frame and path; a null-shader row per class; a
+loop row per class and path with `--loop`. A column that does not apply,
+or that could not be measured, is empty: never 0. `crates/victory-rt-probe/src/row.rs`
+holds the same list, and a host test keeps the two the same: the names,
+their order and each definition word for word.
+
+| Column | What it holds |
+|---|---|
+| `class` | the scene class, by victory-rt's name |
+| `seed` | the seed the class's scene and rays were generated from, hex |
+| `frame` | the frame of the class's case, from 0; empty in the null shader's row, which reads no scene; `loop` in a loop row |
+| `path` | `native` (host triangles, the triangles shader), `hybrid` (one host box a triangle, the procedural shader), `null` (the null shader), `software-gpu` (not built) |
+| `status` | `ran`; `failed` (a step on the device failed and `note` says which: the columns of that step and of the steps after it are empty, those of the steps before it are kept, the verdict among them where the answers had come back, and the memory columns hold what was held when it failed); `not built` (the path has no shader here); `not run` (the class has no ray to list, or an earlier frame of the path failed: `note` says which) |
+| `note` | what failed, where the backend or the probe did other than the frame asked, and what a validation layer said, if one was on |
+| `container_hash` | the digest in the header of the DXIL container the row's pipeline was made from, 32 hex digits |
+| `bottoms` | bottom-level structures of the frame's scene |
+| `instances` | instances in its top level |
+| `primitives` | triangles over its bottom levels, each counted once |
+| `flat_boxes` | hybrid: boxes with no extent on at least one axis (a triangle in an axis plane) |
+| `rays` | rays of the class |
+| `rays_listed` | ray records in the list a dispatch reads: `rays` less `refused_before` |
+| `timed_rays` | ray records one timed dispatch lists: the list's rays, begun again as often as it takes |
+| `skip_closest_hit_cleared` | rays whose SKIP_CLOSEST_HIT_SHADER flag was cleared on the CPU (an inline query runs no such shader) |
+| `mask_high_bits_cut` | rays whose instance mask had bits above the low eight, which were cut on the CPU |
+| `refused_before` | rays the shaders cannot take as DXR defines them, refused on the CPU and in no list |
+| `refused_before_reasons` | those by reason, `reason: count` with `;` between |
+| `refused_geometry` | records the path's shader wrote as refused (kind bit 31) with reason 1: geometry of the other type |
+| `refused_range` | the same with reason 2: the procedural shader's test left single precision |
+| `unwritten` | records of the dispatch that listed each ray once that still hold the poison written before it: no thread wrote them. No refusal: each is judged, as a record that is no hit and no miss |
+| `refused_malformed` | other records with kind bit 31 that are no refusal a shader writes (no reason, a reason bit this probe does not know, or other words that are not zero). No refusal: each is judged, as a record that is no hit and no miss |
+| `refused_taken_by_next` | rays this path refused, before or in the dispatch, that the next path gave a hit or a miss (native: the hybrid) |
+| `refused_unanswered` | rays this path refused that no built path took (the hybrid's next path, software on the GPU, is not built) |
+| `verdict` | victory-rt's verdict on the rays judged: `pass`, `fallback`, `fail`, `baseline-fail`, `useless`. It says nothing of the rays the path refused, which are counted in the columns before this one. Under the crate's policy, not yet the rule |
+| `judged` | rays judged: every ray the path has a record for that is no refusal, unwritten records among them |
+| `clear` | of those, rays with one permitted result |
+| `ambiguous` | rays with several |
+| `excluded` | rays counted and not judged (an unstable candidate, or over 16 results) |
+| `wide` | clear or ambiguous rays with a result whose tolerance is too wide to compare numbers by |
+| `not_clear_reasons` | the rays that are not clear by the reference's reasons, `reason count` with `;` between |
+| `matched` | clear rays answered rightly |
+| `permitted_primary` | ambiguous rays answered as the reference itself answers |
+| `permitted_other` | ambiguous rays answered with another permitted result |
+| `ids_only` | right answers compared by ids and face alone (a wide result) |
+| `beyond_band` | right answers whose error is over 1/8 of the tolerance: no defect, reported |
+| `missed` | defects: a miss where a hit is required |
+| `phantom` | defects: a hit where none is permitted |
+| `wrong_triangle` | defects: a hit on a triangle that is not permitted |
+| `wrong_face` | defects: the right triangle, the other face |
+| `numeric` | defects: t, u or v outside the tolerance |
+| `malformed` | defects: a record that is no hit and no miss (an unwritten record is one, unless its ray is excluded) |
+| `worst_t_ratio` | the largest error of t among compared hits, as a share of its tolerance |
+| `worst_uv_ratio` | the same for u and v |
+| `faces_not_reported` | hybrid: hits judged with the face of the permitted result they name, since the procedural shader reports none |
+| `model_defects` | defects of the CPU model of the software traversal against the same reference on the same rays; empty where the model refused the frame |
+| `model_identical` | rays the path and the model answer rightly and word for word alike |
+| `model_divergent` | rays both answer rightly with different results, first-hit rays apart |
+| `model_divergent_first_hit` | the same on first-hit rays |
+| `model_refusal` | why the CPU model has no answers for the frame |
+| `repeat_differing` | hit records of the checking dispatch (one more dispatch after the timed ones, of the `timed_rays` records a timed one lists, over poisoned records and in no time of the row) that differ, word for word, from the dispatch that listed each ray once; a record it left unwritten differs |
+| `null_not_miss` | null row: records that are not eight zero words, of its dispatch over the listed rays and of its checking dispatch; a record left unwritten is one |
+| `trace_samples` | timed dispatches kept that have a GPU time |
+| `trace_untimed` | timed dispatches kept that have none |
+| `trace_gpu_ms_min` | GPU time between a timestamp before and one after the dispatch alone (`timed_rays` records, the production container, a queue doing nothing else, a submission that holds nothing else), over the kept repeats: the least |
+| `trace_gpu_ms_p50` | the median |
+| `trace_gpu_ms_p95` | the 95th percentile by nearest rank |
+| `trace_gpu_ms_max` | the greatest |
+| `null_gpu_ms_min` | tracing rows: the null shader's `trace_gpu_ms_min` for the same class and `timed_rays`, beside |
+| `null_gpu_ms_p50` | its median |
+| `null_gpu_ms_p95` | its 95th percentile |
+| `null_gpu_ms_max` | its greatest |
+| `builds_asked` | structures the frame asks to be built, bottom levels and the top level together |
+| `refits_asked` | structures it asks to be refitted |
+| `builds_done` | structures the backend built |
+| `refits_done` | structures the backend refitted in place |
+| `build_gpu_ms` | GPU time of the frame's bottom-level builds, each between timestamps of its own with its barrier, summed; empty where one has no time |
+| `refit_gpu_ms` | the same for bottom-level refits |
+| `tlas_build_gpu_ms` | the same for the top level where it was built |
+| `tlas_refit_gpu_ms` | the same for the top level where it was refitted |
+| `build_untimed` | build and refit regions without a time |
+| `convert_cpu_ms` | processor time turning the frame's scene into the bytes a build reads (vertices, indices, boxes, triangle data, instances) |
+| `upload_cpu_ms` | processor time making upload memory and copying those bytes in; null row: the same for the class's ray list |
+| `record_cpu_ms` | processor time describing the builds to the backend and recording them, the device's size queries and making each new structure's memory among it |
+| `pipeline_cpu_ms` | processor time creating the path's pipeline, the driver's compile among it; in the path's first row of a class only the first time |
+| `input_bytes` | bytes uploaded for the frame's builds (a refit uploads positions or boxes alone); null row: the bytes of the class's ray list |
+| `build_wait_ms` | time the submitting thread was blocked from the builds' submission until the card had run it |
+| `trace_wait_ms_p50` | the same for a timed dispatch's submission, median over the kept repeats |
+| `readback_wait_ms` | the same for the copy that brings the hit records back |
+| `own_rt_structures_bytes` | the account gauge of structure memory (on the card) after the frame's builds and dispatches |
+| `own_rt_scratch_bytes` | the gauge of build scratch and the hit buffer (on the card) then |
+| `own_rt_buffers_bytes` | the gauge of uploads, instance descriptions and read-backs (system memory the card reads) then |
+| `video_local_mb_before` | the adapter's figure for this process on the card before the path's first build of the class; cross-check only |
+| `video_local_mb_after` | the same after the frame's builds and dispatches |
+| `video_budget_mb` | the adapter's budget for this process on the card then |
+| `video_shared_mb_before` | the adapter's figure in system memory the card reads, before |
+| `video_shared_mb_after` | and after |
+| `commit_mb_before` | the process's private commit before the path's first build of the class |
+| `commit_mb_after` | and after the frame's builds and dispatches |
+| `working_set_mb_before` | the process's working set before |
+| `working_set_mb_after` | and after |
+| `loop_iterations` | loop row: iterations run |
+| `iter_ms_min` | loop row: wall time on the submitting thread of one iteration, from the start of its conversion through its builds' submission and wait to the end of the wait for its dispatch: the least |
+| `iter_ms_p50` | the median |
+| `iter_ms_p95` | the 95th percentile |
+| `iter_ms_p99` | the 99th percentile |
+| `iter_ms_max` | the greatest |
+| `loop_last_differing` | loop row: hit records of the loop's checking dispatch (one more dispatch after the last iteration, over poisoned records and in no time of the row) that differ from those of the same frame's first dispatch |
 
 ## What is compared
 
@@ -165,23 +391,26 @@ the next path. The probe is one of three gates for `auto` (last section).
 
 ## Measurements
 
-Five quantities, each in its own columns, never summed with another.
+Five quantities, each in its own columns, never summed with another. The
+third column is the specification's; the fourth is what the first version
+writes, defined column by column in "The columns of `rt-probe.csv`"
+above. Where the two differ, the file has the fourth.
 
-| Measurement | How | Columns |
-|---|---|---|
-| **1. GPU time of traversal dispatches** | a begin and an end timestamp around the trace dispatch of the **production** container alone, on a queue doing nothing else; 3 runs discarded, 30 kept | `trace_gpu_ms_min`, `trace_gpu_ms_p50`, `trace_gpu_ms_p95`, `trace_gpu_ms_max`, `rays_per_s`, `container_hash` |
-| **2. CPU translation overhead** | timers in the translator and the recorder, per program and in total | `recognise_ms`, `variant_ms` (per path and form), `driver_compile_ms`, `convert_ms_p50` and `convert_ms_p95` (build descriptions, per iteration), `bind_extra_us_p50`; totals `recognise_ms_total`, `variant_ms_total` |
-| **3. Video memory** | **bytes counted by owner, from the sizes allocated**, per path: structures, scratch, side tables, boxes. Cross-check only: the adapter's local-segment usage in a fresh device, read after the scene's buffers exist and again after one path's objects are built (it is process-wide, so nothing else may be alive) | `as_bytes`, `scratch_bytes`, `side_table_bytes`, `box_bytes`; `video_local_mb_delta` |
-| **4. System memory** | bytes counted by owner: the variants, the library's growth, kept descriptions, and the guest tree where it lies in system memory (the default rows; on the card for the on-card rows, then under 3). On the title also the host copies, windows and snapshots the layer causes. Cross-check only: working set and private commit of the probe, read at the same two events (the generator and reference dominate them) | `variant_dxil_bytes`, `library_bytes_delta`, `registry_bytes`, `guest_bytes`, `guest_segment`; title: `own_buffer_copies_mb`, `own_windows_mb`, `own_snapshots_mb`, `video_shared_mb`; `working_set_mb_delta`, `commit_mb_delta` |
-| **5. Rendering correctness** | the three levels above | `k`, `m_max`; level 1: `rays`, `unambiguous`, `sliver_rays`, `amb_edge`, `amb_seam`, `amb_extent`, `amb_tie`, `amb_filter`, `amb_degenerate`, `agree`, `admissible`, `lost_hits`, `gained_hits`, `id_flips`, `surface_flips`, `facing_flips`, `filter_flips`, `out_of_tol`, `t_err_max`, `bary_err_max` (in tolerances and in spacings); level 2: `consumed_equal`, `consumed_within`, `consumed_differ`; level 3: `px_differ`, `px_share`, `px_group_max`; and `dup_candidates`, `screened_nonfinite`, `repeat_equal`, `equal_to_s`, `sensitive` |
+| Measurement | How | Columns specified | First version |
+|---|---|---|---|
+| **1. GPU time of traversal dispatches** | a begin and an end timestamp around the trace dispatch of the **production** container alone, on a queue doing nothing else; 3 runs discarded, 30 kept | `trace_gpu_ms_min`, `trace_gpu_ms_p50`, `trace_gpu_ms_p95`, `trace_gpu_ms_max`, `rays_per_s`, `container_hash` | `trace_gpu_ms_min`, `trace_gpu_ms_p50`, `trace_gpu_ms_p95`, `trace_gpu_ms_max` and `container_hash`, with `trace_samples`, `trace_untimed`, `timed_rays`, and the null shader's four figures for the same class beside them (`null_gpu_ms_*`); the two are never subtracted. `--discard` and `--repeat` set the 3 and the 30. One timed dispatch lists `timed_rays` ray records (`--rays`, 2^20 unless asked): the class's rays, begun again as often as it takes. No `rays_per_s`: the count and the time stand in columns of their own |
+| **2. CPU translation overhead** | timers in the translator and the recorder, per program and in total | `recognise_ms`, `variant_ms` (per path and form), `driver_compile_ms`, `convert_ms_p50` and `convert_ms_p95` (build descriptions, per iteration), `bind_extra_us_p50`; totals `recognise_ms_total`, `variant_ms_total` | the processor's side of the host builds only, per frame: `convert_cpu_ms` (the scene into the bytes a build reads), `upload_cpu_ms` (in the null row: of the class's ray list), `record_cpu_ms` (describing and recording the builds, the device's size queries and making each new structure's memory among it), `pipeline_cpu_ms` (pipeline creation, the driver's compile among it; once a shader). Nothing of recognition or variants: no translator runs |
+| **3. Video memory** | **bytes counted by owner, from the sizes allocated**, per path: structures, scratch, side tables, boxes. Cross-check only: the adapter's local-segment usage in a fresh device, read after the scene's buffers exist and again after one path's objects are built (it is process-wide, so nothing else may be alive) | `as_bytes`, `scratch_bytes`, `side_table_bytes`, `box_bytes`; `video_local_mb_delta` | the account gauges of the backend's three owners after each frame (`gpu/account.rs`): `own_rt_structures_bytes` (structures, on the card), `own_rt_scratch_bytes` (build scratch and the hit buffer, on the card), `own_rt_buffers_bytes` (uploads, the hybrid's boxes and triangle data among them, instance descriptions, read-backs: **system memory the card reads, not to be added to the other two**). Beside them the adapter's figure, not in a fresh device and not as a difference: read before a path's first build of a class and after each frame (`video_local_mb_before`, `video_local_mb_after`, `video_budget_mb`, `video_shared_mb_before`, `video_shared_mb_after`), with the class's ray list and hit buffer alive at both. No `video_local_mb_delta`. No side tables exist |
+| **4. System memory** | bytes counted by owner: the variants, the library's growth, kept descriptions, and the guest tree where it lies in system memory (the default rows; on the card for the on-card rows, then under 3). On the title also the host copies, windows and snapshots the layer causes. Cross-check only: working set and private commit of the probe, read at the same two events (the generator and reference dominate them) | `variant_dxil_bytes`, `library_bytes_delta`, `registry_bytes`, `guest_bytes`, `guest_segment`; title: `own_buffer_copies_mb`, `own_windows_mb`, `own_snapshots_mb`, `video_shared_mb`; `working_set_mb_delta`, `commit_mb_delta` | the process's counters only, before a path's first build of a class and after each frame: `commit_mb_before`, `commit_mb_after`, `working_set_mb_before`, `working_set_mb_after`; no `*_delta` column. The CPU reference's and the generator's own memory is in them. No variant, library, registry or guest tree exists to count |
+| **5. Rendering correctness** | the three levels above | `k`, `m_max`; level 1: `rays`, `unambiguous`, `sliver_rays`, `amb_edge`, `amb_seam`, `amb_extent`, `amb_tie`, `amb_filter`, `amb_degenerate`, `agree`, `admissible`, `lost_hits`, `gained_hits`, `id_flips`, `surface_flips`, `facing_flips`, `filter_flips`, `out_of_tol`, `t_err_max`, `bary_err_max` (in tolerances and in spacings); level 2: `consumed_equal`, `consumed_within`, `consumed_differ`; level 3: `px_differ`, `px_share`, `px_group_max`; and `dup_candidates`, `screened_nonfinite`, `repeat_equal`, `equal_to_s`, `sensitive` | level 1 only, in `victory-rt`'s own counts and names, under that crate's policy: `verdict`, `judged`, `clear`, `ambiguous`, `excluded`, `wide`, `not_clear_reasons`, `matched`, `permitted_primary`, `permitted_other`, `ids_only`, `beyond_band`, the six kinds of defect, `worst_t_ratio`, `worst_uv_ratio`; the refusal counts, `unwritten` and `refused_malformed`; `model_*` for the CPU model of the software traversal; `repeat_differing` (the check) |
 
 Reported apart from all five, and never inside trace time:
 
-| Measurement | How | Columns |
-|---|---|---|
-| Build and refit | a timestamp pair of its own around each bottom-level build, update, top-level build and barrier, and around the pointer walk H-node needs; scratch as one range per build and as one build per barrier | `build_ms_p50`, `refit_ms_p50`, `tlas_ms_p50`, `derive_ms_p50`, `scratch_mode` |
-| Synchronisation waits | from submission to fence for a build alone, and for a trace with and without a build ahead of it; time on the submitting thread before the wait (`gpu/host.rs:1531-1532`) | `submit_wait_ms_p50`, `build_then_trace_ms_p50`, `cpu_prep_ms_p50` |
-| Loop mode | 600 iterations of what a path adds per frame. `iter_ms` is wall time on the submitting thread, from the start of an iteration's conversion to the fence of its last submission, the wait included; S's loop is its trace alone | `iter_ms_min`, `iter_ms_p50`, `iter_ms_p95`, `iter_ms_p99`, `iter_ms_max` |
+| Measurement | How | Columns specified | First version |
+|---|---|---|---|
+| Build and refit | a timestamp pair of its own around each bottom-level build, update, top-level build and barrier, and around the pointer walk H-node needs; scratch as one range per build and as one build per barrier | `build_ms_p50`, `refit_ms_p50`, `tlas_ms_p50`, `derive_ms_p50`, `scratch_mode` | per frame, each kind summed over the frame's structures and empty where one of them has no time: `build_gpu_ms`, `refit_gpu_ms`, `tlas_build_gpu_ms`, `tlas_refit_gpu_ms`, `build_untimed`; what was asked and what the backend did (`builds_asked`, `refits_asked`, `builds_done`, `refits_done`). A structure's region holds its build and the barriers the backend puts around it; a barrier has no pair of its own. A frame is built once, so there is no median. Scratch is the backend's pool: there is no choice of mode and no `scratch_mode`. No pointer walk exists |
+| Synchronisation waits | from submission to fence for a build alone, and for a trace with and without a build ahead of it; time on the submitting thread before the wait (`gpu/host.rs:1531-1532`) | `submit_wait_ms_p50`, `build_then_trace_ms_p50`, `cpu_prep_ms_p50` | `build_wait_ms`, `trace_wait_ms_p50`, `readback_wait_ms`: time the submitting thread is blocked from a submission to its fence, for the builds, for a timed dispatch, for the copy that brings records back. The time before the wait is measurement 2's `record_cpu_ms`. Builds and traces are never in one submission, so there is no trace with a build ahead of it and no `build_then_trace_ms_p50` |
+| Loop mode | 600 iterations of what a path adds per frame. `iter_ms` is wall time on the submitting thread, from the start of an iteration's conversion to the fence of its last submission, the wait included; S's loop is its trace alone | `iter_ms_min`, `iter_ms_p50`, `iter_ms_p95`, `iter_ms_p99`, `iter_ms_max` | `iter_ms_min`, `iter_ms_p50`, `iter_ms_p95`, `iter_ms_p99`, `iter_ms_max`, with `loop_iterations` and `loop_last_differing` (the loop's check), for `native` and `hybrid`; an iteration ends with the end of the wait for its dispatch; the builds' figures in a loop row are medians over the iterations. Off unless `--loop` is given (600 in the owner's run). No loop of S |
 
 **None of the probe's times selects a path.** A probe scene is not a
 frame of the title: time follows triangle counts, what is rebuilt and
@@ -191,7 +420,7 @@ guest's and reported. Host compaction is not designed and has no column.
 
 ## Output
 
-CSV files of measurements and synthetic data only, safe to share.
+Text files of measurements and synthetic data only, safe to share.
 `rt-probe.csv`: `#` lines hold `key=value` (probe version, commit, date,
 seed, adapter, driver version, vendor and device id for the report only,
 ray-tracing tier, wave lane range, video memory, validator version, k);
@@ -204,23 +433,121 @@ unit test. `rt-record`: the validation record (dxr-architecture.md,
 "Selection"); the probe writes its verdicts, `m_max` and container
 hashes, the title comparison adds the title verdict and title times.
 
+**What the first version writes**, beside the table `--out` names and
+named after it (`rt-probe.csv` here):
+
+| File | Holds |
+|---|---|
+| `rt-probe.csv` | a first line `# victory rt-probe results 1`; `#` lines of `key=value`: `probe_version`, `policy` (the verdicts are under the crate's policy, not yet the rule), `reading`, `k` (not computed), `seed`, `classes`, `timed_rays`, `repeats`, `discard`, `loop`, `unix_time`, the device's own words (`adapter`, `adapter_vendor_id` and `adapter_device_id` for the report only, `adapter_software`, `adapter_dedicated_mb`, `adapter_shared_mb`, `driver`, `video_budget_mb_at_start`, `raytracing_tier`, `wave_lanes`, `shader_model_6_6`), `rt_backend_switch` (the switch's value that let the probe open the backend), `d3d12_debug_layer` (`off`, or `on` with the statement that no time of the file is a measurement), `rt_structures_bound_mb`, `rt_rebuild_after_refits`, `planned` (the run's dispatches and rays, counted before it starts), `path.software-gpu` (not built), per shader `container.<form>` (header digest and size) and `pipeline.<form>`, `backend_counters`, `rows`, and `files_not_written` only where a file of the run could not be written (below); then the line of column names and the rows. No commit (the binary does not know it; send it with the file) and no validator version (the validator runs on Linux; `scripts/validate-dxil.sh` names each container it checks by the same header digest) |
+| `rt-probe.native.hits`, `rt-probe.hybrid.hits` | the path's hit records in `victory-rt`'s result format (dxr-validation-reference.md): a section per class and frame, one record of eight hex words per ray, the fingerprint of the generated case, a checksum. The rays are not in the file: class and seed name them. A refusal is a record like any other, kind bit 31 set; so is a record the dispatch left unwritten, which holds the poison word eight times (`a5c3f0f0`); a ray refused before the dispatch has the probe's own kind `0xC0000000`, which no shader writes. A row of a tracing path has a section exactly when its refusal counts are filled (the answers came back), also where a later step of the row failed. A path with no records gets no file, and an earlier run's file of that name is removed |
+| `rt-probe-mismatch.csv` | the first 64 defects of each class, frame and path: class, seed, frame, path, ray, `victory-rt`'s name for the defect, the ray's twelve words and the record's eight as hex: enough to replay one ray in a host test. The column line alone when there is none |
+
+The hit records are written first and the table last, so a table on disk
+has its records beside it or says which are missing: a file that cannot
+be written does not stop the others, the command prints `rt-probe: NOT
+WRITTEN:` with the file and the reason and ends with an error, and the
+table then holds a `files_not_written` line that names it. Where the
+table itself cannot be written the command prints it to the console,
+between two lines of dashes. That any of this happens after a run is
+made unlikely beforehand: the folder is made and each of the four names
+is tried before the device is opened (a file that is there is opened for
+writing and left as it is; a name that is free is created and removed
+again).
+
 ## What the owner runs
 
-With the conditions of "Measuring" in [progress.md](progress.md).
+**Nothing below has run anywhere**: the probe has executed on no device,
+on no WARP adapter and under no debug layer. A first run is as likely to
+stop at a Direct3D call written from documentation as to produce figures,
+and the line it stops at is then the result to send back.
+
+With the conditions of "Measuring" in [progress.md](progress.md) that
+apply without a title (steps 1 and 3: the release build of the commit,
+other applications closed, the driver version noted), from the
+repository's folder on the Windows machine, in a Command Prompt. The
+`set` line before the probe's runs turns the experimental hardware
+backend on for this window: the probe is behind the same switch as a
+run's hardware ray tracing and runs nothing without it. The `set` line
+after them turns it off again, so that nothing else in the list runs
+with it (in PowerShell: `$env:VICTORY_RT_BACKEND = "hardware"` and
+`Remove-Item Env:VICTORY_RT_BACKEND`). The result files go to a folder
+beside the repository, which the command makes:
 
 ```
-scripts/check-linux.sh tests                           exists (tier 1)
-VICTORY_DXV=.../dxv scripts/validate-dxil.sh           exists (tier 1b)
-victory gpu-info                                       exists
-cargo test -p victory-shader bvh                       exists
-victory rt-probe --seed 1 --out rt-probe.csv           proposed
-victory rt-probe --seed 1 --out rt-probe-b.csv         proposed (repeat)
-victory rt-probe --seed 2 --out rt-probe-2.csv         proposed
-victory rt-probe --seed 1 --loop 600 --out rt-loop.csv proposed
-cargo xtask rt-summary rt-probe.csv --against rt-probe-b.csv   proposed
+cargo build --release -p victory
+target\release\victory gpu-info
+set VICTORY_RT_BACKEND=hardware
+target\release\victory rt-probe --seed 1 --classes static-soup,dynamic-refit,dynamic-rebuild --rays 4096 --repeat 2 --discard 1 --debug-layer --out ..\rt-results\rt-first.csv
+target\release\victory rt-probe --seed 1 --out ..\rt-results\rt-probe.csv
+target\release\victory rt-probe --seed 1 --out ..\rt-results\rt-probe-b.csv
+target\release\victory rt-probe --seed 2 --out ..\rt-results\rt-probe-2.csv
+target\release\victory rt-probe --seed 1 --loop 600 --out ..\rt-results\rt-loop.csv
+set VICTORY_RT_BACKEND=
+cargo xtask rt-summary ..\rt-results\rt-probe.csv
+cargo xtask rt-summary ..\rt-results\rt-probe-b.csv --against ..\rt-results\rt-probe.csv
+cargo xtask rt-summary ..\rt-results\rt-probe-2.csv
+cargo xtask rt-summary ..\rt-results\rt-loop.csv
+cargo test -p victory-shader bvh
 ```
 
-The third and fourth need nothing new and are already asked for
+The first `rt-probe` line is a short run of three classes under the
+Direct3D 12 debug layer (105 dispatches; builds, refits and rebuilds
+among its 18 build submissions), to be made before the others: every call
+of the probe's Direct3D part is unverified, and the layer says in words
+why a call is refused where a run without it would stop or hang. It
+needs the optional Windows feature "Graphics Tools"; without it the
+command prints `rt-probe: NOT RUN:` and that line is what to send. Its
+messages are printed as `rt-probe: validation layer, ...` lines and
+counted in the rows' notes. **No time in `rt-first.csv` is a
+measurement**; its header says so. If that run prints messages, send
+them before making the long runs.
+
+Options of `rt-probe`: `--seed <n>` (a number, or hex after `0x`; without
+it the seed of the reference's own tables), `--classes all` or names with
+commas between, `--rays <n>` (ray records in one timed dispatch, 2^20
+unless given, at most 4,194,240), `--repeat <n>` (timed dispatches kept,
+30), `--discard <n>` (run before those and left out, 3), `--loop <n>`
+(iterations of the loop mode, none unless given), `--debug-layer` (the
+Direct3D 12 debug layer on and its messages printed; for finding out why
+a call is refused, never for a time), `--out <file>` (the table;
+required, outside the repository).
+
+| Command | What it prints |
+|---|---|
+| `victory gpu-info` | the adapter, driver and capabilities, the ray-tracing tier and the wave lane range among them; its last line is `ray tracing backend: ...`. Already asked for (`progress.md`, "Needed from the owner") |
+| `victory rt-probe ...` | every line begins `rt-probe:`. First that no title file is read; then `device: key = value` lines (the header's device words); `this run: ...`, the dispatches and rays it will make, counted before it starts; a `pipeline, <form> shader: made in ... ms of processor time` or `not made: ...` line per shader; per class one line when the CPU reference starts and one when the class is done (`<class>: null 1/1 ran, 0 records not a miss; native <frames ran>, <defects> (<records unwritten>), <rays refused>, <records of the checking dispatch differing>; hybrid ...`); with `--debug-layer`, a `validation layer, ...` line per message; a `wrote <file> (<bytes> bytes)` line per file, and `NOT WRITTEN: <file>: <why>` for one that could not be; `rows: <n> ran, <n> failed, <n> not run, <n> not built`; how the verdicts and times are to be read; the `rt-summary` command for the file. Where nothing runs: `rt-probe: NOT RUN: <why>` (the switch not asking for the hardware backend; a result file that cannot be written; `<adapter> cannot run inline ray queries: ...`; no debug layer), then that nothing was dispatched and no file written, and the command ends with an error |
+| `cargo xtask rt-summary <file>` | the header's device and options (and, where they apply, that the run was under the debug layer and which files were not written); correctness by class and path (frames ran, rays, judged, clear, ambiguous, excluded, defects, unwritten, refused, records differing, the crate's verdicts on the rays judged); then, each in a table of its own: GPU time of the traversal dispatch alone with the null shader's beside it; GPU time of builds and refits; processor time; time blocked waiting for the card; video memory by owner with the adapter's figure beside it; system memory; the loop mode if it ran; `to look at`, a line for each row that failed, has a defect, an unwritten record, a refusal, an untimed region or records of a checking dispatch that differ; and how to read it: no row is a pass under the rule, and the times select no path and say nothing about the title |
+| `... --against <earlier file>` | the two headers where they differ; row by row, every count that differs (two runs of one seed on one device and driver must agree on all of them); the two runs' hit-record files, section by section, with how many records differ and which sections the rows have that were not compared; the median traversal times side by side, neither called better; and one line of three: `the two runs agree` (equal counts in every row, and every section of hit records the rows have was found in both runs' files and is identical; the line gives the numbers), `THE TWO RUNS DIFFER`, or `NOT COMPARED` (counts equal, but a hit-record file is missing or unreadable, a section is in neither file, or neither run has a hit record: nothing is said about agreement) |
+
+**How long a default run is**, as counts (no time is predicted; the
+`this run:` line prints the same before anything is dispatched). At any
+of the seeds above, a run with no option but `--seed` and `--out` is:
+
+> 10 classes, 16 frames; 1470 dispatches (350 of the null shader; 1260 timed and kept, 126 timed and left out, 42 that check them and are in no time); 1140897958 rays traced; a ray list of up to 50331648 bytes and a hit buffer of up to 33554432 bytes
+
+Each dispatch is a submission of its own that is waited for. Beside them
+there are 32 submissions of builds (one per path and frame; over the 16
+frames the scenes ask each path for 37 structures built and 9 refitted,
+bottom and top levels together) and 84 copies of hit records back. The
+CPU reference and the CPU model trace every ray of every frame once
+(23,635 rays over the 16 frames) before a class is dispatched. With
+`--loop 600` a run is 13,490 dispatches and 1,160,652,828 rays traced,
+104 copies back, and the two classes with four frames add 2,400
+submissions of builds.
+
+**What to send back**: the whole `rt-results` folder (five tables, each
+with its two `.hits` files and its mismatch list: a `.hits` file of a
+default run is 23,635 lines, about 1.7 MB of text, a table under 200 KB),
+the console output of each command, the `gpu-info` report, and the commit
+the binary was built from (`git rev-parse HEAD`), which the files do not
+hold. The files hold measurements and generated data only, and no path of
+the machine. A run that hangs or is ended early has written nothing: the
+files are written when the last class is done, so what it printed is what
+there is to send. A run that finishes loses nothing to a file that cannot
+be written: the others are written, and a table that cannot be is
+printed.
+
+`gpu-info` and the `bvh` tests need nothing new and are already asked for
 (`progress.md`, "Needed from the owner"): the wave lane range, which
 decides whether 64-lane tracers have a software pipeline at all, and the
 node test against its reference on an NVIDIA card, which has no recorded
@@ -229,10 +556,14 @@ run.
 | Part | State | Tier (progress.md) |
 |---|---|---|
 | Validator over today's containers | implemented; a first run is recorded in `progress.md` | 1b |
-| Reference shaders compiled and accepted by the validator | done in a session's scratch directory, not kept in the repository | tool run |
-| Region analysis, description, recogniser, native generator, R-bits and R-ref, the constant k, scene generator, record and selection, CSV and summary | speculative; all testable on any host | 1, 1b |
+| Reference shaders compiled and accepted by the validator | the HLSL and the command are kept (`crates/victory-shader/tests/dxc-reference/`); no compiled output is | tool run |
+| The first version's device-free parts: a scene as build inputs, the mapping of rays, record decoding with refusals and unwritten records, the statistics, the result files and the check of where they go, the switch, the run over a stand-in (every measurement column held against what the stand-in reported for it), `rt-summary` and its comparison of two files | implemented; tested (host tests) | 1 |
+| The first version's three containers | accepted by Microsoft's validator on Linux (dxr-shader-emission.md) | 1b |
+| The first version on a device: `hardware.rs` (the debug layer and its messages among it), `gpu/rt/device.rs`, the command | type-checked for Windows only; hardware-validated: nothing is | 2 |
+| Region analysis, description, recogniser, native generator, R-ref, the constant k, the scene classes of "Scenes", the record and selection, levels 2 and 3 | speculative; all testable on any host | 1, 1b |
 | Native variant against a CPU model in the test-only interpreter | speculative; model against model only | 1 |
-| Every path on a device; timestamp pairs; store redirection and the per-class switch for the title comparison; every timing and memory figure | speculative | 3 |
+| The software traversal as a shader over console-format nodes (S, `software-gpu`) | speculative; a named path with status `not built` | 3 |
+| Store redirection and the per-class switch for the title comparison; every timing and memory figure | speculative | 3 |
 
 ## After the probe, on the title
 

@@ -4,6 +4,11 @@ Host side of an experimental backend (`crates/victory-gpu/src/rt/`): host
 acceleration structures built with Direct3D 12 and traversed by inline
 `RayQuery` (DXR 1.1), beside the software traversal translated programs
 carry. **Nothing in a run calls it, and none of it has run on hardware.**
+One tool does call it: the synthetic probe, `victory rt-probe`
+([dxr-validation.md](dxr-validation.md), "The first version"), through
+`Rt::open_on`, and only where `VICTORY_RT_BACKEND` says `hardware` or
+`auto` (the probe reads the switch itself before it makes a device,
+since `open_on` does not); that use is type-checked for Windows only.
 The software backend is the reference and the fallback for refused cases.
 
 ## Selection (by capability, never by vendor or model)
@@ -115,7 +120,9 @@ is refused and counted; nothing is evicted. All bounds are unmeasured.
 and dispatch; `timed(label, ..)` and `timings()` for GPU time (a region
 lives in one list: one open at a submit is cut, has no time and is
 counted; the latest 4096 results are kept); `submit`, `wait` (returns the
-CPU time waited), `flush`; `output`, `read_back`; `stats()`, `memory()`,
+CPU time waited), `flush`; `output`, `read_back`; a buffer's `state()`
+(for a caller that records a copy into an output buffer, as the probe
+does to poison hit records before a dispatch); `stats()`, `memory()`,
 `video_memory_mb()` (the process's use on the adapter of this backend's
 own device), `commit_and_working_set()`.
 
@@ -137,6 +144,7 @@ The rules were read from the DirectX Raytracing functional specification.
 | `device` (`Rt`), `host.rs` accessors, filling `raytracing_device` | implemented; type-checked for Windows only |
 | Smoke test `structures_are_built_refitted_compacted_and_released_on_the_host` | type-checked for Windows only; not yet run on hardware. Compacts a 20 000-triangle bottom level and builds the top level over the copy; where the device reports no smaller size it prints `COMPACTION NOT EXERCISED` and the copy stays untested |
 | Every D3D12 call, timestamp readings, memory figures | not yet run on hardware |
+| Use by the synthetic probe (`crates/victory-rt-probe/src/hardware.rs`): `open_on`, uploads, builds and refits as timed regions, `bind_top`, `record`, `output`, `read_back` | implemented; type-checked for Windows only |
 | RayQuery in translated programs, guest structure interception, use by a run's submissions | not part of this step |
 | Open for hardware | whether empty levels are accepted; whether a barrier per build, and one more before each refit, serialises builds; what a result buffer per structure wastes (up to 64 KiB each); whether the choices stricter than D3D12 (no refit after compaction, or when an instance's bottom-level address or the index address changed; no compaction after a refit) cost rebuilds or memory that matter |
 | Before a run's submissions use it | several open lists (see the ordering contract); the debug layer's view of upload memory as a build input and of timestamps resolved into read-back memory; whether time blocked on the host's submission lock belongs in the measured wait |

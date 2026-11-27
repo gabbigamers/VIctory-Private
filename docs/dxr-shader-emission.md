@@ -2,7 +2,9 @@
 
 Experimental: nothing in the translation calls `emit::rayquery`. It gives
 the emitter DXR 1.1's inline `RayQuery` and builds the three compute shaders
-of the hardware ray-tracing prototype. No driver, no device and no Windows
+of the hardware ray-tracing prototype. The synthetic probe
+(`crates/victory-rt-probe`; [dxr-validation.md](dxr-validation.md)) makes
+its three pipelines from them and has not run. No driver, no device and no Windows
 `dxil.dll` has seen these shaders. What has: this host's tests, and
 Microsoft's validator and compiler for Linux (below). The last section says
 what that leaves open.
@@ -189,7 +191,10 @@ given to `dxc` is kept as source, with the command, in
   the dispatch (NaN, infinities, tmin negative or above tmax, a direction
   of zero length, flags outside DXR 1.1's inline set, exclusive pairs);
   records of kind `HIT_REFUSED` after it; scenes with procedural geometry
-  or micromaps.
+  or micromaps. The synthetic probe adapts two words on the CPU before it
+  asks `ray_refusal`, and counts each: it clears `SKIP_CLOSEST_HIT_SHADER`,
+  which changes no hit of an inline query, and cuts the instance mask to
+  the low eight bits D3D12 reads (`crates/victory-rt-probe/src/rays.rs`).
 
 ## Open points for a Windows run
 

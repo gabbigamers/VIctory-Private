@@ -38,6 +38,7 @@ a task needs. A section is given as `document § heading`.
 | "Functionally equivalent rendering": the proposed rule, tolerance, ambiguous rays | `dxr-compatibility.md § The rule` |
 | What DXR guarantees and what it leaves to the driver, per guest behaviour | `dxr-compatibility.md § Semantics, from the native path's side`, `§ What the layer may not assume` |
 | The probe: paths, scenes, columns, pass rules, what the owner runs | `dxr-validation.md § What is compared`, `§ Scenes`, `§ Measurements`, `§ What the owner runs` |
+| The probe as built (`victory rt-probe`, behind `VICTORY_RT_BACKEND`): what it runs, checks and writes, its columns, where it departs from the specification | `dxr-validation.md § The first version (victory rt-probe)`, `§ The columns of rt-probe.csv`, `§ Output`; `memory.md § What allocates` (row R5) |
 | The reference crate as built: records, reference, tolerance, policy | `dxr-validation-reference.md § Records`, `§ The reference`, `§ Comparison policy`, `§ Against the proposed rule` |
 | Ray queries in the emitter; the three shaders; the refused record | `dxr-shader-emission.md § What was added`, `§ The shaders`, `§ Open points for a Windows run` |
 | The builder's build descriptions at its imports | `dxr-build-capture.md § Where a build description is visible`, `§ What a run logs, and what it decides` |
@@ -59,6 +60,7 @@ a task needs. A section is given as `document § heading`.
 | `victory-shader` | GFX10 decode (`gfx10/`), the SSA form (`ir.rs`), structure and resource tracking, the DXIL emitter (`emit/`), the lowering (`emit/lower.rs`, `emit/lower/*.rs`) | `emit/mod.rs` module text; `emit/lower/limit.rs` for loops; `emit/lower/bvh.rs` for the node test; `emit/rayquery.rs` for ray queries; `emit/bitcode.rs` for the checker and the test interpreter |
 | `victory-gpu` | host D3D12: lists, draws, descriptors, title-memory copies (`memory.rs`, `paging.rs`, `shadow.rs`, `watch.rs`), pipelines and caches, capability record (`caps.rs`), memory owners (`account.rs`), frame pacing and the performance log (`pacing.rs`), the ray-tracing backend (`rt/`), build capture (`rtcapture/`), dispatch counts (`dispatch.rs`), wave census (`waves.rs`) | the file's own module text |
 | `victory-rt` | synthetic scenes, the reference tracer, the software traversal's CPU model, comparison, result file | `src/lib.rs`; `dxr-validation-reference.md` |
+| `victory-rt-probe` | the synthetic probe: build inputs, ray and hit records, the run and its checks, the result files (`row.rs`, `file.rs`), a stand-in device for host tests (`standin.rs`), the Direct3D 12 side (`hardware.rs`, type-checked for Windows only); its command is `apps/victory/src/rtprobe.rs`, its summary `cargo xtask rt-summary` (`xtask/src/rt_summary.rs`) | `src/lib.rs`; `dxr-validation.md § The first version (victory rt-probe)` |
 | `bcpack-reference` | the vendored, attributed part of `bcpack-rs`, tests only | its `README.md` |
 | `apps/victory`, `xtask` | the commands (`run`, `translate`, `gpu-info`); `policy`, `perf-summary` | `README.md § Commands` |
 

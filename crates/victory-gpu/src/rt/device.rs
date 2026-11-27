@@ -182,6 +182,12 @@ impl Buffer {
         &self.resource
     }
 
+    /// The state it is in between the backend's commands: a caller that
+    /// records a copy into or out of it moves it from this state and back.
+    pub fn state(&self) -> D3D12_RESOURCE_STATES {
+        self.state
+    }
+
     /// Writes `bytes` at `offset` of upload memory. Whether it did: not
     /// outside the buffer, and not into memory the CPU does not map. The
     /// caller keeps the ordering contract: nothing submitted and not yet

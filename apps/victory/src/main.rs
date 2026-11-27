@@ -6,6 +6,7 @@
 mod census;
 mod inspect;
 mod prebuild;
+mod rtprobe;
 mod run;
 mod shader;
 mod translate;
@@ -127,6 +128,47 @@ enum Command {
     /// Reads no title files; its output can go into a hardware report as
     /// it is (docs/gpu-compatibility.md).
     GpuInfo,
+    /// Run the synthetic ray-tracing probe on the host GPU: generated
+    /// scenes and rays through host ray-tracing structures and the three
+    /// inline-query shaders, each path's hits compared with the CPU
+    /// reference and the CPU model of the software traversal, each cost
+    /// measured apart. Reads no title files (docs/dxr-validation.md); its
+    /// times select no path and say nothing about a title. Runs only with
+    /// VICTORY_RT_BACKEND=hardware (or auto) set.
+    RtProbe {
+        /// The seed the scenes and rays are generated from: a number, or
+        /// hex after 0x. Without it, the seed of the reference's own
+        /// documented tables.
+        #[arg(long)]
+        seed: Option<String>,
+        /// Scene classes: `all`, or names with commas between.
+        #[arg(long, default_value = "all")]
+        classes: String,
+        /// Ray records one timed dispatch lists: the class's rays, begun
+        /// again as often as it takes.
+        #[arg(long, default_value_t = victory_rt_probe::plan::DEFAULT_TIMED_RAYS)]
+        rays: u32,
+        /// Timed dispatches kept, per path and frame.
+        #[arg(long, default_value_t = victory_rt_probe::plan::DEFAULT_REPEATS)]
+        repeat: u32,
+        /// Timed dispatches run before those and left out of the figures.
+        #[arg(long, default_value_t = victory_rt_probe::plan::DEFAULT_DISCARD)]
+        discard: u32,
+        /// Loop mode: this many iterations, per class and path, of what a
+        /// path adds per frame (0: none).
+        #[arg(long = "loop", default_value_t = 0)]
+        loops: u32,
+        /// Turn the Direct3D 12 debug layer on and print what it says. For
+        /// finding out why a call is refused: no time of such a run is a
+        /// measurement, and its file says so.
+        #[arg(long)]
+        debug_layer: bool,
+        /// The result table. The hit records of each path and the list of
+        /// mismatches are written beside it, named after it. Outside the
+        /// repository.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -210,6 +252,25 @@ fn main() -> Result<()> {
         }
         Command::Config => show_config(),
         Command::GpuInfo => gpu_info(),
+        Command::RtProbe {
+            seed,
+            classes,
+            rays,
+            repeat,
+            discard,
+            loops,
+            debug_layer,
+            out,
+        } => rtprobe::run(rtprobe::Args {
+            seed,
+            classes,
+            rays,
+            repeat,
+            discard,
+            loops,
+            debug_layer,
+            out,
+        }),
     }
 }
 
