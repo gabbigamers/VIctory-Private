@@ -40,7 +40,7 @@ use super::desc::{self, BottomDesc, Geometry, INSTANCE_BYTES, TopDesc};
 use super::life::{Refusal, State};
 use super::retire::RetireQueue;
 use super::scratch::{self, GRANULE, Pool};
-use super::select::{self, Backend, Lack};
+use super::select::{self, Lack};
 use super::stats::{Count, Stats};
 use super::timing::{Region, Regions, Results, Timing};
 use super::update::{self, Built, Change, Decision, Policy, Uncompacted, Unplanned, Why};
@@ -99,8 +99,8 @@ const _: () = {
 /// ([`Rt::stats`]); the caller's case stays with the software backend.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Error {
-    /// The hardware backend is not the one selected: the line that says
-    /// what is, and why (`super::select`).
+    /// No path over host structures is asked for, or the device cannot run
+    /// one: the line that says what is selected, and why (`super::select`).
     NotSelected(String),
     /// The device lacks what the backend needs.
     Unsupported(Vec<Lack>),
@@ -119,7 +119,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::NotSelected(line) => write!(f, "the hardware backend is not selected: {line}"),
+            Error::NotSelected(line) => write!(f, "no path over host structures is selected: {line}"),
             Error::Unsupported(lacks) => {
                 let lacks: Vec<String> = lacks.iter().map(Lack::to_string).collect();
                 write!(f, "the device cannot run the hardware backend: {}", lacks.join(", "))
@@ -476,15 +476,18 @@ fn lacks_of(device: &ID3D12Device) -> Vec<Lack> {
 }
 
 impl Rt {
-    /// The backend on the run's device and queue, if it is the one
-    /// selected (`VICTORY_RT_BACKEND` and the device's capabilities,
-    /// `super::select`). Software being selected is an error here, with the
-    /// line that says why: the caller then uses the software backend.
+    /// The backend on the run's device and queue, if a path over host
+    /// structures may be selected: `VICTORY_RT_BACKEND` forces one, or asks
+    /// for `auto` where a validation record can count (not in a build that
+    /// accepts no rule of equivalence, as this one), and the device can
+    /// run it (`super::select::Selection::host_paths`). Otherwise an
+    /// error, with the line that says why: the caller then uses the
+    /// software path.
     pub fn open() -> Result<Rt, Error> {
         let host = crate::host::host().ok_or_else(|| Error::Device("no host device".into()))?;
         let caps = host.caps(false);
         let selection = select::selected(&caps);
-        if selection.backend != Backend::HardwareInline {
+        if !selection.host_paths() {
             return Err(Error::NotSelected(selection.describe()));
         }
         Rt::with(&host.device, Queue::Shared(host), Limits::from_env(caps.budget_mb), Policy::from_env())

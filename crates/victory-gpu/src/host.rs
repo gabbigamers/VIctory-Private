@@ -3353,6 +3353,13 @@ impl Meter {
                     tracing::info!("wave sizes so far: {line}");
                 }
             }
+            // How many ray-traced workloads were given which path, and why
+            // another was not taken, when one was chosen for since it was
+            // last said. Nothing in a run chooses yet (`crate::rt::select`),
+            // so no run logs this line.
+            if let Some(line) = crate::rt::select::take_changed() {
+                tracing::info!("ray tracing paths so far: {line}");
+            }
             let period_us = std::mem::take(&mut self.period_us);
             let period_draws = drawn - std::mem::replace(&mut self.period_drawn, drawn);
             if let Some(pacing) = self.pacing.take() {

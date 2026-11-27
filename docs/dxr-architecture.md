@@ -7,11 +7,14 @@ Semantics and the equivalence rule: [dxr-compatibility.md](dxr-compatibility.md)
 Testing and measuring: [dxr-validation.md](dxr-validation.md).
 
 **Nothing here was run on hardware, and the layer itself (recogniser,
-description, generators, selection, registry) is speculative.** What
+description, generators, registry, and selection joined to a run) is
+speculative.** What
 exists beside it, each with its own document and state: ray queries in
 the emitter with three prototype shaders
 ([dxr-shader-emission.md](dxr-shader-emission.md)), a host backend that
-no run calls ([dxr-host-backend.md](dxr-host-backend.md)), a CPU
+no run calls, with the rule of selection and the validation record as a
+function and plain data that no run calls either
+([dxr-host-backend.md](dxr-host-backend.md)), a CPU
 reference ([dxr-validation-reference.md](dxr-validation-reference.md)),
 and a first version of the synthetic probe, which runs those shaders over
 that backend ahead of step 3 of the order below (dxr-validation.md, "The
@@ -173,25 +176,36 @@ is native, hybrid, software. `VICTORY_RT_BACKEND=software|auto|native|hybrid`,
 default `software`; the last two force a path for measuring, on eligible
 workloads only, each use logged as not validated;
 `VICTORY_RT_CLASS=<class>` narrows a forced path to one workload class.
-The host module in the tree today (`crates/victory-gpu/src/rt/`, called by
-no run) reads `software|hardware|auto` and takes any other value,
-`native` and `hybrid` included, as `software` with a note in the device
-report; the values above replace `hardware` when the layer is built. The
-synthetic probe is behind the same switch: it opens the module, on a
-queue of its own (`Rt::open_on`), only where the switch says `hardware`
-or `auto`, by the device's capabilities then, and writes the switch's
-value into its file; with the switch unset it opens no device and makes
-nothing. Whether a tool the owner starts by name should need the switch
-at all is the owner's to say; until then it does.
+The host module in the tree (`crates/victory-gpu/src/rt/select.rs`) reads
+these four values, takes `hardware` as an older name of `native` and any
+other value as `software`, each with a note in the device report, and
+holds the rule as `select_under()`, a function of what the build accepts
+verdicts under, the record, the capability record, the switch and one
+workload's description. Of two paths that pass, "the fastest" is the
+hybrid only where it was measured faster than the native path in runs
+that can be compared; otherwise the native path, first in the order of
+trial. The build accepts no rule of equivalence yet, so `auto` selects
+nothing; and nothing in a run calls it yet: the switch changes the device
+report and nothing else ([dxr-host-backend.md](dxr-host-backend.md),
+"Selection"). The synthetic probe is behind the same switch, read
+through the same parser: it opens the module, on a queue of its own
+(`Rt::open_on`), only where the switch says `native`, `hybrid`,
+`hardware` or `auto`, by the device's capabilities then, and writes the
+switch's value into its file; with the switch unset or `software` it
+opens no device and makes nothing. Whichever of the four values is given
+it measures both paths: a ray the native path refuses is judged by the
+hybrid path's answer, and it selects nothing (dxr-validation.md, "The
+first version"). Whether a tool the owner starts by name should need the
+switch at all is the owner's to say; until then it does.
 
 | When | What is decided | Evidence |
 |---|---|---|
-| A test run | **The validation record**, beside the pipeline library, for one adapter identity, driver version, probe version and translator hash; a driver update empties it. One row per workload class, path, shader form (below), structure source and side-table kind, holding: the hash of the container that was validated and timed; the probe's verdict per level and the largest coordinate magnitude it covered; the **title verdict** (scene, date, capture ids, dispatches compared, clean frames); the **title times**. `auto` selects a row only when the probe passed, the title verdict passed, and the title times show it faster than software (dxr-validation.md). Otherwise the path runs only when forced. The probe's synthetic times are reported and select nothing. A verdict is not in the shader cache key, so a changed verdict retranslates nothing | `spec:2053-2056`; `gpu/pipeline/library.rs:7-10`; `gpu/caps.rs:55-57` |
+| A test run | **The validation record**, in the cache folder where the shader cache and the pipeline library are, one file for each adapter identity and driver version: after a driver update there is no record, and the old driver's file is left for it. It is not keyed by a translator hash or a probe version, as first designed; those are fields of the rows instead. Two kinds of row, because the probe and the title comparison run different programs (a class is shared by the probe's synthetic program and by every title program with the same fields). **A probe row**, one per workload class, path, shader form (below), structure source and side-table kind: the probe's verdict, the number of the rule and the version of the probe it was given under, the hash of the translator that made the probe's variant, and the hash of the probe's own production container (recorded, compared with nothing). **A title row**, one per comparison: the same key and the hashes of the title program's variant container and of the software container it was compared with; it holds the **title verdict** with the rule's number, the dispatches compared and the clean frames, and the **title times** of the path and of software, each a median with its spread. So a changed translator leaves no probe verdict (the probe is run again) and leaves the title rows of exactly the containers it did not change. The probe's verdict per level, the largest coordinate magnitude it covered, the value of the tolerance constant, the scene, the date and the capture ids go into a row as fields the selection does not read and keeps. `auto` takes a path as a candidate only when the probe passed its class for the workload's translator, the title verdict passed for the workload's own two containers over at least one dispatch and one frame, and the title times show it faster than software by more than the spread (dxr-validation.md); each verdict must have been given under the rule the build accepts, the probe's by the probe version it accepts, **and the build accepts none until the owner accepts the rule, so `auto` selects nothing today whatever is recorded**. Otherwise the path runs only when forced. The probe's synthetic times are reported and select nothing. A verdict is not in the shader cache key, so a changed verdict retranslates nothing. As built: `gpu/rt/record.rs`, `gpu/rt/select.rs`; nothing writes or reads a record in a run yet | `spec:2053-2056`; `gpu/pipeline/library.rs:7-10`; `gpu/caps.rs:55-57` |
 | Pipeline creation | The software variant is made first, as today. A program with a region whose class has a selectable row gets one more variant, each region on its own best path. It queues behind every software pipeline: a dispatch whose only pipeline is still being made is dropped today, and a variant may not add such a drop. The path and form enter the shader cache key; the library names pipelines by their DXIL, so variants coexist. Below tier 1.1 the variant is refused by its feature word, as 64-bit atomics are | `gpu/pipeline/make.rs:30-45, 193-205`; `gpu/draw.rs:1103-1111`; `gpu/shader_cache.rs:57-93`; `gpu/pipeline/library.rs:254-262`; `gpu/pipeline/host.rs:437-459` |
 | Each dispatch | Only readiness. A pipeline is bound when the title records, and lists are held, cut and interleaved before they run, so a choice at record time is safe only towards software. **Dual form**, where the structure is known from root arguments: both variants are recorded and submission gives one the title's counts and the other zero. **Both-loops form**, where it is known only on the GPU. The two forms are different DXIL, so each is its own container with its own row: a form with no passing row is not selected. Both are unbuilt and unmeasured | `gpu/draw.rs:1096-1132, 1845-1883`; `gpu/hold.rs:1-15`; `gpu/indirect.rs:55-61`; `gpu/memory.rs:11-20` |
 | Structure binding | A root view takes an address when the trace is recorded. So each registry entry has a host range that does not move while a recorded or held list names it: a rebuild goes in place, a copy makes a new entry. A trace recorded before its entry exists is recorded software only, counted. The both-loops form takes its structure from a heap slot written at submission | `gpu/hold.rs:8-15` |
 | Currency | A host structure is current when it was built or updated from the latest description for its guest address, earlier in submission order. A top level is current only if every bottom level it names is (`spec:2019-2021`); a bottom-level build put off by the bound puts off its top level. Otherwise every workload tracing that top level is downgraded | `gpu/host.rs:1533-1549` |
-| Each downgrade | Counted and logged per frame by program, region and reason: not eligible, not validated, variant not made, structure absent, stale, over budget, writes withheld. A structure is never bound null: that is a miss for every ray | `spec:5341-5345, 6855` |
+| Each downgrade | Counted and logged per frame by program, region and reason: not eligible, not validated, variant not made, structure absent, stale, over budget, writes withheld. `select()` returns the first two in detail (the device, no variant, no rule accepted, no driver version, no record or one for another device or driver, no rows or rows of other containers, each gate that failed, a hybrid not measured faster than the native path) and they are counted per workload when a path is chosen; the others belong to a dispatch and are not written. A structure is never bound null: that is a miss for every ray | `spec:5341-5345, 6855` |
 
 ## Host structures
 
@@ -262,8 +276,8 @@ sustained 30 frames a second, no loss of picture).
 | Workload description, recogniser, class hash | a module of `victory-shader`; the plan reaches the lowering through `lower::Parts` (`emit/lower.rs:106-118`) | host tests: one synthetic single-lane stack loop as GFX10 words, one accept and one refusal per reason |
 | `RayQuery` ops 178 to 215, resource kind 16, flag bit 25, feature word | `emit/shader.rs:57-70, 667-705, 929-959`; a native generator in `emit/lower/` | `scripts/validate-dxil.sh`, and against the reference disassembly |
 | Native variant against a CPU model, the ray screens among it | the test-only interpreter, which runs integer and bit-pattern work and hands each `dx.op` to a callback (`emit/bitcode.rs:1382-1392`); the CPU reference moved out of the Windows-only tests | host tests: model against model |
-| The tolerance constant k | a host test over the random scene classes | host test; its value goes into the record |
-| Record and `select()` | plain data beside `gpu/caps.rs` | host tests |
+| The tolerance constant k | a host test over the random scene classes | host test; its value is one of the rule's constants, which a verdict in the record names by the rule's number, and goes into the probe's row as a field of its own |
+| Record and `select()` | plain data in `gpu/rt/record.rs` and `gpu/rt/select.rs`, beside the host backend that reads the same switch: implemented | host tests (51) |
 | Variant slots, structure binding, registry, builds, the boundary wrapper | `gpu/shader_cache.rs`, `gpu/pipeline.rs:61-68`, `gpu/pipeline/host.rs:527-546`, new modules; `victory-loader` | type-checked for Windows only |
 
 All rows but the last are the smallest version: validator acceptance and
@@ -280,7 +294,7 @@ the summary in `xtask/src/rt_summary.rs`): host tests for all of it but
 | 1 | **Wave sizes** of each tracer and builder stage, and `gpu-info` on the card: whether G2 comes first on the target |
 | 2 | **Groundwork** for `progress.md` C3 and the boundary, logging only: a structure view's address, `DispatchX` flags, calls per export and what each is given, the magnitude of vertex coordinates |
 | 3 | **The smallest version** above, on synthetic programs |
-| 4 | **The synthetic probe** on the owner's machine, native path first; it writes the probe's part of the validation record. A first version exists ahead of step 3: it runs the three prototype shaders, not generated variants, has run on nothing, and writes result files but no validation record, since neither the record nor the rule's comparison exists (dxr-validation.md, "The first version") |
+| 4 | **The synthetic probe** on the owner's machine, native path first; it writes the probe's part of the validation record. A first version exists ahead of step 3: it runs the three prototype shaders, not generated variants, has run on nothing, and writes result files but no row of the validation record, since the rule's comparison does not exist (the record itself does: `gpu/rt/record.rs`; dxr-validation.md, "The first version") |
 | 5 | **A census of trace loops** (title files; counts only leave the machine): the description's fields per loop, compare forms, ray biases, how often a cap fires, one bottom level's id bytes |
 | 6 | **Host structures from build descriptions**; GPU time by kind |
 | 7 | **Native variants** for the classes steps 4 and 5 leave, compared on the title on the same rays; then the hybrid for what was sent to it |

@@ -1494,3 +1494,48 @@ Only what cannot be done from a cloud session.
     the owner runs", the short run under `--debug-layer` first. A stop
     at a Direct3D call is the expected first result; the line it stops
     at and any `validation layer` lines are what to send.
+* Ray tracing, the selection half of the layer: a path per workload
+  behind `VICTORY_RT_BACKEND`, and the validation record it selects from
+  (`victory-gpu`, `rt/select.rs`, `rt/record.rs`). Implemented, as plain
+  data and a pure function. Tested (host tests). Type-checked for Windows
+  only: one log line in `host.rs`, the backend's entry in `rt/device.rs`,
+  the probe's `hardware.rs`. Hardware-validated: nothing; it ran on no
+  device, and nothing in a run calls it. Found: nothing about a title or
+  a card; speculative as to the title (no workload description yet).
+  * The switch: `software` (default), `auto`, `native`, `hybrid`;
+    `hardware` is the older name of `native`, any other value software,
+    each with a `note` line in the device report. `VICTORY_RT_CLASS`
+    keeps a forced path to one workload class.
+  * By default: the device report's last line is reworded and says that
+    nothing in a run selects a path; the performance log has one more
+    column, `own_rt_record_mb`, always 0 (`memory.md`, R6). No
+    translation, dispatch or allocation changes.
+  * **`auto` selects nothing**: the build accepts no rule of equivalence
+    (`select::ACCEPTED` is none) until the owner accepts the proposed
+    one, so every workload gets software, reason `no_rule`, whatever a
+    record holds. The rule (`select_under`): a path is a candidate when
+    the probe passed its class for the workload's translator, the title
+    comparison passed the workload's own two containers, and the title
+    times show it faster than software by more than the spread; of two,
+    the hybrid only where measured faster in comparable runs. A forced
+    path is not validated and says so. The record is one text file a
+    device and driver; nothing writes or reads one yet.
+  * The review found (9 findings, all upheld and corrected): one row a
+    class, so a finding on one container erased another's; two records
+    in one text read as one; "fastest" from medians of different runs;
+    no rule or probe version on a verdict; seven faults no test caught.
+  * Where it meets the probe: the probe reads the switch through this
+    parser (`native`, `hybrid`, `hardware` or `auto` open it) and
+    measures both paths under each, since a ray the native path refuses
+    is judged by the hybrid's answer; its version is one definition,
+    `select::PROBE_VERSION`; the record's memory row is R6, after R5.
+  * Checked on the integrated commit: 1043 host tests (30 of
+    `rt::select`, 21 of `rt::record`, 2 of the report); the validator,
+    877 containers, 0 rejected (the shader crate is untouched); the
+    Windows type-check; the asset policy. The corrector's 59 deliberate
+    faults were not repeated.
+  * For the owner's machine: `victory gpu-info` unset and under each
+    value (under `auto` the last line must say software and that no
+    rule is accepted); `cargo test -p victory-gpu rt:: caps::` on
+    Windows (the record's file tests ran on Linux only); a run with
+    `VICTORY_PERF_LOG` for the new column at 0.

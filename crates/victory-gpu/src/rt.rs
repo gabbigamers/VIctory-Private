@@ -6,13 +6,16 @@
 //!
 //! **Nothing in a run uses this yet**, and none of it has run on hardware.
 //! It is off unless `VICTORY_RT_BACKEND` asks for it, and the software
-//! backend stays the reference and what every refused case uses.
+//! path stays the reference and what every refused case uses.
 //!
 //! Everything that can be decided without a device is plain data and plain
 //! logic, tested on any host:
 //!
-//! * [`select`]: which backend, from the device's capabilities and the
-//!   switch;
+//! * [`select`]: which path (native, hybrid or software) a workload runs,
+//!   from the switch, the device's capabilities and the validation record;
+//!   and the counts of what was chosen and why;
+//! * [`record`]: the validation record, what was demonstrated and measured
+//!   for each workload class on one device and driver, and its file;
 //! * [`desc`]: what a structure is built from, and D3D12's rules for it;
 //! * [`update`]: refit in place or build again;
 //! * [`life`]: one structure's states, and when its memory may go;
@@ -76,6 +79,7 @@ pub mod desc;
 #[cfg(windows)]
 pub mod device;
 pub mod life;
+pub mod record;
 pub mod retire;
 pub mod scratch;
 pub mod select;

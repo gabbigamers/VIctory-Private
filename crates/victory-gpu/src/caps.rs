@@ -3,9 +3,13 @@
 //! ([`assess`]). See docs/gpu-compatibility.md.
 //!
 //! The rule this module exists for: behaviour follows capabilities. The
-//! vendor and device ids are in the record so a report says what it was
-//! taken on; nothing may branch on them. A driver defect that has to be
-//! worked around is the one exception, and it is named as such where it is
+//! vendor and device ids and the driver's version are in the record for
+//! two things: so that a report says what it was taken on, and as the
+//! equality key of data measured on a device (the validation record of
+//! the ray-tracing paths, `crate::rt::record::Identity`: such data holds
+//! for the device and driver it was taken on and for no other). Nothing
+//! may branch on their values. A driver defect that has to be worked
+//! around is the one exception, and it is named as such where it is
 //! handled, with the driver versions it applies to.
 //!
 //! The record is plain data and [`assess`] plain logic, tested on any host.
@@ -24,11 +28,13 @@ pub const CONSOLE_WAVES: [u32; 2] = [32, 64];
 pub struct HostCaps {
     /// The adapter's own description, for reports.
     pub name: String,
-    /// PCI vendor and device ids, for reports only (see the module text).
+    /// PCI vendor and device ids: for reports, and compared for equality
+    /// where measured data is kept for a device; never branched on (see the
+    /// module text).
     pub vendor: u32,
     pub device: u32,
     /// The user-mode driver's version, four 16-bit parts, if the adapter
-    /// gave one.
+    /// gave one: for reports, and part of the same equality key.
     pub driver: Option<[u16; 4]>,
     /// A software adapter (WARP).
     pub software: bool,
@@ -181,8 +187,8 @@ pub fn assess(caps: &HostCaps) -> Vec<Finding> {
     find(
         "ray tracing tier 1.1",
         have(caps.raytracing_tier >= 11, State::Degraded),
-        "the experimental hardware ray-tracing backend needs it (off unless asked for; the software traversal \
-         does not)"
+        "the experimental native and hybrid ray-tracing paths need it (off unless asked for; the software \
+         traversal does not)"
             .into(),
     );
     findings
@@ -204,19 +210,14 @@ pub fn overall(findings: &[Finding]) -> State {
 /// a run logs, and what a hardware report in docs/gpu-compatibility.md is
 /// taken from. Nothing in it comes from a title.
 pub fn report(caps: &HostCaps) -> String {
-    use std::fmt::Write;
-    let (request, unknown) = crate::rt::select::Request::from_env();
-    let mut out = report_under(caps, request);
-    if let Some(unknown) = unknown {
-        let variable = crate::rt::select::VARIABLE;
-        let _ = writeln!(out, "    note  {variable}={unknown} is not software, hardware or auto: taken as software");
-    }
-    out
+    report_under(caps, crate::rt::select::Switch::from_env())
 }
 
-/// [`report`] with the ray-tracing backend that `request` would choose, and
-/// not what the environment asks for.
-pub fn report_under(caps: &HostCaps, request: crate::rt::select::Request) -> String {
+/// [`report`] with what `switch` asks of the ray-tracing paths, and not
+/// what the environment asks. After the `ray tracing backend:` line comes a
+/// `note` line for each value of the switch that was not taken as written
+/// (an older name, a value that is no name, a class that narrows nothing).
+pub fn report_under(caps: &HostCaps, switch: crate::rt::select::Switch) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let driver = caps.driver.map_or("unknown".to_string(), |[a, b, c, d]| format!("{a}.{b}.{c}.{d}"));
@@ -244,15 +245,19 @@ pub fn report_under(caps: &HostCaps, request: crate::rt::select::Request) -> Str
         };
         let _ = writeln!(out, "{state:>8}  {}: {}", f.need, f.detail);
     }
-    // Which ray-tracing backend is selected on this device, and what the
-    // device lacks for the other. A run's ray tracing is the software
-    // traversal whatever is selected, until the hardware backend is joined
-    // to it: the line says so, so that it promises nothing.
+    // What the switch asks of the ray-tracing paths on this device, and
+    // what the device lacks for the native and hybrid ones. A run's ray
+    // tracing is the software traversal whatever is asked, until selection
+    // is joined to a run: the line says so, so that it promises nothing.
+    let selection = crate::rt::select::device(caps, switch);
     let _ = writeln!(
         out,
-        "ray tracing backend: {}; no run uses the hardware backend yet",
-        crate::rt::select::select(caps, request).describe()
+        "ray tracing backend: {}; nothing in a run selects a path yet: a run traces in software",
+        selection.describe()
     );
+    for note in selection.switch.notes() {
+        let _ = writeln!(out, "    note  {note}");
+    }
     out
 }
 
@@ -372,7 +377,8 @@ mod tests {
             wave_lanes: (32, 32),
             ..full()
         };
-        let text = report_under(&caps, crate::rt::select::Request::Software);
+        use crate::rt::select::Switch;
+        let text = report_under(&caps, Switch::default());
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "adapter: Some Adapter (NVIDIA 0x10de:0x1234), driver 32.0.15.7000");
         assert_eq!(lines[1], "memory: 16000 MB on the card, 8000 MB shared, budget now 15200 MB");
@@ -380,27 +386,147 @@ mod tests {
         assert_eq!(
             lines[lines.len() - 1],
             "ray tracing backend: software (VICTORY_RT_BACKEND is unset or software; this device could run the \
-             experimental hardware backend); no run uses the hardware backend yet"
-        );
-        let able = report_under(&caps, crate::rt::select::Request::Auto);
-        assert_eq!(
-            able.lines().last(),
-            Some(
-                "ray tracing backend: hardware inline RayQuery, experimental (VICTORY_RT_BACKEND=auto); no run uses \
-                 the hardware backend yet"
-            )
-        );
-        let older = HostCaps { raytracing_tier: 10, ..caps.clone() };
-        let asked = report_under(&older, crate::rt::select::Request::Hardware);
-        assert!(
-            asked.lines().last().is_some_and(|l| l.starts_with("ray tracing backend: software, though")
-                && l.contains("ray tracing tier 1.0 (1.1 needed)")),
-            "{asked}"
+             native and hybrid paths); nothing in a run selects a path yet: a run traces in software"
         );
         assert!(lines.iter().any(|l| l.starts_with("DEGRADED  64-lane waves: host waves have 32 to 32 lanes")));
         assert!(lines.iter().any(|l| l.starts_with("     met  mesh shaders")));
-        let unknown = report_under(&HostCaps::default(), crate::rt::select::Request::Software);
+        let unknown = report_under(&HostCaps::default(), Switch::default());
         assert!(unknown.starts_with("adapter:  (unknown vendor 0x0000:0x0000), driver unknown"), "{unknown}");
+    }
+
+    /// The last line says what the switch asks of the ray-tracing paths on
+    /// this device, and that no run follows it yet; a value of the switch
+    /// that was not taken as written has a `note` line after it.
+    #[test]
+    fn the_report_ends_with_the_ray_tracing_switch_and_its_notes() {
+        use crate::rt::select::Switch;
+        let caps = full();
+        let rest = 2 + assess(&caps).len();
+        let tail = |caps: &HostCaps, backend: Option<&str>, class: Option<&str>| -> Vec<String> {
+            let text = report_under(caps, Switch::parse(backend, class));
+            let unset = report_under(caps, Switch::default());
+            let before = |text: &str| text.lines().take(rest).map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(before(&text), before(&unset), "the switch changes the end only");
+            text.lines().skip(rest).map(str::to_owned).collect()
+        };
+        let unvalidated = "; nothing in a run selects a path yet: a run traces in software";
+        // `auto` promises no selection while the build accepts no rule of
+        // equivalence (`crate::rt::select::ACCEPTED`): the line a build
+        // that accepts one writes is tested with the selection.
+        assert_eq!(crate::rt::select::ACCEPTED, None);
+        assert_eq!(
+            tail(&caps, Some("auto"), None),
+            [format!(
+                "ray tracing backend: software (VICTORY_RT_BACKEND=auto; this device could run the native and \
+                 hybrid paths, but this build accepts no rule of equivalence yet, so no validation record counts \
+                 and auto selects no path){unvalidated}"
+            )]
+        );
+        let native = format!(
+            "ray tracing backend: native forced for measurement and NOT VALIDATED (VICTORY_RT_BACKEND=native): on \
+             the workloads that have a native variant, software for every other{unvalidated}"
+        );
+        assert_eq!(tail(&caps, Some("native"), None), [native.as_str()]);
+        // The older name: the same line, and a note that says it was read.
+        assert_eq!(
+            tail(&caps, Some("hardware"), None),
+            [native, "    note  VICTORY_RT_BACKEND=hardware is the older name of native: taken as native".to_owned()]
+        );
+        let hybrid = tail(&caps, Some("hybrid"), Some("0123456789abcdef0123"));
+        assert_eq!(hybrid.len(), 1);
+        assert!(hybrid[0].starts_with("ray tracing backend: hybrid forced for measurement and NOT VALIDATED"));
+        assert!(hybrid[0].contains("on the workloads of class 0123456789abcdef0123 that have a hybrid variant"));
+
+        let older = HostCaps { raytracing_tier: 10, ..caps.clone() };
+        for (backend, path) in [("native", "native"), ("hardware", "native"), ("hybrid", "hybrid")] {
+            let asked = tail(&older, Some(backend), None);
+            let line = format!(
+                "ray tracing backend: software, though VICTORY_RT_BACKEND={path} asked for the {path} path: this \
+                 device cannot run the native or the hybrid path: ray tracing tier 1.0 (1.1 needed){unvalidated}"
+            );
+            assert_eq!(asked[0], line);
+            assert_eq!(asked.len(), if backend == "hardware" { 2 } else { 1 });
+        }
+        assert_eq!(
+            tail(&caps, Some("dxr"), Some("0123456789abcdef")),
+            [
+                format!(
+                    "ray tracing backend: software (VICTORY_RT_BACKEND holds a value that is none of its names and \
+                     is taken as software; this device could run the native and hybrid paths){unvalidated}"
+                ),
+                "    note  VICTORY_RT_BACKEND=dxr is not software, auto, native or hybrid: taken as software".to_owned(),
+                "    note  VICTORY_RT_CLASS=0123456789abcdef narrows nothing: only a path forced by \
+                 VICTORY_RT_BACKEND=native or hybrid is kept to a class"
+                    .to_owned(),
+            ]
+        );
+        assert_eq!(
+            tail(&caps, Some("native"), Some("my class")),
+            [
+                format!(
+                    "ray tracing backend: software, though VICTORY_RT_BACKEND=native asked for the native path: \
+                     VICTORY_RT_CLASS names no class{unvalidated}"
+                ),
+                "    note  VICTORY_RT_CLASS=my class is not 16 to 64 hexadecimal digits of a workload class: no path \
+                 is forced"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    /// The one thing the switch does in a run today: [`report`] reads both
+    /// variables from the environment. Shown in processes of their own (this
+    /// test run again with the variables set), since the environment is
+    /// the whole process's and other tests read it.
+    #[test]
+    fn the_report_reads_the_switch_from_the_environment() {
+        use crate::rt::select::{CLASS_VARIABLE, Switch, VARIABLE};
+        const CHILD: &str = "VICTORY_TEST_RT_REPORT_CHILD";
+        const MARK: &str = "report-from-environment: ";
+        if std::env::var_os(CHILD).is_some() {
+            for line in report(&full()).lines() {
+                println!("{MARK}{line}");
+            }
+            return;
+        }
+        let from_environment = |backend: Option<&str>, class: Option<&str>| -> String {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "caps::tests::the_report_reads_the_switch_from_the_environment", "--nocapture"]);
+            child.env(CHILD, "1").env_remove(VARIABLE).env_remove(CLASS_VARIABLE);
+            if let Some(backend) = backend {
+                child.env(VARIABLE, backend);
+            }
+            if let Some(class) = class {
+                child.env(CLASS_VARIABLE, class);
+            }
+            let out = child.output().unwrap();
+            assert!(out.status.success(), "{out:?}");
+            let text = String::from_utf8(out.stdout).unwrap();
+            let lines: Vec<&str> = text.lines().filter_map(|line| line.split_once(MARK)).map(|(_, line)| line).collect();
+            assert!(!lines.is_empty(), "{text}");
+            lines.iter().map(|line| format!("{line}\n")).collect()
+        };
+        let caps = full();
+        for (backend, class) in [
+            (None, None),
+            (Some("hybrid"), Some("0123456789abcdef0123")),
+            (Some("native"), None),
+            (Some("hardware"), None),
+            (Some("auto"), Some("0123456789abcdef")),
+            (Some("on"), None),
+            (None, Some("0123456789abcdef")),
+            (Some("native"), Some("my class")),
+        ] {
+            let expected = report_under(&caps, Switch::parse(backend, class));
+            assert_eq!(from_environment(backend, class), expected, "{backend:?} {class:?}");
+        }
+        // And those reports differ from one another where the variables do:
+        // the path and the class each reach the line.
+        let hybrid = from_environment(Some("hybrid"), Some("0123456789abcdef0123"));
+        assert!(hybrid.contains("hybrid forced for measurement") && hybrid.contains("of class 0123456789abcdef0123"));
+        let older = from_environment(Some("hardware"), None);
+        assert!(older.contains("native forced") && older.contains("note  VICTORY_RT_BACKEND=hardware is the older"));
+        assert!(from_environment(None, None).contains("VICTORY_RT_BACKEND is unset or software"));
     }
 
     #[test]

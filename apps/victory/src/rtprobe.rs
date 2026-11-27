@@ -10,9 +10,11 @@
 //! host; this file reads the options, tries the places the files go to,
 //! opens the device and writes the files. **It has not run on any device.**
 //!
-//! It is behind the switch a run's hardware ray tracing is behind: without
-//! `VICTORY_RT_BACKEND=hardware` (or `auto`) it opens no device and runs
-//! nothing.
+//! It is behind the switch a run's native and hybrid ray tracing is
+//! behind: without `VICTORY_RT_BACKEND=native`, `hybrid` or `auto`
+//! (`hardware` is the older name of `native`) it opens no device and runs
+//! nothing. With any of them it measures both paths: the value is the
+//! permission to open the host backend, not a choice of rows.
 
 use std::path::PathBuf;
 
@@ -64,7 +66,7 @@ pub fn run(args: Args) -> Result<()> {
     // Behind the switch, before anything is made: not a folder either.
     if let Err(off) = asked_by_environment() {
         not_run(&off);
-        bail!("the probe did not run: the hardware ray-tracing backend is not asked for");
+        bail!("the probe did not run: no path over host structures is asked for");
     }
     // A run is long and writes its files when it is done: whether they can
     // be written is found out now. Nothing an earlier run left is changed.

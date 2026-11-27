@@ -20,9 +20,11 @@
 //! * [`run`]: the run itself, over a [`device::Device`].
 //!
 //! [`device`] is what the run asks of a device. `hardware` (Windows only)
-//! answers it with Direct3D 12, behind the switch a run's hardware ray
-//! tracing is behind (`VICTORY_RT_BACKEND`, [`device::asked`]), and is
-//! type-checked for Windows only; the
+//! answers it with Direct3D 12, behind the switch a run's native and
+//! hybrid ray tracing is behind (`VICTORY_RT_BACKEND`, read through
+//! `victory_gpu::rt::select`'s parser by [`device::asked`]: `native`,
+//! `hybrid`, `hardware` or `auto` open it, and the probe measures both
+//! paths whichever is named), and is type-checked for Windows only; the
 //! host tests answer it with a brute-force stand-in on the CPU, which is
 //! how the run's own logic is tested without a device. The stand-in is
 //! test code: it is no path, and no result file is written from it.
@@ -45,5 +47,8 @@ pub mod stats;
 mod standin;
 
 /// The version of the probe: of what it runs and of the result file's
-/// columns. A file says which wrote it.
-pub const PROBE_VERSION: u32 = 1;
+/// columns. A file says which wrote it. The number is defined once, in
+/// `victory_gpu::rt::select`, beside what the selection accepts verdicts
+/// of the probe by (`select::Standard::probe`): this crate depends on
+/// that one, and that one cannot depend on this.
+pub const PROBE_VERSION: u32 = victory_gpu::rt::select::PROBE_VERSION;

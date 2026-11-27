@@ -273,7 +273,8 @@ ranges (address space only).
 | R2 | Host ray-tracing structures of the experimental backend (`crate::rt`; nothing unless `VICTORY_RT_BACKEND` turns it on) | on the card: one committed buffer a structure | what the device asks for each, rounded up to 64 KiB; bounded together at a quarter of the device's budget (64 MiB to 2 GiB) or `VICTORY_RT_STRUCTURES_MB` | while the structure's owner holds it, then until every submission that may read it has run | none: built from geometry, not a copy of it | `own_rt_structures_mb` |
 | R3 | That backend's other video memory: build scratch, its buffer for compacted sizes, and the output buffers a validation run's dispatches write | on the card | scratch in chunks of 4 MiB or one build's need, at most 256 MiB at once, 32 MiB kept idle; outputs as asked | scratch is reused once the submission that used a chunk has run, and idle chunks beyond what is kept are released; an output with its holder | transient | `own_rt_scratch_mb` |
 | R4 | That backend's buffers in system memory: instance descriptions, geometry a validation run uploads, read-backs | upload and read-back heaps | instance chunks of 1 MiB, at most 64 MiB at once, 4 MiB kept idle; the rest as asked | instance chunks as R3's scratch; the others with their holder | instance descriptions are written from the caller's | `own_rt_buffers_mb` |
-| R5 | The synthetic probe (`victory rt-probe`, `crates/victory-rt-probe`): a tool of its own that a run never starts, and that makes nothing unless `VICTORY_RT_BACKEND` asks for the hardware backend. Its buffers are R3's and R4's kinds, made through that backend and counted there | upload heap: the ray list, the poison records, the build inputs (vertices, indices, transforms; for the hybrid path boxes and the triangle data). On the card: the hit buffer. Read-back heap: hit records copied back. Process heap: the generated cases, the CPU's answers, the records kept for the files | ray list 48 B a record and hit buffer 32 B a record, for the larger of the class's rays and `--rays`: 50.3 MB and 33.6 MB at the default 2^20, at most 201.3 MB and 134.2 MB at the 4,194,240 a dispatch can list (more is refused before anything is made). Poison records 32 B a record of the largest dispatch poisoned so far: the dispatch that checks the timed ones lists as many records as they do, so this is the hit buffer's size again (33.6 MB at the default, 134.2 MB at most). A read-back of at most the hit buffer's size. Build inputs: 12 B a vertex, the indices and 48 B a geometry transform (native); 24 B a box and 36 B a triangle with their tables (hybrid); under 64 KiB a buffer for the generated classes, each rounded up to 64 KiB. Process heap: the ray list once while it is uploaded, the poison words once while they are uploaded and the records read back twice over while they are compared (transient, at most 201.3 MB, 134.2 MB and 268.4 MB); 32 B a ray, frame and path kept for the files (1.5 MB for a default run) | ray list and hit buffer: one class at a time, released when the next class's are made. Poison records: made when a dispatch needs more than there are, the smaller ones released then, and kept until the process ends. Build inputs, triangle data and structures: one path of one class at a time, given up and waited for before the next path starts. A read-back: for the call. Everything with the process | none: generated from a seed | `own_rt_buffers_mb` (uploads, read-backs), `own_rt_scratch_mb` (the hit buffer), `own_rt_structures_mb` (structures, under R2's bound); the process heap is not counted, the run's `commit_mb_*` and `working_set_mb_*` columns hold the process's own figures |
+| R5 | The synthetic probe (`victory rt-probe`, `crates/victory-rt-probe`): a tool of its own that a run never starts, and that makes nothing unless `VICTORY_RT_BACKEND` asks for a path over host structures (`native`, `hybrid`, `auto` or the older name `hardware`). Its buffers are R3's and R4's kinds, made through that backend and counted there | upload heap: the ray list, the poison records, the build inputs (vertices, indices, transforms; for the hybrid path boxes and the triangle data). On the card: the hit buffer. Read-back heap: hit records copied back. Process heap: the generated cases, the CPU's answers, the records kept for the files | ray list 48 B a record and hit buffer 32 B a record, for the larger of the class's rays and `--rays`: 50.3 MB and 33.6 MB at the default 2^20, at most 201.3 MB and 134.2 MB at the 4,194,240 a dispatch can list (more is refused before anything is made). Poison records 32 B a record of the largest dispatch poisoned so far: the dispatch that checks the timed ones lists as many records as they do, so this is the hit buffer's size again (33.6 MB at the default, 134.2 MB at most). A read-back of at most the hit buffer's size. Build inputs: 12 B a vertex, the indices and 48 B a geometry transform (native); 24 B a box and 36 B a triangle with their tables (hybrid); under 64 KiB a buffer for the generated classes, each rounded up to 64 KiB. Process heap: the ray list once while it is uploaded, the poison words once while they are uploaded and the records read back twice over while they are compared (transient, at most 201.3 MB, 134.2 MB and 268.4 MB); 32 B a ray, frame and path kept for the files (1.5 MB for a default run) | ray list and hit buffer: one class at a time, released when the next class's are made. Poison records: made when a dispatch needs more than there are, the smaller ones released then, and kept until the process ends. Build inputs, triangle data and structures: one path of one class at a time, given up and waited for before the next path starts. A read-back: for the call. Everything with the process | none: generated from a seed | `own_rt_buffers_mb` (uploads, read-backs), `own_rt_scratch_mb` (the hit buffer), `own_rt_structures_mb` (structures, under R2's bound); the process heap is not counted, the run's `commit_mb_*` and `working_set_mb_*` columns hold the process's own figures |
+| R6 | The validation record of the ray-tracing paths, while a run keeps it (`rt/record.rs`, `Held`). **No run keeps one yet**: nothing in a run selects a path | process heap | a row is about 150 bytes (the probe's) or 200 (a title comparison's); at most 1,024 rows and lines, and no more text read and not understood than the file's bound of 1 MiB: under 1.5 MiB. A larger file is refused whole | with its holder: meant to be read once at start and kept for the process | the file in `rt-record/` of the cache folder, which is the way back | `own_rt_record_mb` |
 
 ### What is counted now
 
@@ -307,6 +308,7 @@ first run with the log is also the first check of these figures.
 | `own_rt_structures_mb` | R2 | result buffers of host ray-tracing structures, live and waiting for their last reader | 0 unless the experimental backend is on |
 | `own_rt_scratch_mb` | R3, R5 | build scratch chunks, the compacted-size buffer, a validation run's output buffers (the probe's hit buffer) | on the card: not to be added to the system-memory owners |
 | `own_rt_buffers_mb` | R4, R5 | instance-description chunks, uploads and read-backs of the backend (the probe's ray list, poison records, build inputs and records read back) | its query heap and command allocators |
+| `own_rt_record_mb` | R6 | the validation record a run keeps: rows at their size, and the text kept without being understood; 0 until a run reads one | the file's text while it is read and parsed (no more than 1 MiB and a byte of it is read; for the call); the counters of selections (static, under 1 KiB) |
 | `private_working_set_mb` | | the process's working set without section and mapped-file pages | not given before Windows 10 22H2 |
 
 A release of more than was counted leaves the gauge at zero and is noted;
@@ -692,3 +694,43 @@ Before / after: no measured run.
 Decision: not approved as a default. In the tree behind the switch so that
 one run can show whether the misses it addresses occur (the README's table
 of switches says what the log shows, under `VICTORY_MEMORY_PAGING`).
+
+### R6, the validation record of the ray-tracing paths : a new owner, nothing allocated yet
+
+Written 2026-11-27 with the change that adds it. This case adds an owner
+for an allocation no run makes yet; the questions are answered for when
+one does. Tested on any host (`crates/victory-gpu/src/rt/record.rs`).
+
+Kind: an addition, on the process heap.
+
+1. Ownership, lifetime, purpose: `rt::record::Held`, which whatever reads
+   the record for a run keeps for the process; it counts the record's
+   bytes from when it is made until it is dropped. `auto` selects a
+   native or hybrid path only from it (`rt/select.rs`).
+2. Consumers: `rt::select::select`, on the CPU, once for a workload when
+   its variant is made. The GPU never reads it.
+3. The guest neither reads nor writes it: it is ours.
+4. Coherency: read once and not changed while kept. The probe and the
+   title comparison write the file, whole and under another name first;
+   a run sees their result at its next start.
+5. Asynchronous use: none; `select` borrows it for the call.
+6. The way back: the file, `rt-record/<start of the identity's hash>.txt`
+   in the cache folder. Without it every workload runs the software
+   path, so losing it costs speed where a path was validated and never
+   the picture.
+7. Identical rendering: holding the record changes nothing by itself; what
+   a selected path draws is the validation's matter
+   (`dxr-compatibility.md`).
+
+Bound: 1,024 rows and lines and 1 MiB of text, under 1.5 MiB in memory; a
+file over either is refused whole, said as a warning, and counts as no
+record (`a_record_is_bounded_in_rows_and_in_text`,
+`a_file_that_is_not_read_is_an_error_and_gives_no_record`). The file is
+read through the bound, one byte past it at most, whatever the file
+system says its size is (`a_file_is_read_through_the_bound_and_no_further`).
+Counted: `a_record_kept_for_a_run_is_counted_while_it_is_kept`.
+
+Switch: `VICTORY_RT_BACKEND=auto` is the only reader meant for it; unset,
+nothing reads it. Today nothing reads it under any value.
+
+Before / after: no measured run; the column is zero.

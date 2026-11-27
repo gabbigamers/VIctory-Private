@@ -134,7 +134,8 @@ enum Command {
     /// reference and the CPU model of the software traversal, each cost
     /// measured apart. Reads no title files (docs/dxr-validation.md); its
     /// times select no path and say nothing about a title. Runs only with
-    /// VICTORY_RT_BACKEND=hardware (or auto) set.
+    /// VICTORY_RT_BACKEND=native, hybrid or auto set (hardware is the older
+    /// name of native), and measures both paths under any of them.
     RtProbe {
         /// The seed the scenes and rays are generated from: a number, or
         /// hex after 0x. Without it, the seed of the reference's own

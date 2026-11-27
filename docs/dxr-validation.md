@@ -11,8 +11,9 @@ exists (`victory rt-probe`; "The first version" below says what it runs
 and where it departs from this specification): implemented; its logic
 tested (host tests); its three shaders accepted by Microsoft's validator on
 Linux; its Direct3D part type-checked for Windows only. It is behind the
-switch a run's hardware ray tracing is behind: without
-`VICTORY_RT_BACKEND=hardware` (or `auto`) it opens no device. The rule, its
+switch a run's native and hybrid ray tracing is behind: without
+`VICTORY_RT_BACKEND=native`, `hybrid` or `auto` (`hardware` is the older
+name of `native`) it opens no device. The rule, its
 tolerance and its thresholds are a proposal written on 2026-11-27, before
 any measurement, and await the owner's acceptance; after that a change is
 a dated revision. `emit/` is
@@ -80,7 +81,7 @@ Where it departs from the rest of this document, and why:
 | The scene classes of "Scenes": to 10^6 triangles, seams, `far`, the cost classes | `victory-rt`'s ten classes: 28 to 405 triangles, 1 to 48 instances, 1,200 to 2,000 rays each; `dynamic-refit` and `dynamic-rebuild` have four frames | those are the scenes there are. **Scenes this small say nothing of cost**: their times exercise the instrument. No `scale`, `seam`, `far`, `refit`, `many-small` or `burst` class exists |
 | Every class's rays through the variant in the test-only interpreter first | each ray is screened on the CPU (`rayquery::ray_refusal`) before a list is made: a ray it names is in no list a device reads, and is counted with its reason (`refused_before`). `SKIP_CLOSEST_HIT_SHADER` is cleared and the mask cut to eight bits there, counted | no translated variant exists to interpret. The rule the screen serves is kept: no illegal ray reaches a device |
 | Levels 2 and 3; N against NR; each constant halved and doubled | not built | no program stores anything after a region; the reference HLSL (`crates/victory-shader/tests/dxc-reference/`) is compiled on Linux and run by nothing |
-| `rt-translate.csv`, `rt-record` | not written. Written instead: each path's hit records in `victory-rt`'s result format | no translator runs in the probe, and no validation record exists |
+| `rt-translate.csv`, `rt-record` | not written. Written instead: each path's hit records in `victory-rt`'s result format | no translator runs in the probe. The validation record has a format now (`gpu/rt/record.rs`) and the probe writes no row of it: a probe row carries the number of the rule its verdict was given under, and these verdicts are under the crate's policy, not the rule |
 | `rays_per_s`; `video_local_mb_delta`, `working_set_mb_delta`, `commit_mb_delta`; medians of build times | not written. The count and the time, and the figure before and the figure after, stand in columns of their own; a frame's builds are measured once and summed by kind | no column is one figure divided by, or taken from, another |
 | `--out rt-probe.csv` in the working directory | `--out` names a file outside the repository, or the command refuses | the repository's asset policy lists what it may hold, and a result file is not on the list |
 | The timed dispatches alone | after each series of timed dispatches one more dispatch, of the same records over poisoned hit records, in no time of the file: the **check** ("A run" below) | a timed submission holds the dispatch and nothing else, so its records cannot be poisoned first, and what the hit buffer holds after it may be an earlier dispatch's. Without the check nothing shows that a dispatch of `timed_rays` records writes every record |
@@ -148,13 +149,27 @@ Nothing is retried and nothing a device did not do is filled in.
 
 **What runs nothing.** Each of these prints `rt-probe: NOT RUN:` with the
 reason, writes no file and ends the command with an error:
-`VICTORY_RT_BACKEND` not asking for the hardware backend (unset is
-software, as in a run; only `hardware` and `auto` open it, and with
-neither not even the output folder is made); a place a result file cannot
+`VICTORY_RT_BACKEND` asking for no path over host structures (unset is
+software, as in a run; `native`, `hybrid`, `auto` and `hardware`, the
+older name of `native`, open it, read through the selection's parser in
+`gpu/rt/select.rs`, and with none of them not even the output folder is
+made); a place a result file cannot
 be written to, found before the device is opened; a device below ray
 tracing tier 1.1 (or without shader model 6.6, or `ID3D12Device5`), with
 what it reports and what is missing; `--debug-layer` where the layer is
 not installed.
+
+**The switch's value limits the run to no path.** Whichever of the four
+values opens the backend, the probe measures the native and the hybrid
+path both, and the header's `rt_backend_switch` line says so. A forced
+path (`native`, `hybrid`) is a run's matter, one workload at a time; the
+probe is a comparison, and its rows depend on each other: a ray the
+native path refuses is judged by the hybrid's record for it
+(`refused_taken_by_next`, "Refusals" above), and both paths' times stand
+against one null dispatch of one run. Under `auto` it selects nothing
+either: it measures. `VICTORY_RT_CLASS` is not read. A probe that ran one
+path's rows alone would be a different run with different counts; whether
+that is wanted is the owner's to say.
 
 **Memory.** The probe's allocations are bounded, owned and counted by the
 backend's three owners; the case is R5 of [memory.md](memory.md).
@@ -429,16 +444,23 @@ width and node-memory place. A column that does not apply is empty,
 never 0. `rt-translate.csv`: one row per program, path and form with the
 columns of measurement 2. `rt-probe-mismatch.csv`: the first 64 failing
 rays per class and pair, as hex words, enough to replay one ray in a
-unit test. `rt-record`: the validation record (dxr-architecture.md,
-"Selection"); the probe writes its verdicts, `m_max` and container
-hashes, the title comparison adds the title verdict and title times.
+unit test. The validation record (dxr-architecture.md, "Selection") is
+not one of these files: it is kept in the cache folder (`rt-record/`, one
+text file a device and driver, `gpu/rt/record.rs`). The probe writes a
+row for each class, path, form, structure source and side-table kind: its
+verdict, the rule's number and its own version, the translator's hash,
+the production container's hash, and `m_max` and its levels as fields
+the selection does not read. The title comparison adds rows of its own,
+one for each pair of title containers it compared, with the title verdict
+and the title times: the probe's container is its own program's and is no
+title program's, so the two findings cannot share a row.
 
 **What the first version writes**, beside the table `--out` names and
 named after it (`rt-probe.csv` here):
 
 | File | Holds |
 |---|---|
-| `rt-probe.csv` | a first line `# victory rt-probe results 1`; `#` lines of `key=value`: `probe_version`, `policy` (the verdicts are under the crate's policy, not yet the rule), `reading`, `k` (not computed), `seed`, `classes`, `timed_rays`, `repeats`, `discard`, `loop`, `unix_time`, the device's own words (`adapter`, `adapter_vendor_id` and `adapter_device_id` for the report only, `adapter_software`, `adapter_dedicated_mb`, `adapter_shared_mb`, `driver`, `video_budget_mb_at_start`, `raytracing_tier`, `wave_lanes`, `shader_model_6_6`), `rt_backend_switch` (the switch's value that let the probe open the backend), `d3d12_debug_layer` (`off`, or `on` with the statement that no time of the file is a measurement), `rt_structures_bound_mb`, `rt_rebuild_after_refits`, `planned` (the run's dispatches and rays, counted before it starts), `path.software-gpu` (not built), per shader `container.<form>` (header digest and size) and `pipeline.<form>`, `backend_counters`, `rows`, and `files_not_written` only where a file of the run could not be written (below); then the line of column names and the rows. No commit (the binary does not know it; send it with the file) and no validator version (the validator runs on Linux; `scripts/validate-dxil.sh` names each container it checks by the same header digest) |
+| `rt-probe.csv` | a first line `# victory rt-probe results 1`; `#` lines of `key=value`: `probe_version`, `policy` (the verdicts are under the crate's policy, not yet the rule), `reading`, `k` (not computed), `seed`, `classes`, `timed_rays`, `repeats`, `discard`, `loop`, `unix_time`, the device's own words (`adapter`, `adapter_vendor_id` and `adapter_device_id` for the report only, `adapter_software`, `adapter_dedicated_mb`, `adapter_shared_mb`, `driver`, `video_budget_mb_at_start`, `raytracing_tier`, `wave_lanes`, `shader_model_6_6`), `rt_backend_switch` (what the switch asked for that let the probe open the backend, as read: `hardware` is written `native`; and that both paths were measured whichever it names), `d3d12_debug_layer` (`off`, or `on` with the statement that no time of the file is a measurement), `rt_structures_bound_mb`, `rt_rebuild_after_refits`, `planned` (the run's dispatches and rays, counted before it starts), `path.software-gpu` (not built), per shader `container.<form>` (header digest and size) and `pipeline.<form>`, `backend_counters`, `rows`, and `files_not_written` only where a file of the run could not be written (below); then the line of column names and the rows. No commit (the binary does not know it; send it with the file) and no validator version (the validator runs on Linux; `scripts/validate-dxil.sh` names each container it checks by the same header digest) |
 | `rt-probe.native.hits`, `rt-probe.hybrid.hits` | the path's hit records in `victory-rt`'s result format (dxr-validation-reference.md): a section per class and frame, one record of eight hex words per ray, the fingerprint of the generated case, a checksum. The rays are not in the file: class and seed name them. A refusal is a record like any other, kind bit 31 set; so is a record the dispatch left unwritten, which holds the poison word eight times (`a5c3f0f0`); a ray refused before the dispatch has the probe's own kind `0xC0000000`, which no shader writes. A row of a tracing path has a section exactly when its refusal counts are filled (the answers came back), also where a later step of the row failed. A path with no records gets no file, and an earlier run's file of that name is removed |
 | `rt-probe-mismatch.csv` | the first 64 defects of each class, frame and path: class, seed, frame, path, ray, `victory-rt`'s name for the defect, the ray's twelve words and the record's eight as hex: enough to replay one ray in a host test. The column line alone when there is none |
 
@@ -465,18 +487,21 @@ With the conditions of "Measuring" in [progress.md](progress.md) that
 apply without a title (steps 1 and 3: the release build of the commit,
 other applications closed, the driver version noted), from the
 repository's folder on the Windows machine, in a Command Prompt. The
-`set` line before the probe's runs turns the experimental hardware
+`set` line before the probe's runs turns the experimental host
 backend on for this window: the probe is behind the same switch as a
-run's hardware ray tracing and runs nothing without it. The `set` line
+run's native and hybrid ray tracing and runs nothing without it. Any of
+`native`, `hybrid`, `auto` and the older name `hardware` does the same
+for the probe, which measures both paths under each; `native` is used
+here. The `set` line
 after them turns it off again, so that nothing else in the list runs
-with it (in PowerShell: `$env:VICTORY_RT_BACKEND = "hardware"` and
+with it (in PowerShell: `$env:VICTORY_RT_BACKEND = "native"` and
 `Remove-Item Env:VICTORY_RT_BACKEND`). The result files go to a folder
 beside the repository, which the command makes:
 
 ```
 cargo build --release -p victory
 target\release\victory gpu-info
-set VICTORY_RT_BACKEND=hardware
+set VICTORY_RT_BACKEND=native
 target\release\victory rt-probe --seed 1 --classes static-soup,dynamic-refit,dynamic-rebuild --rays 4096 --repeat 2 --discard 1 --debug-layer --out ..\rt-results\rt-first.csv
 target\release\victory rt-probe --seed 1 --out ..\rt-results\rt-probe.csv
 target\release\victory rt-probe --seed 1 --out ..\rt-results\rt-probe-b.csv
@@ -515,7 +540,7 @@ required, outside the repository).
 | Command | What it prints |
 |---|---|
 | `victory gpu-info` | the adapter, driver and capabilities, the ray-tracing tier and the wave lane range among them; its last line is `ray tracing backend: ...`. Already asked for (`progress.md`, "Needed from the owner") |
-| `victory rt-probe ...` | every line begins `rt-probe:`. First that no title file is read; then `device: key = value` lines (the header's device words); `this run: ...`, the dispatches and rays it will make, counted before it starts; a `pipeline, <form> shader: made in ... ms of processor time` or `not made: ...` line per shader; per class one line when the CPU reference starts and one when the class is done (`<class>: null 1/1 ran, 0 records not a miss; native <frames ran>, <defects> (<records unwritten>), <rays refused>, <records of the checking dispatch differing>; hybrid ...`); with `--debug-layer`, a `validation layer, ...` line per message; a `wrote <file> (<bytes> bytes)` line per file, and `NOT WRITTEN: <file>: <why>` for one that could not be; `rows: <n> ran, <n> failed, <n> not run, <n> not built`; how the verdicts and times are to be read; the `rt-summary` command for the file. Where nothing runs: `rt-probe: NOT RUN: <why>` (the switch not asking for the hardware backend; a result file that cannot be written; `<adapter> cannot run inline ray queries: ...`; no debug layer), then that nothing was dispatched and no file written, and the command ends with an error |
+| `victory rt-probe ...` | every line begins `rt-probe:`. First that no title file is read; then `device: key = value` lines (the header's device words); `this run: ...`, the dispatches and rays it will make, counted before it starts; a `pipeline, <form> shader: made in ... ms of processor time` or `not made: ...` line per shader; per class one line when the CPU reference starts and one when the class is done (`<class>: null 1/1 ran, 0 records not a miss; native <frames ran>, <defects> (<records unwritten>), <rays refused>, <records of the checking dispatch differing>; hybrid ...`); with `--debug-layer`, a `validation layer, ...` line per message; a `wrote <file> (<bytes> bytes)` line per file, and `NOT WRITTEN: <file>: <why>` for one that could not be; `rows: <n> ran, <n> failed, <n> not run, <n> not built`; how the verdicts and times are to be read; the `rt-summary` command for the file. Where nothing runs: `rt-probe: NOT RUN: <why>` (the switch asking for no path over host structures; a result file that cannot be written; `<adapter> cannot run inline ray queries: ...`; no debug layer), then that nothing was dispatched and no file written, and the command ends with an error |
 | `cargo xtask rt-summary <file>` | the header's device and options (and, where they apply, that the run was under the debug layer and which files were not written); correctness by class and path (frames ran, rays, judged, clear, ambiguous, excluded, defects, unwritten, refused, records differing, the crate's verdicts on the rays judged); then, each in a table of its own: GPU time of the traversal dispatch alone with the null shader's beside it; GPU time of builds and refits; processor time; time blocked waiting for the card; video memory by owner with the adapter's figure beside it; system memory; the loop mode if it ran; `to look at`, a line for each row that failed, has a defect, an unwritten record, a refusal, an untimed region or records of a checking dispatch that differ; and how to read it: no row is a pass under the rule, and the times select no path and say nothing about the title |
 | `... --against <earlier file>` | the two headers where they differ; row by row, every count that differs (two runs of one seed on one device and driver must agree on all of them); the two runs' hit-record files, section by section, with how many records differ and which sections the rows have that were not compared; the median traversal times side by side, neither called better; and one line of three: `the two runs agree` (equal counts in every row, and every section of hit records the rows have was found in both runs' files and is identical; the line gives the numbers), `THE TWO RUNS DIFFER`, or `NOT COMPARED` (counts equal, but a hit-record file is missing or unreadable, a section is in neither file, or neither run has a hit record: nothing is said about agreement) |
 
@@ -595,4 +620,25 @@ forced shows frame time no worse in the ledger.
 
 `auto` selects a row only when all three gates hold: the probe passed,
 the title verdict passed, and the title times show it faster. Until
-then the path runs only when forced, and says so.
+then the path runs only when forced, and says so. As built
+(`gpu/rt/select.rs`), the third gate is the comparison of medians above,
+from the times in the title row. The second clause, the normal-build run
+with the class forced, is not a field of the record and `select()` does
+not check it.
+
+Part of the same proposal, and as unaccepted: which of two paths that
+pass all three gates is "the fastest". The two were timed in two runs,
+each against software. As built, the hybrid is taken only where the two
+runs can be compared (software's medians in them differ by no more than
+the larger of its two interquartile ranges) and the hybrid's median is
+below the native path's by more than the larger of the two paths'
+ranges; otherwise the native path, first in the order of trial. Two
+medians from runs of different scenes, or a difference inside the
+spread, decide nothing.
+
+Every verdict in the record names the rule it was given under by a
+number that stands for the rule's text and constants, and the probe's
+names the probe's version. `select()` counts a verdict only under the
+rule and version its build accepts. The rule above and in
+dxr-compatibility.md is not accepted, so the build accepts none and
+`auto` selects nothing, whatever a record holds.

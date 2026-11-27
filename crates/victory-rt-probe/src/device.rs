@@ -226,9 +226,10 @@ pub struct Memory {
 /// and writes no file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unavailable {
-    /// `VICTORY_RT_BACKEND` does not ask for the hardware backend: what it
-    /// holds, as the backend's own selection reads it. The probe opens the
-    /// backend behind the same switch a run does.
+    /// `VICTORY_RT_BACKEND` asks for no path over host structures: what it
+    /// holds, as the selection's own parser reads it
+    /// (`victory_gpu::rt::select`). The probe opens the backend behind the
+    /// same switch a run does.
     NotAsked(String),
     /// The Direct3D 12 debug layer was asked for and could not be turned
     /// on. The run is not made without it: it was asked for by name.
@@ -247,8 +248,9 @@ impl std::fmt::Display for Unavailable {
         match self {
             Unavailable::NotAsked(holds) => write!(
                 f,
-                "the experimental hardware ray-tracing backend is off: {SWITCH} {holds}. The probe runs only with \
-                 {SWITCH}=hardware or {SWITCH}=auto set for this command"
+                "the experimental host ray-tracing backend is off: {SWITCH} {holds}. The probe runs only with \
+                 {SWITCH}=native, hybrid or auto set for this command (hardware is the older name of native), and \
+                 measures both the native and the hybrid path under any of them"
             ),
             Unavailable::NoDebugLayer(why) => write!(
                 f,
@@ -267,13 +269,19 @@ impl std::fmt::Display for Unavailable {
     }
 }
 
-/// The switch the hardware backend is behind, for a run and for the probe.
+/// The switch the host ray-tracing backend is behind, for a run and for
+/// the probe.
 pub const SWITCH: &str = victory_gpu::rt::select::VARIABLE;
 
-/// Whether the switch, holding `value`, lets the probe open the hardware
-/// backend: only `hardware` and `auto` do, read as the backend's own
-/// selection reads them. Otherwise what the switch holds, for the line
-/// that says why nothing ran. Unset is the software backend, as in a run.
+/// Whether the switch, holding `value`, lets the probe open the host
+/// backend, read through the selection's own parser (`Request::parse`):
+/// `native`, `hybrid` and `auto` do, and `hardware`, the older name of
+/// `native`. Otherwise what the switch holds, for the line that says why
+/// nothing ran. Unset is the software path, as in a run.
+///
+/// The request says whether the probe runs, never which path it runs: it
+/// measures both under any of those values ([`opened`] says why).
+/// `VICTORY_RT_CLASS` is not read: it narrows a path forced in a run.
 pub fn asked(value: Option<&str>) -> Result<Request, String> {
     match Request::parse(value) {
         Ok(Request::Software) => Err(match value.map(str::trim).filter(|v| !v.is_empty()) {
@@ -282,9 +290,30 @@ pub fn asked(value: Option<&str>) -> Result<Request, String> {
         }),
         Ok(request) => Ok(request),
         Err(unknown) => {
-            Err(format!("holds {unknown:?}, which is not software, hardware or auto and is read as software"))
+            Err(format!("holds {unknown:?}, which is not software, auto, native or hybrid and is read as software"))
         }
     }
+}
+
+/// What a result file's header says of the switch (`rt_backend_switch`):
+/// what it asks for, as read (`hardware` is written `native`), and that
+/// the probe ran both paths whatever it names. A forced path is a run's
+/// matter, one workload at a time. The probe is a comparison: a ray the
+/// native path refuses is judged by what the hybrid path answered for it
+/// ([`Path::next`]), and the two paths' times are of one run, against
+/// one null dispatch. It selects no path, under `auto` either.
+pub fn opened(request: Request) -> String {
+    let asks = match request {
+        Request::Software => "software",
+        Request::Auto => "auto",
+        Request::Native => "native",
+        Request::Hybrid => "hybrid",
+    };
+    format!(
+        "{SWITCH}={asks}: the probe opened the host backend because the switch asks for a path over host \
+         structures; it measures the native and the hybrid path both, whichever the switch names, and selects \
+         neither"
+    )
 }
 
 /// [`asked`] of what the environment holds: the request, or why nothing
@@ -375,27 +404,65 @@ mod tests {
         assert!(Unavailable::NoDebugLayer("E_FAIL".into()).to_string().contains("--debug-layer"));
     }
 
-    /// The probe is behind the switch a run is behind: with it unset, or
-    /// holding anything but `hardware` or `auto`, nothing is opened.
+    /// The probe is behind the switch a run is behind, read through the
+    /// selection's parser: with it unset, or holding anything but
+    /// `native`, `hybrid`, `auto` or the older name `hardware`, nothing is
+    /// opened.
     #[test]
     fn the_backend_is_opened_only_where_the_switch_asks_for_it() {
         assert_eq!(SWITCH, "VICTORY_RT_BACKEND");
-        assert_eq!(asked(Some("hardware")), Ok(Request::Hardware));
+        assert_eq!(asked(Some("native")), Ok(Request::Native));
+        assert_eq!(asked(Some("hybrid")), Ok(Request::Hybrid));
+        assert_eq!(asked(Some("hardware")), Ok(Request::Native), "the older name of native");
         assert_eq!(asked(Some(" Auto ")), Ok(Request::Auto));
         assert_eq!(asked(None).unwrap_err(), "is not set, which is software");
         assert_eq!(asked(Some("")).unwrap_err(), "is not set, which is software");
         assert_eq!(asked(Some("software")).unwrap_err(), "is software");
-        // The values the layer's design names for later are not the
-        // backend's yet: software, as in a run.
-        for other in ["native", "hybrid", "1", "on"] {
-            assert!(asked(Some(other)).unwrap_err().contains("read as software"), "{other}");
+        // What the selection's parser does not name is software, as in a
+        // run, and the line holds the value.
+        for other in ["1", "on", "native,hybrid", "both"] {
+            assert_eq!(
+                asked(Some(other)).unwrap_err(),
+                format!("holds {other:?}, which is not software, auto, native or hybrid and is read as software")
+            );
+        }
+        // The probe reads the switch as the selection does: every value
+        // that asks a run for a path over host structures opens it, and no
+        // other.
+        for value in [None, Some(""), Some("software"), Some("auto"), Some("native"), Some("hybrid"), Some("hardware")]
+        {
+            let run = victory_gpu::rt::select::Switch::parse(value, None).request;
+            assert_eq!(asked(value).ok(), Some(run).filter(|r| *r != Request::Software), "{value:?}");
         }
         let line = Unavailable::NotAsked(asked(None).unwrap_err()).to_string();
         assert_eq!(
             line,
-            "the experimental hardware ray-tracing backend is off: VICTORY_RT_BACKEND is not set, which is software. \
-             The probe runs only with VICTORY_RT_BACKEND=hardware or VICTORY_RT_BACKEND=auto set for this command"
+            "the experimental host ray-tracing backend is off: VICTORY_RT_BACKEND is not set, which is software. \
+             The probe runs only with VICTORY_RT_BACKEND=native, hybrid or auto set for this command (hardware is \
+             the older name of native), and measures both the native and the hybrid path under any of them"
         );
+    }
+
+    /// Whichever value opened the backend, the file says the probe ran
+    /// both paths: the switch's value limits the run to none of them.
+    #[test]
+    fn the_file_says_what_the_switch_asked_and_that_both_paths_ran() {
+        for (value, word) in [("native", "native"), ("hybrid", "hybrid"), ("hardware", "native"), ("auto", "auto")] {
+            let line = opened(asked(Some(value)).unwrap());
+            assert!(line.starts_with(&format!("VICTORY_RT_BACKEND={word}: ")), "{line}");
+            assert!(
+                line.ends_with("the native and the hybrid path both, whichever the switch names, and selects neither")
+            );
+        }
+        assert_eq!(Path::ALL, [Path::Native, Path::Hybrid], "the paths a run measures, under every value");
+    }
+
+    /// One number for the probe's version: this crate's is the one
+    /// `victory-gpu` defines beside what the selection accepts verdicts of
+    /// the probe by, and a result file names that number.
+    #[test]
+    fn the_probes_version_is_the_one_the_selection_knows() {
+        assert_eq!(crate::PROBE_VERSION, victory_gpu::rt::select::PROBE_VERSION);
     }
 
     #[test]

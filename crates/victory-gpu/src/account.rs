@@ -295,10 +295,16 @@ pub enum Owner {
     /// or command allocators (runtime memory), and nothing in video memory
     /// (R3).
     RtBuffers,
+    /// R6: the validation record of the ray-tracing paths while a run
+    /// keeps it (`crate::rt::record::Held`): its rows at their size and
+    /// the text of what was read and not understood, at most 1,024 rows
+    /// and lines and 1 MiB of such text (under 1.5 MiB). Zero today:
+    /// nothing in a run reads the record yet.
+    RtRecord,
 }
 
 impl Owner {
-    pub const ALL: [Owner; 21] = [
+    pub const ALL: [Owner; 22] = [
         Owner::TitlePages,
         Owner::TitlePagesMapped,
         Owner::TitleSections,
@@ -320,6 +326,7 @@ impl Owner {
         Owner::RtStructures,
         Owner::RtScratch,
         Owner::RtBuffers,
+        Owner::RtRecord,
     ];
 
     /// The owner's column in the performance log.
@@ -346,6 +353,7 @@ impl Owner {
             Owner::RtStructures => "own_rt_structures_mb",
             Owner::RtScratch => "own_rt_scratch_mb",
             Owner::RtBuffers => "own_rt_buffers_mb",
+            Owner::RtRecord => "own_rt_record_mb",
         }
     }
 
@@ -359,7 +367,8 @@ impl Owner {
             | Owner::PipelineLibrary
             | Owner::PipelineSave
             | Owner::Shaders
-            | Owner::RtCapture => Kind::Private,
+            | Owner::RtCapture
+            | Owner::RtRecord => Kind::Private,
             Owner::BufferCopies
             | Owner::Windows
             | Owner::ViewChunks

@@ -95,7 +95,7 @@ when the device is made; `victory gpu-info` prints it without a title.
 | Fused multiply-add | the console's fused results can differ in kind (G4) | measured by running one |
 | 64-bit atomics on heap resources | translated 64-bit image atomics | `D3D12_OPTIONS9`, `D3D12_OPTIONS11` |
 | Depth bounds test | those pipelines draw without the test | `D3D12_OPTIONS2` |
-| Ray tracing tier 1.1 | no experimental hardware ray-tracing backend ([dxr-host-backend.md](dxr-host-backend.md); off by default, not run on any host yet). The software traversal does not need it | `D3D12_OPTIONS5` |
+| Ray tracing tier 1.1 | no native or hybrid ray-tracing path ([dxr-host-backend.md](dxr-host-backend.md); experimental, off by default, not run on any host yet): every workload stays on the software traversal, which does not need it | `D3D12_OPTIONS5` |
 
 The middle rows are host dependencies the code has today: the title runs
 on such a device with a loss. Each has a roadmap item that removes the

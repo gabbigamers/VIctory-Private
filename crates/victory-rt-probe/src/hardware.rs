@@ -23,8 +23,9 @@
 //! the sizes.
 //!
 //! Behind the switch a run is behind: [`Hardware::open`] opens nothing
-//! unless `VICTORY_RT_BACKEND` asks for the hardware backend
-//! (`crate::device::asked`).
+//! unless `VICTORY_RT_BACKEND` asks for a path over host structures
+//! (`native`, `hybrid`, `auto`, or `hardware`, the older name of `native`;
+//! `crate::device::asked`). Whichever it names, both paths are measured.
 
 use std::time::{Duration, Instant};
 
@@ -41,14 +42,14 @@ use victory_gpu::rt::budget::Limits;
 use victory_gpu::rt::cache::Handle;
 use victory_gpu::rt::desc::{Inputs, Instance, TopDesc};
 use victory_gpu::rt::device::{Buffer, Error, Outcome, Rt, commit_and_working_set};
-use victory_gpu::rt::select::{Lack, Request};
+use victory_gpu::rt::select::Lack;
 use victory_gpu::rt::update::{Change, Decision, Policy};
 use victory_shader::emit::host::Host;
 use victory_shader::emit::rayquery::{self, Binding, Class, Form, HIT_BYTES, RAY_BYTES, RayQueryShader, Resource};
 
 use crate::device::{
-    Built, Device, Gpu, Level, Memory, POISON, Path, SWITCH, Structures, Trace, Traced, Unavailable,
-    asked_by_environment, form_name,
+    Built, Device, Gpu, Level, Memory, POISON, Path, Structures, Trace, Traced, Unavailable, asked_by_environment,
+    form_name, opened,
 };
 use crate::scene::Action;
 
@@ -305,10 +306,11 @@ fn severity(of: D3D12_MESSAGE_SEVERITY) -> &'static str {
 impl Hardware {
     /// The default adapter's device, as a run uses, with the host
     /// ray-tracing backend on a queue of its own. Behind the switch a run
-    /// is behind: unless `VICTORY_RT_BACKEND` asks for the hardware backend
-    /// (`hardware` or `auto`) nothing is opened, no device is made and
-    /// nothing is allocated. Where it does, the device's capabilities
-    /// decide whether the backend opens.
+    /// is behind: unless `VICTORY_RT_BACKEND` asks for a path over host
+    /// structures (`native`, `hybrid`, `auto`, or the older name
+    /// `hardware`) nothing is opened, no device is made and nothing is
+    /// allocated. Where it does, the device's capabilities decide whether
+    /// the backend opens, and both paths are measured whichever is named.
     ///
     /// With `debug_layer`, the Direct3D 12 debug layer is turned on first
     /// and its messages are handed to the run ([`Device::messages`]); the
@@ -347,16 +349,7 @@ impl Hardware {
         })?;
         let model = feature_model(&device);
         identity.push(("shader_model_6_6".into(), if model { "yes" } else { "no" }.into()));
-        identity.push((
-            "rt_backend_switch".into(),
-            format!(
-                "{SWITCH}={}: the probe opened the hardware backend because the switch asks for it",
-                match request {
-                    Request::Auto => "auto",
-                    _ => "hardware",
-                }
-            ),
-        ));
+        identity.push(("rt_backend_switch".into(), opened(request)));
         identity.push((
             "d3d12_debug_layer".into(),
             match debug_layer {
