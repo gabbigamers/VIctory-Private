@@ -158,8 +158,8 @@ pub enum Kind {
     /// Memory for the GPU in system RAM (upload heaps, custom heaps in the
     /// CPU's pool). Not so in a diagnostics run with
     /// `VICTORY_COPIES_IN_VIDEO_MEMORY` on: buffer copies, windows, view
-    /// chunks and the argument and budget buffers of lists are then on the
-    /// card, and still counted under their owners.
+    /// chunks, pages held on demand and the argument and budget buffers of
+    /// lists are then on the card, and still counted under their owners.
     GpuSystem,
     /// A count, not bytes.
     Count,
@@ -245,10 +245,18 @@ pub enum Owner {
     /// DXIL of each one translated. Not the translations' other tables or
     /// the map itself.
     Shaders,
+    /// G11 (last here so that the log's earlier columns stay where they
+    /// were): the buffers holding copies of 64 KiB title pages that
+    /// translated shaders reached by address and no other copy held
+    /// (`crate::memory`, with `VICTORY_MEMORY_PAGING`): one whole buffer of
+    /// 4 MiB for each aligned 4 MiB of title memory with such a page, from
+    /// its first page's copy until the last copy in it is gone. Zero in a
+    /// run without the switch.
+    DemandPages,
 }
 
 impl Owner {
-    pub const ALL: [Owner; 15] = [
+    pub const ALL: [Owner; 16] = [
         Owner::TitlePages,
         Owner::TitlePagesMapped,
         Owner::TitleSections,
@@ -264,6 +272,7 @@ impl Owner {
         Owner::PipelineLibrary,
         Owner::PipelineSave,
         Owner::Shaders,
+        Owner::DemandPages,
     ];
 
     /// The owner's column in the performance log.
@@ -284,6 +293,7 @@ impl Owner {
             Owner::PipelineLibrary => "own_pipeline_library_mb",
             Owner::PipelineSave => "own_pipeline_save_mb",
             Owner::Shaders => "own_shaders_mb",
+            Owner::DemandPages => "own_demand_pages_mb",
         }
     }
 
@@ -302,7 +312,8 @@ impl Owner {
             | Owner::ViewChunks
             | Owner::Staging
             | Owner::HeapTables
-            | Owner::ListBuffers => Kind::GpuSystem,
+            | Owner::ListBuffers
+            | Owner::DemandPages => Kind::GpuSystem,
         }
     }
 }

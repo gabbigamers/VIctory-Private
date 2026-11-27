@@ -332,6 +332,16 @@ pub(crate) fn track_copy(start: usize, len: usize, views: bool) -> Option<Tracke
     track_as(start, len, views, true)
 }
 
+/// Whether a host buffer copy of `[start, start + len)` would have all of
+/// it tracked ([`track_copy`]): every page of it is the runtime's GPU
+/// memory. Asks only; nothing is tracked or guarded.
+pub(crate) fn tracks(start: usize, len: usize) -> bool {
+    let Some(end) = start.checked_add(len).filter(|_| len > 0) else {
+        return false;
+    };
+    runtime_pages(start, end, true).len() == end.div_ceil(PAGE) - start / PAGE
+}
+
 fn track_as(start: usize, len: usize, views: bool, copy: bool) -> Option<Tracked> {
     if len == 0 {
         return None;

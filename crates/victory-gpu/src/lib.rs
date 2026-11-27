@@ -44,6 +44,8 @@ pub mod list;
 mod memory;
 pub mod object;
 mod pacing;
+#[cfg(any(windows, test))]
+mod paging;
 pub mod pipeline;
 #[cfg(windows)]
 mod placement;

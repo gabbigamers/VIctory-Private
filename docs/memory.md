@@ -253,6 +253,7 @@ ranges (address space only).
 | G8 | The title's list upload blocks | private commit | as asked | until the list's reset | none | `uploads_mb` |
 | G9 | Refresh and detile scratch | process heap | the largest texture refreshed; kept per thread up to 32 MiB | worker threads end with each call, so theirs is allocated and zero-filled again each time | transient | none |
 | G10 | Tables of views, placed-texture records, tracked pages | process heap | grows with what the title describes; views without a resource object are never dropped | the run | none | none |
+| G11 | Copies of 64 KiB title pages a translated shader reached by address and no other copy held, and of the pages after them in their aligned 4 MiB (`VICTORY_MEMORY_PAGING=1`; off by default, then zero) | GPU memory in system RAM | one buffer of 4,194,304 bytes for each aligned 4 MiB of title memory with such a page; at most `max(1, floor(M / 4))` buffers for `M` megabytes asked (default 256: 64 buffers, 268.4 MB; at most 4,096: 4.29 GB) | a page from the submission that missed it (or the page before it) until another copy has it or the title gives the memory up; a buffer until the last copy in it is gone | title memory. **Needed while held**: during a submission the copy is the only holder of what shaders wrote there | `own_demand_pages_mb` |
 
 ### Video memory and caches (`victory-gpu`)
 
@@ -294,6 +295,7 @@ first run with the log is also the first check of these figures.
 | `own_pipeline_library_mb` | C1 | the pipeline library's bytes held for the library | |
 | `own_pipeline_save_mb` | C2 | the buffer a save serialises into, while it lives | |
 | `own_shaders_mb` | C3 | container and DXIL bytes kept in the shader map | the translations' other tables |
+| `own_demand_pages_mb` | G11 | whole 4 MiB buffers of pages held on demand, from a buffer's first copy until its last copy is gone | the maps and counters beside them (process heap, bounded: see the case below) |
 | `private_working_set_mb` | | the process's working set without section and mapped-file pages | not given before Windows 10 22H2 |
 
 A release of more than was counted leaves the gauge at zero and is noted;
@@ -301,7 +303,9 @@ a run then logs which owners are wrong. What a run has to show before a
 figure is believed: `own_loading_mb` is 0 whenever streaming is idle;
 `own_snapshot_pool_mb` never exceeds 537 (512 MiB); `own_pipeline_save_mb`
 is 0 except during a save; `own_title_pages_mb` rises by exactly 64 KiB a
-page allocated; no owner is reported as miscounted. With the diagnostics
+page allocated; `own_demand_pages_mb` is 0 without `VICTORY_MEMORY_PAGING`
+and with it never exceeds the figure the start-up line gives (268 at the
+default); no owner is reported as miscounted. With the diagnostics
 switch that puts buffer copies in video memory, the owners marked as GPU
 memory in system RAM are on the card instead, and their figures are not
 comparable with other runs.
@@ -376,4 +380,304 @@ Before / after: (ledger rows)
 Decision:
 ```
 
-No case has been written yet.
+### G11, pages of title memory held on demand : a new owner, off by default
+
+Written 2026-11-27 with the change that adds it. The template is for
+removing an allocation; this case adds one, so each question is answered
+for the new copies, and the way they are given up again is the part the
+template was written for. **Nothing here has run on a device**: the
+bookkeeping and every decision that needs no device are tested on any host
+(`crates/victory-gpu/src/paging.rs`), the Direct3D side is type-checked for
+Windows only. File and line numbers are as of this change.
+
+Kind: an addition (new copies); giving a page up is kind 3, evict what can
+be restored exactly.
+
+Why it exists. A translated shader that reads or writes title memory at an
+address it computed finds the host copy through a page table
+(`crates/victory-gpu/src/memory.rs`). A copy existed only for memory a
+draw, a view or a root argument had named (`shadow.rs`, `find`). A page
+reached only through a pointer the shader read had none: it read 0, its
+writes were dropped, the miss was marked, and nothing ever made a copy for
+it, so the same program missed it in every frame, and every miss keeps what
+all programs using title memory wrote out of title memory for two frames
+(`memory.rs:350`, `withholding`). With the switch, such a page gets a copy.
+
+What it does not do. **Nothing runs again.** The list that missed keeps its
+writes out of title memory as before and the copies drop them; the page is
+there for the submissions that follow. A program the title runs every frame
+reads it then. A program the title runs once (a build, an unpack in place)
+that touches a page with no copy has lost its output for good, with the
+switch as without, and every first touch of fresh memory is such a miss. So
+the switch can only help work that is run again. Making pages present
+before a dispatch runs (from the addresses its root arguments name), or
+running the list again, would be needed for one-shot work; neither is done.
+The lists whose writes were withheld are counted by pipeline in the misses
+line, and each pipeline is named once in the log when it first happens, so
+a run shows whether one-shot programs are among them.
+
+Cost in time, not measured. Each held page is tracked like any copy's: the
+change tracker makes the title's page read-only when the copy takes it, and
+the title's next write there faults once and has the page copied again
+before the next submission. The pages taken after a missed page are tracked
+whether or not a shader ever reads them, so memory the title writes every
+frame next to a structure costs a fault and 64 KiB a frame per page while
+it is held. A first copy is 64 KiB a page, at most about 20 MB a frame.
+
+Worst-case size, as a formula. With `M` the megabytes asked for
+(`VICTORY_MEMORY_PAGING_MB`, default 256, cut to 4,096; a value that is not
+a number above 0 is refused with a warning and the default used):
+
+```
+buffers  <= max(1, floor(min(M, 4096) / 4))    (paging.rs:151, limit_runs)
+bytes    <= buffers x 4,194,304                (paging.rs:156, worst_case_bytes)
+default:    64 x 4,194,304 = 268,435,456 bytes (256 MiB)
+largest:  1024 x 4,194,304 = 4,294,967,296 bytes
+switch off: 0
+```
+
+One buffer holds the pages on demand of one aligned 4 MiB of title memory
+(a run), each at its own offset, so a buffer may hold one page or 64. The
+bound holds because a page is taken only if its run has a buffer or fewer
+buffers than the limit exist, and a buffer goes only with the last copy in
+it (`paging.rs:675`, `Pager`; tests `a_run_is_free_only_when_its_last_copy_is_gone`,
+`the_limit_bounds_the_host_memory`, which tries 16,000 steps of misses,
+pages given up and copies going in random order). Per frame at most 16 new
+buffers (64 MiB) and 256 pages, counting the pages taken with a missed page
+after it in its run, and up to 63 more for the miss that reaches that
+count (its run is finished). Beside the
+buffers, in the process heap and each bounded: a map entry per held page
+(at most 64 per buffer), what was found of at most 8,192 missed pages, 96
+probed regions and at most 4,096 set aside, 256 kinds of miss and 32
+pipelines already logged, and per view heap two descriptor slots for each
+buffer. The page tables do not grow: they are of one size whatever they
+name (G6).
+
+1. Ownership, lifetime, purpose: owned by the paging state in
+   `memory.rs:414`, `Paging`: the copies in its map of held pages, the
+   buffers in its map of runs, counted by a `Held` on `Owner::DemandPages`
+   per buffer (`memory.rs:394`, `Run`). A page's copy is made after the
+   submission that missed it (`paging.rs:1380`, `note_misses`, from
+   the list's after-run work in `memory.rs`, `bind`), only for a page that
+   can be read, that the change tracker tracks whole and that no copy holds
+   in whole or in part (`paging.rs:555`, `classify`;
+   `shadow.rs:293`, `Shadow::page` refuses a page not tracked whole). The
+   pages after it in its run are looked at in turn and given copies with it
+   up to the first that cannot have one (`paging.rs:1436`, `admit`). It is
+   given up (`memory.rs:616`, `give_up`) when a table names another copy for
+   its page (`memory.rs:716`, `rewrite`) or when the frame-end check finds
+   nothing of the page readable any more (`memory.rs:628`, `paging_frame`: 128
+   held pages a frame, in turn). The copy then lives until every page table
+   that named it is rewritten; its drop reports its page
+   (`shadow.rs:768`), its place in the buffer is
+   zeroed, and a buffer is freed with the last copy in it
+   (`memory.rs:555`, `take_gone`). Purpose: the bytes shaders read and write at
+   the page's addresses.
+2. Consumers (CPU, GPU), each with file:line. CPU writers of the copy: the
+   refresh before a submission, from title memory, of the pages the title
+   wrote since the copy took them (`memory.rs:816`, `prepare`, into
+   `shadow.rs:660`, `update_tracked`), and the zeroing of a place that holds
+   no copy: when its copy is gone, and when the page is missed while the
+   page before it is held, since a write that ran past that page's end (the
+   miss) left bytes there (`memory.rs:478`, `clear`). CPU readers of the copy: the copy-back after
+   a submission, which compares the page with title memory and writes title
+   memory (`shadow.rs:198`, `copy_back_page`, called from `bind`'s
+   after-run work in `memory.rs`). GPU readers and writers: translated
+   shaders through the page table's raw views, one view pair per buffer per
+   view heap (`crates/victory-shader/src/emit/lower/memory.rs`,
+   `Lower::memory`; the pair is made in `rewrite`). No one else:
+   `shadow::find` never returns such a copy, so no draw, no title view and
+   no root view reads it, and it takes no bits of the views' written-pages
+   bitmap.
+3. Can the guest read or write it again, and how do we know: the copy is
+   not the guest's memory and replaces none of it. The title reads and
+   writes its own page as before. Its writes reach the copy through the
+   change tracker at the next refresh (`watch.rs`; the copy's tracker is
+   made by `track_copy` in `Shadow::page`). What shaders wrote reaches the
+   title after the submission, before the bottom-of-pipe writes that tell
+   the title the GPU is done (`host.rs`, the completion of `execute`).
+4. Coherency and synchronisation relied on. Title memory is the truth
+   except between a submission's start and its copy-back, when the copy
+   holds what shaders wrote. Who may write the copy: shaders, the refresh,
+   and the zeroing of an empty place; nothing else. The rules are those of
+   every host copy and none is new: a page the title wrote since the copy
+   took it keeps the title's bytes and loses the shaders'
+   (`shadow.rs:198`, `copy_back_page`; now counted, in the misses
+   line, where it was logged once); a submission that missed anything, and
+   every list using title memory in that frame and the next, keeps its
+   writes out of title memory and the copies drop them
+   (`memory.rs:369`, `drop_withheld`; `memory.rs:383`, `retake_dropped`).
+   New:
+   * One place for a page's bytes. A page's copy stands back for every
+     other copy the table would name for its page, whole or in part
+     (`paging.rs:222`, `write_table`; tests
+     `a_page_on_demand_stands_back_for_every_copy_that_has_its_page` and
+     `pages_on_demand_change_only_entries_that_named_no_copy`, which shows
+     over random sets of copies that a table with pages on demand differs
+     from the one without only in entries that named no copy). So a title
+     buffer's bytes are read and written at one place, the buffer's copy,
+     by views and by address alike, and a root UAV's byte-for-byte
+     copy-back finds what shaders wrote. Should a written page in a root
+     UAV's range be a page on demand's all the same (the root UAV's copy
+     had no slot in the table), it goes back by page and is counted
+     (`paging.rs:421`, `take_marks`; test
+     `a_root_uavs_page_goes_back_from_the_copy_the_table_named`).
+   * The cost of that rule: a page that a small title buffer's copy holds
+     in part gets no page on demand, and what lies in the rest of it reads
+     0 and marks nothing, as without the switch (`memory.rs`'s header
+     shortcut). Neither the miss counts nor paging see such memory. The
+     pages a table names in part are counted when it is written and the
+     frame line and the misses line give the figure.
+   * Neighbouring pages lie side by side. Pages on demand of one aligned
+     4 MiB lie in one buffer at their own offsets, so an access that starts
+     in one and ends in the next (a shader's access is served by one
+     lookup) reads and writes the right bytes when both are held, and the
+     pages after a missed page are taken with it so that they are (test
+     `neighbouring_pages_on_demand_lie_side_by_side`).
+     shortcut, counted: where the next page is not beside a held page (the
+     next 4 MiB, a page another copy holds, a page that is not tracked
+     memory, a page not yet taken because the frame's count was reached),
+     the part of an access that runs past the held page's end reads 0 and
+     marks nothing. This is the shortcut every copy has at its end; the
+     misses line gives the number of held pages where it applies. A write
+     there marks the next page, so it goes back with that page, or is a
+     counted miss whose bytes in the buffer are zeroed again.
+   Locks: the paging state is taken inside the page tables' lock, never the
+   other way, and a copy's drop takes neither (`memory.rs:496`, `GONE`).
+5. Asynchronous use: what can still refer to it after the call returns. A
+   submission runs to its end before the next starts (`host.rs`, `execute`
+   waits for its fence), and a list recorded but not yet submitted names no
+   copy: the table is written at submission (`memory.rs:816`, `prepare`).
+   So what can refer to a copy given up is: the layout of each page table
+   that named it, until that table's next rewrite; the views in each such
+   heap, made null at that rewrite when no held page lies in the buffer any
+   more; the batch of the submission that last refreshed it, dropped on the
+   release thread. Each holds the copy itself (an `Arc`), the copy holds its
+   buffer, and the buffer is counted until the last copy in it is gone. A
+   page given up may be held again before its old copy is gone: the new copy
+   lies at the same place, and the old one is named only by tables that are
+   rewritten before any submission uses them. A view heap that is never used
+   again keeps its last layout, and with it the copies that layout named:
+   their buffers stay (the bound holds; the buffers usable shrink by that
+   many).
+6. The way back: restored from what, when, and if that source changed. From
+   title memory. A page given up and reached again is a miss again
+   (counted, its submission withheld) and gets a new copy, whose first
+   refresh takes the whole page from title memory as it then is. Nothing a
+   copy holds exists only there after its submission ended: what shaders
+   wrote has gone back to title memory, or was withheld and dropped by the
+   rule above.
+7. Identical rendering: which tests and captures show it. With the switch
+   off no copy is made, and two things differ from before, neither visible
+   to a shader, each with its own switch:
+   * a 256 MiB region a shader reached and no copy lies in gets an empty
+     block in the page tables (at most 96 regions, only in blocks copies
+     leave free; 32 KiB more to write per region whenever a table is
+     written), so that its next miss names the page. Test
+     `without_pages_on_demand_the_table_is_what_it_was` shows over random
+     sets of copies that the table is, dword for dword, what the rule before
+     this change gives, and that with probes every address finds the same
+     view and offset and the host reads the same verdict (missed or not);
+     `a_probe_makes_a_regions_misses_name_their_page` shows only the marked
+     bit differs, and both bits are misses to the host
+     (`paging.rs:343`, `mark`). `VICTORY_MEMORY_PROBES=0` turns the
+     blocks off.
+   * missed pages are looked at to count them by reason: a few system calls
+     for at most 16 pages a frame, an answer kept for 30 to 59 frames and
+     twice as long each time it is found again (up to 960), so a steady set
+     of missed pages costs about a page a frame after its first seconds
+     (test `a_steady_set_of_missed_pages_is_soon_asked_about_rarely`). **The
+     cost of a call is not measured**: the repository's own notes put
+     `VirtualQuery` in the runtime's big pools at 0.35 ms to milliseconds,
+     so a frame that looks at 16 new stray pages may take several
+     milliseconds longer. The misses line gives the pages looked at and the
+     time it took; `VICTORY_MEMORY_MISS_REASONS=0` turns it off (misses are
+     then counted as not looked at).
+   With the switch on the frames are meant to differ: pages that read 0
+   hold the title's bytes. **No capture exists**: this is the question the
+   owner's run answers.
+
+What a run shows, and what it does not.
+
+* No "title memory misses" line while title-memory programs run (the
+  existing line "title memory this frame") refutes the miss-and-withhold
+  mechanism only. It does not show that shaders found all they reached:
+  reads that return 0 without a mark exist (the rest of a page a copy holds
+  in part, an access running past a copy's end, bytes past 512 MiB of a
+  copy). The frame line's figure of pages named in part says how much
+  memory is exposed to the first; whether shaders reach it is not counted.
+* "in a 256 MiB region with no copy" is expected for the first frame or two
+  a region is reached. If it persists, the line says how many such misses
+  were in regions refused a block (all 96 in use by regions that may be
+  title memory; also warned once) or set aside (every page looked at there
+  was not title memory): no page there is named, looked at or given a copy.
+* "copied but not named by the table" is expected with the switch on: a
+  page given its copy for one list of a submission is missed by the
+  submission's other lists too, since the table was written before.
+* "tracked memory in no buffer object" and "in a title buffer with no copy"
+  are the misses the switch gives copies. The first is decided by
+  exclusion: the change tracker takes any mapped view that is neither an
+  image nor plain private memory for the runtime's, so a stray address in a
+  mapped view of something else is counted there too, and with the switch
+  gets a copy and the tracker's guards (the exposure a 4 MiB window around
+  a root argument has today, widened to pages shaders' pointers reach).
+* With the switch on, ray-traced light appearing confirms the cause.
+  **Its absence does not refute it**: if the misses line names lists whose
+  writes were withheld (the builder's pipelines among them), one-shot work
+  was lost at its first touch of each page and is not redone; and "refused
+  (all N buffers in use)" above zero means the bound is too small.
+
+Tracking needed that does not exist yet: which present pages a shader
+reads (shaders mark writes and misses only), so pages cannot be given up
+by last use, only when superseded or gone, and an access that runs past a
+copy's end cannot be counted when it happens; and the extent of the title's
+allocation around an address (the runtime knows it, the GPU layer does not
+ask), so a structure is paged in from each missed page to the end of its
+4 MiB and no further.
+
+Regression tests added (any host, `crates/victory-gpu/src/paging.rs`, 43
+tests): the table tests moved there from `memory.rs`, where they ran on
+Windows only; for the table with pages on demand and probes
+`a_page_on_demand_stands_back_for_every_copy_that_has_its_page`,
+`pages_on_demand_change_only_entries_that_named_no_copy`,
+`neighbouring_pages_on_demand_lie_side_by_side`,
+`pages_on_demand_get_their_blocks_last`,
+`a_probe_makes_a_regions_misses_name_their_page`,
+`probes_take_only_the_blocks_copies_leave`,
+`without_pages_on_demand_the_table_is_what_it_was`,
+`bit_zero_is_above_the_table_only_once_the_lowest_region_has_a_block`; for
+a list's marks `a_lists_marks_are_sorted_by_what_they_are`,
+`a_root_uavs_page_goes_back_from_the_copy_the_table_named`,
+`both_readings_of_a_bitmap_agree_on_a_miss`; for the bound
+`pages_are_held_in_a_bounded_number_of_runs`,
+`so_many_pages_and_new_runs_are_taken_in_a_frame`,
+`a_run_is_free_only_when_its_last_copy_is_gone`,
+`the_limit_bounds_the_host_memory`; for the decisions after a list ran,
+against a stand-in for the system and the device,
+`without_the_switch_misses_are_looked_at_and_counted_only`,
+`a_missed_page_gets_a_copy_and_the_pages_after_it_in_its_run`,
+`a_page_whose_run_has_no_buffer_left_stays_a_miss`,
+`without_host_memory_nothing_is_held_and_nothing_tried_for_a_while`,
+`a_page_the_tracker_refuses_is_not_held`,
+`a_page_given_up_leaves_its_place_empty_and_its_run_its_buffer`,
+`regions_only_strays_reach_make_way_for_others`,
+`lists_whose_writes_were_withheld_are_counted_by_pipeline`; and the tests
+of looking at pages, the counters and the log line. Needs a device and has
+not run (`memory.rs`):
+`a_missed_page_of_title_memory_gets_a_copy_for_the_next_submission` (two
+neighbouring pages, a record read across them by one lookup, a write
+through the second).
+
+Switches: pages on demand are off unless `VICTORY_MEMORY_PAGING=1`.
+`VICTORY_MEMORY_PAGING_MB=<megabytes>` sets the limit.
+`VICTORY_MEMORY_PROBES=0` turns off the empty blocks (misses in regions
+with no copy then stay counted by region, and no page there gets a copy).
+`VICTORY_MEMORY_MISS_REASONS=0` turns off looking at missed pages (ignored,
+with a warning, when pages on demand are on: a page is looked at before it
+gets a copy).
+
+Before / after: no measured run.
+
+Decision: not approved as a default. In the tree behind the switch so that
+one run can show whether the misses it addresses occur (the README's table
+of switches says what the log shows, under `VICTORY_MEMORY_PAGING`).

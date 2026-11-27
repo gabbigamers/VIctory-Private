@@ -94,6 +94,10 @@ pub(crate) struct Shadow {
     /// The bytes asked for `buffer`, counted for its owner while this lives
     /// (none for a run of a shared buffer: the [`Arena`] counts its chunks).
     _held: Option<Held>,
+    /// Its page number, for a copy of one page held on demand
+    /// (`crate::memory`: made because a shader missed the page or the one
+    /// before it): told when it goes.
+    paged: Option<u64>,
 }
 
 /// Snapshot segments (offset, bytes) and the pieces compared. Each segment's
@@ -200,6 +204,7 @@ impl Shadow {
         if let Some(t) = &self.tracked
             && t.changed(page / PAGE)
         {
+            KEPT_TITLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| {
                 tracing::warn!(
@@ -265,11 +270,58 @@ impl Shadow {
             base: slice.map_or(0, |s| s.offset),
             slice,
             _held: held,
+            paged: None,
         });
         if let Some(base) = marks {
             self::marks().owners.insert(base, Arc::downgrade(&shadow));
         }
         shadow
+    }
+
+    /// A copy of the one 64 KiB page of title memory at `start` (page number
+    /// `page`), held on demand (`crate::memory`): `data` and `gpu` are where
+    /// the page lies in `buffer`, its run's, which it shares with the run's
+    /// other pages, `base` bytes in. The buffer's bytes are counted by
+    /// whoever holds the buffer.
+    ///
+    /// No views of the title's show it, only the page table's, so it takes
+    /// no bits of the views' written-pages bitmap. None if the change
+    /// tracker does not track all of the page: its copy-back would then put
+    /// the copy's bytes over whatever the title wrote meanwhile
+    /// ([`Shadow::copy_back_page`]), in memory that may not be the title's
+    /// GPU memory at all.
+    pub(crate) fn page(
+        buffer: ID3D12Resource,
+        data: *mut u8,
+        gpu: u64,
+        start: u64,
+        base: u64,
+        page: u64,
+    ) -> Option<Arc<Shadow>> {
+        let tracked = crate::watch::track_copy(start as usize, PAGE, true)?;
+        if !tracked.untracked(start as usize, start as usize + PAGE).is_empty() {
+            return None;
+        }
+        Some(Arc::new(Shadow {
+            buffer,
+            data,
+            gpu,
+            start,
+            len: PAGE as u64,
+            tracked: Some(tracked),
+            pending: Mutex::default(),
+            before: Mutex::default(),
+            marks: None,
+            base,
+            slice: None,
+            _held: None,
+            paged: Some(page),
+        }))
+    }
+
+    /// Whether it is a page held on demand ([`Shadow::page`]).
+    pub(crate) fn paged(&self) -> bool {
+        self.paged.is_some()
     }
 
     /// The view-mark entry (`victory_shader::emit`, "Write marks") of a
@@ -692,6 +744,16 @@ impl Shadow {
     }
 }
 
+/// Pages shaders wrote by address that kept the title's bytes, because the
+/// title wrote them too since the copy took them
+/// ([`Shadow::copy_back_page`]): what the shaders wrote there is lost.
+static KEPT_TITLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// [`KEPT_TITLES`] since the last call.
+pub(crate) fn take_kept_titles() -> u64 {
+    KEPT_TITLES.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Drop for Shadow {
     fn drop(&mut self) {
         if let Some(slice) = self.slice {
@@ -701,6 +763,9 @@ impl Drop for Shadow {
             let mut m = marks();
             m.owners.remove(&base);
             m.give_back(base, pages(self.start, self.len));
+        }
+        if let Some(page) = self.paged {
+            crate::memory::page_gone(page);
         }
     }
 }
@@ -986,8 +1051,43 @@ pub(crate) fn generation() -> u64 {
     GENERATION.load(std::sync::atomic::Ordering::Acquire)
 }
 
-fn changed() {
+/// The copies page tables name changed ([`all`], or the pages held on
+/// demand beside them, `crate::memory`).
+pub(crate) fn changed() {
     GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// What holds the 64 KiB page at `page` (a page's first address), without
+/// making anything: whether a title buffer object holds all of it, whether
+/// a copy holds all of it (that buffer's, or a window's), and whether a
+/// title buffer's copy holds a part of it and none all (windows are whole
+/// pages).
+pub(crate) fn holding(page: u64) -> (bool, bool, bool) {
+    let end = page + PAGE as u64;
+    let (mut in_buffer, mut copied, mut part) = (false, false, false);
+    {
+        let map = buffers();
+        // As far down as [`find`] looks; a buffer may lie inside another.
+        for (_, e) in map.range(..=(page, usize::MAX)).rev().take(64) {
+            if e.end >= end {
+                in_buffer = true;
+                copied |= e.shadow.is_some();
+            } else if e.end > page {
+                part |= e.shadow.is_some();
+            }
+        }
+        // Buffers that start inside the page.
+        part |= map.range((page + 1, 0)..(end, 0)).any(|(_, e)| e.shadow.is_some());
+    }
+    let window = LOOSE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .range(..=(page, u64::MAX))
+        .rev()
+        .take(64)
+        .any(|(&(start, len), _)| start + len >= end);
+    let copied = copied || window;
+    (in_buffer, copied, part && !copied)
 }
 
 /// A title buffer exists at `start` (`len` bytes).

@@ -27,8 +27,32 @@
 //! Memory no copy holds reads 0 and takes no writes (null views,
 //! bounds-checked); shaders mark such pages (or 256 MiB regions with no
 //! block) in the bitmap and [`log_frame`] counts them.
+//!
+//! A copy exists only for memory a draw, a view or a root argument named:
+//! nothing here makes one for a page a shader reached through a pointer it
+//! read. Such a page is missed again whenever a program reaches it, and
+//! each miss withholds what programs using title memory wrote
+//! ([`withholding`]). A list that missed does not run again: what a program
+//! the title runs once wrote in it is lost, and the lists whose writes were
+//! withheld are counted by pipeline. Unless switched off: each missed page
+//! is looked at once the frame has a moment (is it title memory, is it in a
+//! title buffer, does a copy hold it; a few system calls for at most
+//! `crate::paging::ASK_PER_FRAME` pages a frame, timed in the misses line;
+//! `VICTORY_MEMORY_MISS_REASONS=0` turns it off) and counted by what was
+//! found, and a 256 MiB region with no copy in it gets an empty block so
+//! that misses there name their page (`VICTORY_MEMORY_PROBES=0` turns it
+//! off; the shader reads the same null views). `crate::paging` holds that
+//! bookkeeping and its tests. With `VICTORY_MEMORY_PAGING=1` a missed page
+//! of title memory also gets a copy of its own for the submissions that
+//! follow: see `crate::paging` for the rules.
 //! shortcut: a page two copies share without either holding all of it is
-//! the larger one's.
+//! the larger one's, and what lies past that copy's end in the page reads 0
+//! without a mark (so no miss is counted and no page on demand is made for
+//! it). The pages a table names in part are counted when it is written and
+//! the frame line gives the figure.
+//! shortcut: an access is served by one lookup, so the part of it that runs
+//! past the end of the copy holding its first byte reads 0 and is not
+//! marked (a write there marks the page of its last byte).
 //! shortcut: a table names copies in at most [`CAPACITY`] 256 MiB regions;
 //! past that, the smallest copies read as missing (logged once).
 
@@ -36,29 +60,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
+use windows::core::Interface;
 
 use crate::descriptor::host::HostHeap;
 use crate::host::HostList;
+#[cfg(doc)]
+use crate::paging::CAPACITY;
+use crate::paging::{BITMAP_BYTES, BITMAP_WORDS, Facts, GivenUp, Named, RUN_BYTES, TABLE_DWORDS, Unmade, write_table};
 use crate::shadow::Shadow;
 
-/// Pages per level-2 block: 4096 pages of 64 KiB, 256 MiB.
-const BLOCK: usize = 4096;
-/// Level-1 entries: 2^40 bytes in 256 MiB blocks.
-const LEVEL1: usize = 4096;
-/// Level-2 blocks a table has room for besides the null one: copies in 512
-/// distinct 256 MiB regions (the world's ~4,100 copies use a few dozen).
-const CAPACITY: usize = 512;
-/// Sentinel in [`Layout::owner`] for a page with no host copy.
-const NO_OWNER: u32 = u32::MAX;
-/// Total dwords in a page table buffer (level-1 + `CAPACITY + 1` blocks of
-/// `BLOCK` 2-dword entries).
-const TABLE_DWORDS: usize = LEVEL1 + (CAPACITY + 1) * BLOCK * 2;
-/// Bits in a list's dirty-page bitmap (one per level-2 entry across all blocks).
-const BITMAP_BITS: usize = (CAPACITY + 1) * BLOCK;
-/// 32-bit words in a dirty-page bitmap.
-const BITMAP_WORDS: usize = BITMAP_BITS / 32;
-/// Byte size of a dirty-page bitmap buffer (256-byte aligned).
-const BITMAP_BYTES: u64 = (BITMAP_BITS / 8).next_multiple_of(256) as u64;
 /// Maximum number of dirty-page bitmaps kept in [`BITMAP_POOL`].
 const BITMAP_POOL_CAP: usize = 64;
 /// The key of our own view heap ([`heap`]) among the title's.
@@ -73,15 +83,20 @@ pub(crate) struct Map {
     /// Ranges that go back byte for byte instead (root UAVs, see
     /// [`Map::precise`]).
     precise: Arc<Mutex<Vec<(u64, u64)>>>,
+    /// The list's draws and dispatches using title memory, by pipeline
+    /// ([`Map::used`]).
+    uses: Arc<Mutex<std::collections::BTreeMap<String, u64>>>,
 }
 
 impl Map {
     /// Shaders write `[address, address + len)` through a root UAV, which
     /// goes back by its bytes before and after the run
     /// ([`Shadow::gpu_writes`]): the marked pages it touches are left to
-    /// that. A whole page from the copy would put back what it held at
-    /// the submission over what the title (or DirectStorage, through
-    /// physical pages no watch sees) wrote there since.
+    /// that, where the table named that copy or another of the title's for
+    /// them (`crate::paging::take_marks`). A whole page from the copy would
+    /// put back what it held at the submission over what the title (or
+    /// DirectStorage, through physical pages no watch sees) wrote there
+    /// since.
     /// shortcut: a marked page partly in such a range loses what shaders
     /// wrote in its other part.
     pub(crate) fn precise(&self, address: u64, len: u64) {
@@ -90,10 +105,24 @@ impl Map {
             .unwrap_or_else(|e| e.into_inner())
             .push((address, len));
     }
+
+    /// A draw or dispatch of `pipeline` in the list uses title memory: if
+    /// the list's writes through the table are withheld, it is counted
+    /// under that name (`crate::paging::State::note_withheld`).
+    pub(crate) fn used(&self, pipeline: &str) {
+        let mut uses = self.uses.lock().unwrap_or_else(|e| e.into_inner());
+        match uses.get_mut(pipeline) {
+            Some(n) => *n += 1,
+            None => {
+                uses.insert(pipeline.to_owned(), 1);
+            }
+        }
+    }
 }
 
 /// What a heap's page table names: the copies, the level-1 index of each
-/// block (block 0 is the null one), and the copy each entry names (or [`NO_OWNER`]).
+/// block (block 0 is the null one), and the copy each entry names (or
+/// `crate::paging::NO_OWNER`).
 #[derive(Default)]
 struct Layout {
     copies: Vec<Arc<Shadow>>,
@@ -211,6 +240,9 @@ struct Shared {
     null: u32,
     /// Each copy's view pair (its first slot), by copy.
     pairs: HashMap<usize, u32>,
+    /// The view pair of each run's buffer of pages held on demand
+    /// ([`Paging`]), by buffer: one pair for all the pages in it.
+    run_pairs: HashMap<usize, u32>,
     /// The copies' generation it names ([`crate::shadow::generation`]).
     generation: u64,
     layout: Arc<Layout>,
@@ -355,11 +387,264 @@ fn retake_dropped() {
     }
 }
 
+/// The host buffer of one run of pages held on demand
+/// (`crate::paging::RUN_BYTES` of title memory, aligned): each page of the
+/// run that is held lies in it at its own offset, so neighbouring pages lie
+/// side by side.
+struct Run {
+    buffer: ID3D12Resource,
+    data: usize,
+    gpu: u64,
+    /// Its bytes, counted from the run's first copy until its last is gone.
+    _held: crate::account::Held,
+}
+
+// SAFETY: `data` is the persistent mapping of `buffer`, written through the
+// copies made in it (`crate::shadow`) on the submitting thread; D3D12
+// resources are free-threaded.
+unsafe impl Send for Run {}
+
+/// The device's side of `crate::paging`: the pages of title memory held
+/// because a shader missed them. Owner of those pages' copies and of the
+/// buffers they lie in: a copy lives from the submission that missed its
+/// page (or the page before it in its run) until the page is given up
+/// ([`give_up`]) and the last table naming it is rewritten; a buffer from
+/// its run's first copy until its last copy is gone. What is decided
+/// without the device is in `state`.
+struct Paging {
+    state: crate::paging::State,
+    /// The copy of each held page, by page number.
+    copies: std::collections::BTreeMap<u64, Arc<Shadow>>,
+    /// The buffers, by run.
+    runs: std::collections::BTreeMap<u64, Run>,
+}
+
+/// What `crate::paging::State` asks of the system and the device.
+struct Device<'a> {
+    copies: &'a mut std::collections::BTreeMap<u64, Arc<Shadow>>,
+    runs: &'a mut std::collections::BTreeMap<u64, Run>,
+}
+
+impl crate::paging::Host for Device<'_> {
+    fn facts(&mut self, at: u64) -> Facts {
+        let (in_buffer, held, part) = crate::shadow::holding(at);
+        let readable = !held && !part && readable(at);
+        let tracked = readable && crate::watch::tracks(at as usize, 1 << 16);
+        Facts {
+            held,
+            part,
+            readable,
+            tracked,
+            in_buffer,
+        }
+    }
+
+    /// The copy starts as changed whole, so its first refresh takes the
+    /// page from title memory.
+    fn make(&mut self, page: u64) -> Result<(), Unmade> {
+        let (at, run) = (page << 16, crate::paging::run_of(page));
+        let r = match self.runs.entry(run) {
+            std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::btree_map::Entry::Vacant(e) => {
+                // What was found of the page may be some frames old: asked
+                // again before a buffer is made for it.
+                if !crate::watch::tracks(at as usize, 1 << 16) {
+                    return Err(Unmade::Untracked);
+                }
+                let (buffer, data) =
+                    crate::host::host().and_then(|h| h.shared_buffer(RUN_BYTES)).ok_or(Unmade::NoMemory)?;
+                crate::host::name(&buffer, || format!("title pages on demand {:#x}", run * RUN_BYTES));
+                // SAFETY: a live buffer.
+                let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+                e.insert(Run {
+                    buffer,
+                    data: data as usize,
+                    gpu,
+                    _held: crate::account::Held::new(crate::account::Owner::DemandPages, RUN_BYTES),
+                })
+            }
+        };
+        let offset = crate::paging::offset_in_run(page);
+        let data = (r.data + offset as usize) as *mut u8;
+        let copy = Shadow::page(r.buffer.clone(), data, r.gpu + offset, at, offset, page).ok_or(Unmade::Untracked)?;
+        self.copies.insert(page, copy);
+        Ok(())
+    }
+
+    fn free(&mut self, run: u64) {
+        self.runs.remove(&run);
+    }
+
+    fn clear(&mut self, page: u64) {
+        if let Some(r) = self.runs.get(&crate::paging::run_of(page)) {
+            let at = (r.data + crate::paging::offset_in_run(page) as usize) as *mut u8;
+            // SAFETY: a page's place inside the run's mapping. No copy that
+            // a table in use names lies there (`crate::paging::Host::clear`):
+            // only an access running past the end of the page before
+            // reaches it, and reads 0 or what was there, both of which are
+            // that shortcut's.
+            unsafe { at.write_bytes(0, 1 << 16) };
+        }
+    }
+}
+
+static PAGING: Mutex<Option<Paging>> = Mutex::new(None);
+
+/// Pages whose copies on demand were dropped: taken in at the next use of
+/// [`PAGING`], which a drop must not wait for (its holder may be the one
+/// dropping).
+static GONE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// A copy of page `page` (a page number) held on demand is gone
+/// (`crate::shadow`'s drop).
+pub(crate) fn page_gone(page: u64) {
+    GONE.lock().unwrap_or_else(|e| e.into_inner()).push(page);
+}
+
+/// Runs `f` on the paging state. Inside the page tables' lock where both
+/// are held, never the other way; `f` takes neither that nor a heap's.
+fn paging<R>(f: impl FnOnce(&mut Paging) -> R) -> R {
+    let mut guard = PAGING.lock().unwrap_or_else(|e| e.into_inner());
+    let p = guard.get_or_insert_with(Paging::new);
+    p.take_gone();
+    f(p)
+}
+
+impl Paging {
+    /// The state the switches ask for (read once).
+    fn new() -> Self {
+        let on = crate::switch::on("VICTORY_MEMORY_PAGING");
+        let off = |name: &str| std::env::var_os(name).is_some_and(|v| v == "0");
+        let (probe, look) = (!off("VICTORY_MEMORY_PROBES"), !off("VICTORY_MEMORY_MISS_REASONS"));
+        let asked = std::env::var_os("VICTORY_MEMORY_PAGING_MB").map(|v| v.to_string_lossy().into_owned());
+        let (megabytes, understood) = crate::paging::megabytes(asked.as_deref());
+        if !understood {
+            tracing::warn!(
+                "VICTORY_MEMORY_PAGING_MB={} is not a number of megabytes above 0: the default of {megabytes} is used",
+                asked.as_deref().unwrap_or_default()
+            );
+        }
+        let state = crate::paging::State::new(on, probe, look, megabytes);
+        if on {
+            tracing::info!(
+                "title memory: pages shaders miss get a host copy on demand (VICTORY_MEMORY_PAGING): at most {} \
+                 buffers of 4 MiB ({:.0} MB of host memory), {} pages and {} new buffers a frame",
+                state.limit(),
+                crate::paging::worst_case_bytes(state.limit()) as f64 / 1e6,
+                crate::paging::ADMIT_PER_FRAME,
+                crate::paging::RUNS_PER_FRAME
+            );
+            if !look {
+                tracing::warn!("VICTORY_MEMORY_MISS_REASONS=0 is ignored with VICTORY_MEMORY_PAGING: a page is looked at before it gets a copy");
+            }
+            if !probe {
+                tracing::warn!("VICTORY_MEMORY_PROBES=0 with VICTORY_MEMORY_PAGING: no page in a 256 MiB region without a copy gets one");
+            }
+        }
+        Paging {
+            state,
+            copies: Default::default(),
+            runs: Default::default(),
+        }
+    }
+
+    /// Copies that are gone leave their places zeroed, and a run with no
+    /// copy left has its buffer freed: no table has views of it any more (a
+    /// table drops them when it no longer names a page of the buffer, and a
+    /// copy is gone only after every table naming it was rewritten).
+    fn take_gone(&mut self) {
+        let gone = std::mem::take(&mut *GONE.lock().unwrap_or_else(|e| e.into_inner()));
+        let Paging { state, copies, runs } = self;
+        for page in gone {
+            state.gone(page, &mut Device { copies, runs });
+        }
+    }
+}
+
+/// Whether any of the 64 KiB page at `page` can be read. The title commits
+/// by 4 KiB pieces, so the first byte of each is tried, through the kernel
+/// (which refuses what is not mapped instead of faulting). Where the first
+/// piece cannot be read the system is asked once whether the whole page is
+/// free or reserved, which is the common case of a stray address and
+/// answers it without fifteen more refused reads.
+fn readable(page: u64) -> bool {
+    use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery};
+    let mut byte = [0u8; 1];
+    let mut piece = |k: u64| crate::host::read_into((page + k * 4096) as *const u8, &mut byte);
+    if piece(0) {
+        return true;
+    }
+    // SAFETY: plain data filled in by the query.
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid out pointer of the right size.
+    let asked = unsafe { VirtualQuery(page as *const _, &mut info, size_of_val(&info)) } != 0;
+    let end = (info.BaseAddress as u64).saturating_add(info.RegionSize as u64);
+    if asked && info.State != MEM_COMMIT && end >= page + (1 << 16) {
+        return false;
+    }
+    (1..16).any(piece)
+}
+
+/// After a list ran: its misses (`crate::paging::State::note_misses`, which
+/// counts each by what it is, gives a region a block so that its next miss
+/// names the page and, with the switch, gives a page that is title memory a
+/// copy for the next submission's table to name). The miss stays one: this
+/// list's writes are withheld as before, and nothing runs it again.
+fn note_misses(m: &crate::paging::Marks) {
+    let changed = paging(|p| {
+        let Paging { state, copies, runs } = p;
+        state.note_misses(m, &mut Device { copies, runs })
+    });
+    if changed {
+        crate::shadow::changed();
+    }
+}
+
+/// The copies of the pages held on demand, and the regions whose misses
+/// are to name their page: what a page table names besides
+/// [`crate::shadow::all`].
+fn paged() -> (Vec<Arc<Shadow>>, Vec<usize>) {
+    paging(|p| (p.copies.values().cloned().collect(), p.state.probes()))
+}
+
+/// Pages held on demand (page numbers) are given up, each for its reason:
+/// another copy has them, or the title gave their memory up. Their copies
+/// live until the tables naming them are rewritten (at each one's next
+/// submission), and their run's buffer with them. Nothing is lost with a
+/// copy: what shaders wrote in it went back to title memory, or was
+/// withheld and dropped, when its submission ended.
+fn give_up(pages: &[(u64, GivenUp)]) {
+    let dropped: Vec<Arc<Shadow>> = paging(|p| {
+        pages.iter().filter_map(|&(page, why)| p.state.give_up(page, why).then(|| p.copies.remove(&page)).flatten()).collect()
+    });
+    if !dropped.is_empty() {
+        crate::shadow::changed();
+    }
+}
+
+/// At a frame's end (`withheld`: its writes through title memory stayed out
+/// of title memory): the misses are logged, by frame at first and then by
+/// period, and some held pages are checked for memory the title gave up.
+fn paging_frame(withheld: bool) {
+    let kept = crate::shadow::take_kept_titles();
+    let (line, sweep) = paging(|p| p.state.frame_end(withheld, kept));
+    if let Some(line) = line {
+        tracing::info!("{line}");
+    }
+    let vanished: Vec<(u64, GivenUp)> =
+        sweep.into_iter().filter(|&page| !readable(page << 16)).map(|page| (page, GivenUp::Vanished)).collect();
+    if !vanished.is_empty() {
+        give_up(&vanished);
+    }
+}
+
 /// Logs what title memory did since the last call, if anything: a line per
 /// presented frame while shaders use it.
 pub(crate) fn log_frame() {
+    let withheld = withholding();
     FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     retake_dropped();
+    paging_frame(withheld);
     let s = stats(std::mem::take);
     if s.uses.is_empty() && s.written + s.withheld + s.withheld_bytes + s.missed_pages + s.missed_regions == 0 {
         return;
@@ -368,10 +653,15 @@ pub(crate) fn log_frame() {
     uses.sort_by(|a, b| b.1.cmp(a.1));
     let uses: Vec<String> = uses.iter().take(32).map(|(p, n)| format!("{n} {p}")).collect();
     let missed: Vec<String> = s.first_missed.iter().map(|a| format!("{a:#x}")).collect();
+    // Pages the table written last names for a copy holding part of them:
+    // the rest of such a page reads 0 with no miss to count, so a frame
+    // without misses does not show that shaders found all they reached.
+    let partial = paging(|p| p.state.partial());
     tracing::info!(
         "title memory this frame: {} draws/dispatches ({}), {} page tables, {} pages \
          copied back, {} withheld and {:.1} MB of views kept (their list read memory with no copy), missed {} pages \
-         and {} 256 MiB regions with no copy (first: {})",
+         and {} 256 MiB regions with no copy (first: {}); {partial} pages are named for a copy holding part of \
+         them (the rest of such a page reads 0 and is not counted as missed)",
         s.uses.values().sum::<u64>(),
         uses.join(", "),
         s.tables,
@@ -393,91 +683,6 @@ pub(crate) fn heap() -> Option<&'static crate::descriptor::host::HostHeap> {
         .as_ref()
 }
 
-/// Writes the page table for host copies `copies` (start, bytes), copy `k`'s
-/// view pair at heap index `pairs[k]`, and `null` for unowned pages directly into
-/// `out` (which must hold at least [`TABLE_DWORDS`] dwords). Returns
-/// `(written_dwords, blocks, owner)` where `owner` holds copy indices or
-/// [`NO_OWNER`]. At most [`CAPACITY`] blocks besides the null one.
-fn write_table(
-    copies: &[(u64, u64)],
-    pairs: &[u32],
-    null: u32,
-    out: &mut [u32],
-) -> (usize, Vec<usize>, Vec<u32>) {
-    assert!(out.len() >= TABLE_DWORDS);
-    let mut order: Vec<usize> = (0..copies.len()).collect();
-    order.sort_by_key(|&k| std::cmp::Reverse(copies[k].1));
-    // Build level-1 in cached stack memory so we never read from write-combined upload memory.
-    let mut level1 = [0u32; LEVEL1];
-    // Block 0 is the null block (no copy).
-    let mut blocks = vec![usize::MAX];
-    let mut owner = vec![NO_OWNER; BLOCK];
-    let mut full = false;
-    for &k in &order {
-        let (start, len) = copies[k];
-        let Some(end) = start.checked_add(len) else {
-            continue;
-        };
-        if len == 0 || end > 1 << 40 {
-            continue;
-        }
-        for page in start >> 16..=(end - 1) >> 16 {
-            let l1 = (page >> 12) as usize;
-            if level1[l1] == 0 {
-                if blocks.len() > CAPACITY {
-                    full = true;
-                    continue;
-                }
-                level1[l1] = blocks.len() as u32;
-                blocks.push(l1);
-                owner.resize(owner.len() + BLOCK, NO_OWNER);
-            }
-            let entry = level1[l1] as usize * BLOCK + (page & 0xFFF) as usize;
-            // Larger copies come first: a copy holding the whole page takes
-            // it from them; one holding part of it only takes it if free.
-            let whole = page << 16 >= start && (page + 1) << 16 <= end;
-            if whole || owner[entry] == NO_OWNER {
-                owner[entry] = k as u32;
-            }
-        }
-    }
-    if full {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| tracing::warn!(CAPACITY, "title memory copies in more 256 MiB regions than a page table has room for: the rest read as missing"));
-    }
-    out[..LEVEL1].copy_from_slice(&level1);
-    let l2_dwords = owner.len() * 2;
-    let l2 = &mut out[LEVEL1..LEVEL1 + l2_dwords];
-    let (slots, _) = l2.as_chunks_mut::<2>();
-    for (slot, &o) in slots.iter_mut().zip(&owner) {
-        if o == NO_OWNER {
-            slot[0] = null;
-            slot[1] = 0;
-        } else {
-            let k = o as usize;
-            slot[0] = pairs[k];
-            slot[1] = copies[k].0 as u32;
-        }
-    }
-    (LEVEL1 + l2_dwords, blocks, owner)
-}
-
-#[cfg(test)]
-fn table(
-    copies: &[(u64, u64)],
-    pairs: &[u32],
-    null: u32,
-) -> (Vec<u32>, Vec<usize>, Vec<Option<usize>>) {
-    let mut dwords = vec![0u32; TABLE_DWORDS];
-    let (len, blocks, owner) = write_table(copies, pairs, null, &mut dwords);
-    dwords.truncate(len);
-    let owner = owner
-        .into_iter()
-        .map(|o| (o != NO_OWNER).then_some(o as usize))
-        .collect();
-    (dwords, blocks, owner)
-}
-
 impl Shared {
     /// A page table for `heap`, named nothing yet (written at the first
     /// submission that uses it).
@@ -497,6 +702,7 @@ impl Shared {
             gpu,
             null,
             pairs: HashMap::new(),
+            run_pairs: HashMap::new(),
             generation: u64::MAX,
             layout: Arc::default(),
             _held: held,
@@ -508,20 +714,33 @@ impl Shared {
     /// back, the table rewritten. Only while no submission runs (the GPU
     /// reads the table and the views).
     fn rewrite(&mut self, heap: &HostHeap, now: u64) {
-        let copies = crate::shadow::all();
+        let mut copies = crate::shadow::all();
+        // Pages held on demand, and the regions whose misses are to name
+        // their page.
+        let (held, probes) = paged();
+        copies.extend(held);
         let live: HashSet<usize> = copies.iter().map(|c| Arc::as_ptr(c) as usize).collect();
-        self.pairs.retain(|copy, &mut slot| {
-            let keep = live.contains(copy);
-            if !keep {
-                heap.raw_pair_at(slot, None, 0);
-                heap.free_pair(slot);
-            }
-            keep
-        });
-        let (mut named, mut slots) = (Vec::with_capacity(copies.len()), Vec::with_capacity(copies.len()));
+        let runs: HashSet<usize> = copies.iter().filter(|c| c.paged()).map(|c| c.buffer.as_raw() as usize).collect();
+        for (pairs, live) in [(&mut self.pairs, &live), (&mut self.run_pairs, &runs)] {
+            pairs.retain(|key, &mut slot| {
+                let keep = live.contains(key);
+                if !keep {
+                    heap.raw_pair_at(slot, None, 0);
+                    heap.free_pair(slot);
+                }
+                keep
+            });
+        }
+        let (mut named, mut entries) = (Vec::with_capacity(copies.len()), Vec::with_capacity(copies.len()));
         for c in copies {
-            let key = Arc::as_ptr(&c) as usize;
-            let slot = match self.pairs.get(&key) {
+            // A page held on demand is seen through the views of its run's
+            // whole buffer, as its neighbours in the run are.
+            let (pairs, key, bytes) = if c.paged() {
+                (&mut self.run_pairs, c.buffer.as_raw() as usize, RUN_BYTES)
+            } else {
+                (&mut self.pairs, Arc::as_ptr(&c) as usize, c.range().1.next_multiple_of(4))
+            };
+            let pair = match pairs.get(&key) {
                 Some(&slot) => slot,
                 None => {
                     let Some(slot) = heap.pair() else {
@@ -529,25 +748,51 @@ impl Shared {
                         ONCE.call_once(|| tracing::warn!("no descriptor slots for a title memory copy's views: it reads as missing"));
                         continue;
                     };
-                    heap.raw_pair_at(slot, Some(&c.buffer), c.range().1.next_multiple_of(4));
-                    self.pairs.insert(key, slot);
+                    heap.raw_pair_at(slot, Some(&c.buffer), bytes);
+                    pairs.insert(key, slot);
                     slot
                 }
             };
+            let (start, len) = c.range();
+            entries.push(Named {
+                start,
+                len,
+                pair,
+                // Byte `offset(start)` of the view shows the copy's first:
+                // for a page on demand the view starts at its run's start.
+                view_start: start.wrapping_sub(c.offset(start)) as u32,
+                yields: c.paged(),
+            });
             named.push(c);
-            slots.push(slot);
         }
-        let ranges: Vec<(u64, u64)> = named.iter().map(|c| c.range()).collect();
         // SAFETY: `self.data` is the persistent mapping of `self.table`, with room
         // for `TABLE_DWORDS` dwords; no submission runs.
         let out = unsafe { std::slice::from_raw_parts_mut(self.data as *mut u32, TABLE_DWORDS) };
-        let (_, blocks, owner) = write_table(&ranges, &slots, self.null, out);
-        tracing::debug!(copies = ranges.len(), blocks = blocks.len() - 1, "title memory page table");
+        let written = write_table(&entries, &probes, self.null, out);
+        tracing::debug!(
+            copies = entries.len(),
+            blocks = written.blocks.len() - 1,
+            dwords = written.dwords,
+            partial = written.partial,
+            cut = written.cut,
+            "title memory page table"
+        );
+        // Pages on demand whose page another copy has are given up (the
+        // table names that copy for them already).
+        let superseded: Vec<(u64, GivenUp)> = written
+            .superseded
+            .iter()
+            .map(|&(k, whole)| (entries[k].start >> 16, if whole { GivenUp::Whole } else { GivenUp::Part }))
+            .collect();
+        if !superseded.is_empty() {
+            give_up(&superseded);
+        }
+        paging(|p| p.state.table(written.cut, written.partial));
         self.layout = Arc::new(Layout {
             bits: named.iter().map(|c| c.dirty_bit()).collect(),
             copies: named,
-            blocks,
-            owner,
+            blocks: written.blocks,
+            owner: written.owner,
         });
         self.generation = now;
         stats(|s| s.tables += 1);
@@ -592,25 +837,6 @@ pub(crate) fn prepare(key: usize, mut add: impl FnMut(&Arc<Shadow>, usize, usize
     }
 }
 
-/// Whether any marked page in `marks` fell outside a valid copy in `l`.
-fn has_missed(marks: &[u32], l: &Layout) -> bool {
-    for (w, &mark) in marks.iter().enumerate() {
-        let mut bits = mark;
-        while bits != 0 {
-            let entry = w * 32 + bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let block = entry / BLOCK;
-            if block == 0
-                || l.blocks.get(block).is_none()
-                || l.owner.get(entry).is_none_or(|&o| o == NO_OWNER)
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// `list` uses title memory with view heap `key` bound: the heap's page
 /// table (made on first use) and a page bitmap of the list's, the table
 /// brought up to date at each submission of the list, its written pages
@@ -637,13 +863,15 @@ pub(crate) fn bind(list: &HostList, key: usize) -> Option<Map> {
     list.defer_memory(key);
     let precise: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
     let byte_for_byte = precise.clone();
+    let uses: Arc<Mutex<std::collections::BTreeMap<String, u64>>> = Arc::default();
+    let used = uses.clone();
     let missed_bitmap = Arc::clone(&pooled);
     list.defer_missed(move || {
         let l = layout(key);
         // SAFETY: the bitmap is mapped and the list's run is over.
         let marks =
             unsafe { std::slice::from_raw_parts(missed_bitmap.data() as *const u32, BITMAP_WORDS) };
-        has_missed(marks, &l)
+        crate::paging::has_missed(marks, &l.blocks, &l.owner)
     });
     list.defer_after(move || {
         let Layout { copies, blocks, owner, .. } = &*layout(key);
@@ -651,58 +879,48 @@ pub(crate) fn bind(list: &HostList, key: usize) -> Option<Map> {
         // SAFETY: the bitmap is mapped and the list's run is over.
         let marks =
             unsafe { std::slice::from_raw_parts_mut(pooled.data() as *mut u32, BITMAP_WORDS) };
-        let (mut pages, mut regions, mut missed) = (0, 0, Vec::new());
-        let mut writes = Vec::new();
-        for (w, mark) in marks.iter_mut().enumerate() {
-            if *mark == 0 {
-                continue;
-            }
-            let mut bits = std::mem::take(mark);
-            while bits != 0 {
-                let entry = w * 32 + bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let (block, page) = (entry / BLOCK, entry % BLOCK);
-                // Block 0's bits are 256 MiB regions with no block.
-                let Some(&l1) = blocks.get(block).filter(|_| block != 0) else {
-                    regions += 1;
-                    missed.push((entry as u64) << 28);
-                    continue;
-                };
-                let at = (l1 << 28 | page << 16) as u64;
-                match owner.get(entry) {
-                    Some(_) if precise.iter().any(|&(a, n)| a < at + (1 << 16) && at < a + n) => {}
-                    Some(&k) if k != NO_OWNER => writes.push((k as usize, at)),
-                    _ => {
-                        pages += 1;
-                        missed.push(at);
-                    }
-                }
-            }
+        // Block 0's bits are 256 MiB regions with no block; a written page
+        // in a root UAV's range is left to that range's copy-back unless a
+        // page on demand held it.
+        let m = crate::paging::take_marks(marks, blocks, owner, &precise, |k| copies[k].paged());
+        let (pages, regions) = (m.missed.len() as u64, m.regions.len() as u64 + m.above + m.stray);
+        let missed: Vec<u64> =
+            m.regions.iter().map(|&l1| (l1 as u64) << 28).chain(m.missed.iter().copied()).collect();
+        // Counted by what each is, and (with the switch) given a copy for
+        // the submissions that follow.
+        if m.misses() + m.precise_paged > 0 {
+            note_misses(&m);
         }
         // What shaders computed from memory with no copy (read as zeros) is
         // not the console's: it does not go into title memory, where it broke
         // the title's own data (garbage pointers in title threads, run c1),
         // nor while any list using title memory misses ([`withholding`]).
-        let withheld = if pages + regions > 0 || withholding() { writes.len() as u64 } else { 0 };
-        if withheld > 0 {
-            for &(_, at) in &writes {
+        let withheld = m.misses() > 0 || withholding();
+        let mut written = 0;
+        if withheld {
+            for &(_, at) in &m.writes {
                 drop_withheld(at as usize, 1 << 16);
             }
-        }
-        let mut written = 0;
-        for &(k, at) in writes.iter().take_while(|_| withheld == 0) {
-            let n = copies[k].copy_back_page(at as usize);
-            tracing::debug!(
-                page = format_args!("{at:#x}"),
-                copy = format_args!("{:#x?}", copies[k].range()),
-                bytes = n,
-                "title memory page written back"
-            );
-            written += 1;
+            // The list is not run again: whose output that loses is counted.
+            if m.wrote() > 0 {
+                let used = used.lock().unwrap_or_else(|e| e.into_inner());
+                paging(|p| p.state.note_withheld(used.iter().map(|(name, &n)| (name.as_str(), n))));
+            }
+        } else {
+            for &(k, at) in &m.writes {
+                let n = copies[k].copy_back_page(at as usize);
+                tracing::debug!(
+                    page = format_args!("{at:#x}"),
+                    copy = format_args!("{:#x?}", copies[k].range()),
+                    bytes = n,
+                    "title memory page written back"
+                );
+                written += 1;
+            }
         }
         stats(|s| {
             s.written += written;
-            s.withheld += withheld;
+            s.withheld += if withheld { m.writes.len() as u64 } else { 0 };
             s.missed_pages += pages;
             s.missed_regions += regions;
             let room = 4usize.saturating_sub(s.first_missed.len());
@@ -713,6 +931,7 @@ pub(crate) fn bind(list: &HostList, key: usize) -> Option<Map> {
         table,
         dirty,
         precise,
+        uses,
     })
 }
 
@@ -729,108 +948,6 @@ mod tests {
         assert!(withheld_in(7, 7));
         assert!(withheld_in(8, 7), "the next frame reads this one's results");
         assert!(!withheld_in(9, 7));
-    }
-
-    /// The shader's lookup (`victory_shader` lowering) over a table's
-    /// dwords: the view index and the byte offset in that view.
-    fn look_up(dwords: &[u32], address: u64) -> (u32, u32) {
-        let (lo, hi) = (address as u32, (address >> 32) as u32);
-        let inside = hi < 256;
-        let l1 = if inside { hi << 4 | lo >> 28 } else { 0 };
-        let block = if inside { dwords[l1 as usize] } else { 0 };
-        let entry = block << 12 | (lo >> 16 & 0xFFF);
-        let at = 4096 + 2 * entry as usize;
-        (dwords[at], lo.wrapping_sub(dwords[at + 1]))
-    }
-
-    #[test]
-    fn addresses_find_the_copy_holding_them() {
-        // A 4 MiB window, a buffer inside it from 0x40_0000+0x1_8000
-        // (pages in part), and a buffer above 4 GiB.
-        let copies = [
-            (0x40_0000, 0x40_0000),
-            (0x41_8000, 0x3_0000),
-            (0xd_1234_0000, 0x2_0000),
-        ];
-        let (dwords, blocks, owner) = table(&copies, &[102, 104, 106], 100);
-        // Window, whole pages of the inner buffer, the high buffer.
-        assert_eq!(look_up(&dwords, 0x40_0010), (102, 0x10));
-        assert_eq!(look_up(&dwords, 0x42_0004), (104, 0x8004));
-        assert_eq!(look_up(&dwords, 0xd_1235_fffc), (106, 0x1_fffc));
-        // Pages the inner buffer holds in part stay the window's.
-        assert_eq!(look_up(&dwords, 0x41_8000), (102, 0x1_8000));
-        assert_eq!(look_up(&dwords, 0x44_0000), (102, 0x4_0000));
-        // No copy, and above 2^40: the null pair, which reads nothing.
-        assert_eq!(look_up(&dwords, 0x9000_0000).0, 100);
-        assert_eq!(look_up(&dwords, 0x200_0000_0000).0, 100);
-        // Entries map back to their copy and page.
-        let entry = |a: u64| blocks.iter().position(|&l| l == (a >> 28) as usize).unwrap() * BLOCK
-            + (a >> 16 & 0xFFF) as usize;
-        assert_eq!(owner[entry(0x42_0000)], Some(1));
-        assert_eq!(owner[entry(0xd_1234_0000)], Some(2));
-        assert_eq!(blocks.len(), 3, "null, low 256 MiB, the high buffer's");
-    }
-
-    /// Copies in more regions than a table has room for: the largest are
-    /// named, the rest read as missing; the table fits its buffer.
-    #[test]
-    fn a_full_table_names_the_largest_copies() {
-        let copies: Vec<(u64, u64)> = (0..CAPACITY as u64 + 2).map(|k| (k << 28, 0x1_0000 + k)).collect();
-        let pairs: Vec<u32> = (0..copies.len() as u32).map(|k| 10 + 2 * k).collect();
-        let (dwords, blocks, _) = table(&copies, &pairs, 4);
-        assert_eq!(blocks.len(), CAPACITY + 1);
-        assert_eq!(dwords.len(), LEVEL1 + (CAPACITY + 1) * BLOCK * 2);
-        assert_eq!(look_up(&dwords, (CAPACITY as u64 + 1) << 28).0, pairs[CAPACITY + 1]);
-        assert_eq!(look_up(&dwords, 0).0, 4, "the smallest copy is left out");
-    }
-
-    #[test]
-    fn table_skips_overflowing_and_out_of_range_copies() {
-        let copies = [
-            (u64::MAX - 0x100, 0x200),
-            (1u64 << 40, 0x1_0000),
-            (0x40_0000, 0x1_0000),
-        ];
-        let (dwords, blocks, owner) = table(&copies, &[102, 104, 106], 100);
-        assert_eq!(blocks, vec![usize::MAX, 0]);
-        assert_eq!(look_up(&dwords, 0x40_0010), (106, 0x10));
-        assert_eq!(look_up(&dwords, 0).0, 100);
-        assert_eq!(owner[BLOCK + 0x40], Some(2));
-    }
-
-    #[test]
-    fn has_missed_checks_block_zero_out_of_range_unowned_and_owned() {
-        let mut owner = vec![NO_OWNER; 2 * BLOCK];
-        owner[BLOCK + 5] = 0;
-        let l = Layout {
-            copies: Vec::new(),
-            bits: Vec::new(),
-            blocks: vec![usize::MAX, 0],
-            owner,
-        };
-        let mut marks = vec![0u32; BITMAP_WORDS];
-        assert!(!has_missed(&marks, &l));
-
-        // Owned entry in block 1.
-        let owned = BLOCK + 5;
-        marks[owned / 32] = 1 << (owned % 32);
-        assert!(!has_missed(&marks, &l));
-
-        // Unowned entry in the same word as an owned entry.
-        let unowned = BLOCK + 6;
-        marks[unowned / 32] |= 1 << (unowned % 32);
-        assert!(has_missed(&marks, &l));
-
-        // Block 0 bit (missing 256 MiB region).
-        marks.fill(0);
-        marks[0] = 1 << 3;
-        assert!(has_missed(&marks, &l));
-
-        // Out-of-range block.
-        marks.fill(0);
-        let oob = 2 * BLOCK + 1;
-        marks[oob / 32] = 1 << (oob % 32);
-        assert!(has_missed(&marks, &l));
     }
 
     fn gpu_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1163,5 +1280,133 @@ void main() {
         }
         crate::shadow::unregister(p, p as u64);
         drop(copy);
+    }
+
+    /// Reads 4 dwords of title memory from (`lo`, `hi`) on with one lookup,
+    /// as a translated shader's load of several dwords does (the dwords
+    /// follow the first in the view the first was found in), into `dst`
+    /// from byte `at`.
+    const RECORD: &str = r#"
+#define RS "DescriptorTable(SRV(t0, numDescriptors=unbounded)), SRV(t0, space=2), UAV(u0), RootConstants(num32BitConstants=3, b0)"
+ByteAddressBuffer views[] : register(t0);
+ByteAddressBuffer table : register(t0, space2);
+RWByteAddressBuffer dst : register(u0);
+cbuffer c : register(b0) { uint lo; uint hi; uint at; }
+[RootSignature(RS)]
+[numthreads(4, 1, 1)]
+void main(uint3 id : SV_DispatchThreadID) {
+    bool inside = hi < 256;
+    uint l1 = inside ? (hi << 4 | lo >> 28) : 0;
+    uint block = inside ? table.Load(l1 * 4) : 0;
+    uint entry = block << 12 | (lo >> 16 & 0xFFF);
+    uint2 e = table.Load2((4096 + 2 * entry) * 4);
+    dst.Store(at + id.x * 4, views[NonUniformResourceIndex(e.x)].Load(lo - e.y + id.x * 4));
+}
+"#;
+
+    /// Two neighbouring pages of title memory in no title buffer, reached
+    /// by address. The write that misses the first is dropped and nothing
+    /// goes back, as without the switch. With pages on demand the page then
+    /// has a copy, and the page after it too, beside it: the next
+    /// submission reads the title's bytes there, a record that starts in
+    /// the first page and ends in the second is read whole by one lookup,
+    /// and once nothing is withheld any more a write through the table into
+    /// the second page goes back into title memory. Given up, the pages are
+    /// missed as before.
+    #[test]
+    fn a_missed_page_of_title_memory_gets_a_copy_for_the_next_submission() {
+        let _guard = gpu_test_lock();
+        use crate::watch::PAGE;
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc};
+        let (Some(host), Some(views)) = (crate::host::host(), heap()) else {
+            return; // no host GPU here
+        };
+        let ((write_root, writer), (read_root, reader), (record_root, recorder)) =
+            (pipeline(WRITE), pipeline(SOURCE), pipeline(RECORD));
+        let (out, out_cpu) = host.shared_buffer(256).unwrap();
+        // SAFETY: a live buffer.
+        let out_gpu = unsafe { out.GetGPUVirtualAddress() };
+        // Two pages of title memory below 2^40, write-watched as the pools,
+        // at the start of a 4 MiB run and with no title buffer over them.
+        let p = (0..256u64)
+            .map(|k| 0x60_0000_0000 + (k << 28))
+            // SAFETY: a fresh allocation where nothing is mapped, or none.
+            .map(|hint| unsafe { VirtualAlloc(hint as *const _, 2 * PAGE, MEM_RESERVE | MEM_COMMIT | crate::watch::tests::MEM_WRITE_WATCH, PAGE_READWRITE) } as usize)
+            .find(|&p| p != 0 && (p as u64).is_multiple_of(RUN_BYTES))
+            .expect("memory below 2^40");
+        let page = p as u64 >> 16;
+        // The first page's last two dwords and the second's first two: a
+        // record across the boundary. `at` is in the second page.
+        let (record, at) = (p + PAGE - 8, p + PAGE + 16);
+        for k in 0..4 {
+            // SAFETY: our pool, not guarded yet.
+            unsafe { ((record + 4 * k) as *mut u32).write_volatile(0x70 + k as u32) };
+        }
+        // SAFETY: as above.
+        unsafe { (at as *mut u32).write_volatile(0x11) };
+        let list = host.new_list().unwrap();
+        // One submission of one dispatch; the list is open again after it.
+        let submit = |root: &windows::Win32::Graphics::Direct3D12::ID3D12RootSignature,
+                      pso: &windows::Win32::Graphics::Direct3D12::ID3D12PipelineState,
+                      uav: Option<u64>,
+                      constants: &[u32]| {
+            let map = bind(&list, OURS).expect("a page table");
+            // SAFETY: an open list, live objects of ours.
+            unsafe {
+                list.list.SetDescriptorHeaps(&[Some(views.heap.clone())]);
+                list.list.SetComputeRootSignature(root);
+                list.list.SetComputeRootDescriptorTable(0, views.gpu(0));
+                list.list.SetComputeRootShaderResourceView(1, map.table);
+                list.list.SetComputeRootUnorderedAccessView(2, uav.unwrap_or(map.dirty));
+                list.list.SetComputeRoot32BitConstants(3, constants.len() as u32, constants.as_ptr().cast(), 0);
+                list.list.SetPipelineState(pso);
+                list.list.Dispatch(1, 1, 1);
+            }
+            list.close();
+            host.execute(&[&list]);
+            list.reset();
+        };
+        let write = |to: usize, value: u32| submit(&write_root, &writer, None, &[to as u32, (to >> 32) as u32, value, 0, 0]);
+        let read = |root, pso, from: usize| -> Vec<u32> {
+            submit(root, pso, Some(out_gpu), &[from as u32, (from >> 32) as u32, 0]);
+            // SAFETY: the mapped output, the GPU done with it.
+            unsafe { std::slice::from_raw_parts(out_cpu.cast::<u32>(), 4).to_vec() }
+        };
+        // SAFETY: our pool.
+        let title = || unsafe { (at as *const u32).read_volatile() };
+        let held = |page: u64| paging(|p| p.state.holds(page));
+        paging(|p| p.state.set_on(true));
+        // The first miss may only name the 256 MiB region (no copy lies in
+        // it); the region then has a block and the next names the page.
+        for _ in 0..3 {
+            if !held(page) {
+                write(p + 32, 0x33);
+            }
+        }
+        assert!(held(page), "the missed page has a copy");
+        assert!(held(page + 1), "and the page after it in its run, beside it");
+        // SAFETY: our pool.
+        assert_ne!(unsafe { ((p + 32) as *const u32).read_volatile() }, 0x33, "the writes that missed were dropped");
+        assert_eq!(read(&read_root, &reader, at)[0], 0x11, "the next submission reads the title's bytes through the page's copy");
+        assert_eq!(read(&record_root, &recorder, record), [0x70, 0x71, 0x72, 0x73], "a record across the two pages, by one lookup");
+        // Nothing is withheld two frames after the last miss.
+        for value in [0x44, 0x45, 0x46] {
+            if title() == 0x11 {
+                log_frame();
+                log_frame();
+                write(at, value);
+            }
+        }
+        assert_ne!(title(), 0x11, "a write through the second page's copy goes back into title memory");
+        assert_eq!(read(&read_root, &reader, at)[0], title(), "and the copy holds it");
+        // Given up: no longer held (the buffer goes once the tables have
+        // been rewritten and the copies are gone, which another thread may
+        // do), and without the switch the pages are missed as before.
+        paging(|p| p.state.set_on(false));
+        give_up(&[(page, GivenUp::Vanished), (page + 1, GivenUp::Vanished)]);
+        assert!(!held(page) && !held(page + 1));
+        write(at, 0x55);
+        assert!(!held(page + 1));
+        assert_ne!(title(), 0x55, "without a copy the write is dropped again");
     }
 }

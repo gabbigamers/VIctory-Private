@@ -857,3 +857,44 @@ Only what cannot be done from a cloud session.
     machine compared before and after (same bytes or not), which also
     tells which byte order the title's streams have.
 
+* Ray-tracing prerequisite, title memory a shader reaches by address
+  (candidate cause 2 of the structures never appearing): implemented,
+  reviewed (8 findings, all upheld; a quiet zero at every 64 KiB
+  boundary of paged memory and a lost root-UAV write among them) and
+  corrected. Tested: 43 host tests of the bookkeeping. Type-checked for
+  Windows only: every Direct3D and system call. Not run on a device.
+  * Read from this repository's own code: a 64 KiB title page that a
+    shader reaches by address and that lies in no buffer object never
+    gets a host copy, and one such miss withholds every title-memory
+    write of the list. That the title's structures lie in such pages is
+    the forks' report (one line of descent), not confirmed.
+  * By default, nothing a shader reads changes (the page table is dword
+    for dword what it was, shown over random copy sets); what changes is
+    diagnostics, always on: missed pages counted by reason (up to 16
+    pages a frame looked at with system calls, repeats decaying; the
+    time is reported; `VICTORY_MEMORY_MISS_REASONS=0` turns it off),
+    empty page-table blocks for up to 96 regions so that a miss there
+    names its page (`VICTORY_MEMORY_PROBES=0`), lists whose writes were
+    withheld counted by pipeline, and a "title memory misses" line.
+  * Behind `VICTORY_MEMORY_PAGING=1`, off by default: a missed page, and
+    the pages after it in its aligned 4 MiB, get a host copy after the
+    submission that missed, side by side in one 4 MiB buffer per run so
+    that a record crossing a page boundary is read whole, and shader
+    writes go back to title memory by page. Bounded by
+    `VICTORY_MEMORY_PAGING_MB` (default 256: 64 buffers, 268.4 MB;
+    at most 4,096), counted as `own_demand_pages_mb`; the case is in
+    `docs/memory.md` (G11) with the worst-case size as a formula.
+  * What it does not do, stated in the code and in G11: the list that
+    missed is not run again, so a program the title runs once loses its
+    output on a miss with the switch as without; no eviction by last
+    use; nothing above 2^40.
+  * For the owner's machine: two runs of a scene where ray tracing
+    should appear, without and with the switch, and the lines G11 names
+    ("What a run shows, and what it does not"). With the switch on the
+    title may crash, since the builder's writes then reach title memory;
+    that itself would show the builder runs.
+* Build directories shared between worktrees gave a wrong result here:
+  cargo served one worktree's test binary to another, and a run passed
+  without the worktree's own tests in it. From this entry on every
+  change is validated in a build directory of its own before it is
+  committed, whatever its engineers ran.
