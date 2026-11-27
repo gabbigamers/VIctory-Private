@@ -126,6 +126,29 @@ pub(crate) mod pred {
     pub const SGE: u8 = 39;
     pub const SLT: u8 = 40;
     pub const SLE: u8 = 41;
+
+    /// The predicate that holds exactly where `p` does not, so that the
+    /// compare of the same operands with it is the negation of the first
+    /// (for floats, also where an operand is NaN: an ordered predicate's
+    /// opposite is the unordered one). None where that predicate is one
+    /// the lowering does not emit ([`ONE`]).
+    pub fn opposite(p: u8) -> Option<u8> {
+        Some(match p {
+            UEQ => return None,
+            FALSE..=TRUE => TRUE - p,
+            EQ => NE,
+            NE => EQ,
+            IUGT => IULE,
+            IULE => IUGT,
+            IUGE => IULT,
+            IULT => IUGE,
+            SGT => SLE,
+            SLE => SGT,
+            SGE => SLT,
+            SLT => SGE,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -454,6 +477,17 @@ impl Module {
     pub fn cmp(&mut self, block: usize, pred: u8, a: V, b: V) -> V {
         let t = self.int(1);
         self.push(block, t, Op::Cmp(pred, a, b))
+    }
+    /// The predicate and the operands of the compare that gives `v`, if a
+    /// compare does.
+    pub fn compare(&self, v: V) -> Option<(u8, V, V)> {
+        match v {
+            V::Inst(i) => match self.insts[i as usize].op {
+                Op::Cmp(p, a, b) => Some((p, a, b)),
+                _ => None,
+            },
+            _ => None,
+        }
     }
     pub fn select(&mut self, block: usize, c: V, t: V, f: V) -> V {
         let ty = self.type_of(t);
@@ -1462,8 +1496,19 @@ impl Flow {
     /// than `steps` instructions.
     pub fn run(
         &self,
+        steps: u64,
+        call: &mut dyn FnMut(&str, &[u64]) -> Vec<u64>,
+    ) -> Result<(), String> {
+        self.walk(steps, call, None)
+    }
+
+    /// [`Flow::run`], with `enter` told each block the lane enters, in
+    /// order, before the block's instructions run.
+    pub fn walk(
+        &self,
         mut steps: u64,
         call: &mut dyn FnMut(&str, &[u64]) -> Vec<u64>,
+        mut enter: Option<&mut dyn FnMut(usize)>,
     ) -> Result<(), String> {
         let ids = self.blocks.iter().flat_map(|b| &b.insts).map(|i| i.id as usize + 1);
         // Per instruction: its result (a structure's first field), and the
@@ -1493,6 +1538,9 @@ impl Flow {
         loop {
             let block = &self.blocks[b];
             steps = steps.checked_sub(1).ok_or("the step budget ran out")?;
+            if let Some(enter) = enter.as_mut() {
+                enter(b);
+            }
             // A block's phis all read the values of the edge taken.
             joined.clear();
             for inst in &block.insts {
@@ -2239,6 +2287,16 @@ mod tests {
         assert_eq!(sunk, [2, 6, 10, 14, 18, 10]);
         let short = flow.run(20, &mut |_, _| Vec::new());
         assert!(short.is_err_and(|e| e.contains("budget")));
+        // The blocks entered: from the entry along edges to a return, the
+        // loop's header once for each of its ten rounds.
+        let mut entered = Vec::new();
+        let walked = flow.walk(1000, &mut |_, _| Vec::new(), Some(&mut |b| entered.push(b)));
+        assert_eq!(walked, Ok(()));
+        assert_eq!(entered[0], 0);
+        assert_eq!(flow.blocks[*entered.last().unwrap()].term, FlowTerm::Ret);
+        assert!(entered.windows(2).all(|e| flow.succs(e[0]).contains(&e[1])));
+        let times = |b: usize| entered.iter().filter(|&&x| x == b).count();
+        assert_eq!((0..flow.blocks.len()).map(times).max(), Some(10));
         for (fault, says) in [
             ("a phi short of an entry", "has entries from"),
             ("a value some path skips", "does not dominate"),
@@ -2248,6 +2306,82 @@ mod tests {
             let found = counted_loop(fault).flow().check();
             assert!(found.as_ref().is_err_and(|e| e.contains(says)), "{fault}: {found:?}");
         }
+    }
+
+    /// [`pred::opposite`] gives the predicate of the negation, and
+    /// [`Module::compare`] what a compare is of. The integer ones by
+    /// running both compares of the same operands: one holds where the
+    /// other does not. The float ones by what a predicate's number means
+    /// (a bit each for equal, greater, less and unordered): the opposite
+    /// holds for exactly the other relations, and is never the predicate
+    /// the lowering does not emit.
+    #[test]
+    fn the_opposite_of_a_compare_s_predicate_is_its_negation() {
+        let integers = [
+            pred::EQ,
+            pred::NE,
+            pred::IUGT,
+            pred::IUGE,
+            pred::IULT,
+            pred::IULE,
+            pred::SGT,
+            pred::SGE,
+            pred::SLT,
+            pred::SLE,
+        ];
+        let values = [0, 1, 5, 0x7FFF_FFFF, 0x8000_0000, u32::MAX];
+        let (mut m, b, sink) = module(1);
+        let i32t = m.int(32);
+        let mut made = 0;
+        for p in integers {
+            let q = pred::opposite(p).expect("an integer predicate");
+            assert!(integers.contains(&q) && pred::opposite(q) == Some(p));
+            for x in values {
+                for y in values {
+                    let (x, y) = (m.i32(x), m.i32(y));
+                    let holds = m.cmp(b[0], p, x, y);
+                    assert_eq!(m.compare(holds), Some((p, x, y)));
+                    let not = m.cmp(b[0], q, x, y);
+                    for bit in [holds, not] {
+                        let wide = m.cast(b[0], Cast::ZExt, bit, i32t);
+                        assert_eq!(m.compare(wide), None);
+                        let _ = m.call(b[0], sink, vec![wide]);
+                    }
+                    made += 1;
+                }
+            }
+        }
+        let one = m.i32(1);
+        assert_eq!(m.compare(one), None);
+        m.terminate(b[0], Term::Ret);
+        let mut sunk = Vec::new();
+        let mut call = |_: &str, args: &[u64]| {
+            sunk.push(args[0]);
+            Vec::new()
+        };
+        assert_eq!(m.flow().run(10_000, &mut call), Ok(()));
+        assert_eq!(sunk.len(), 2 * made);
+        assert!(sunk.chunks(2).all(|pair| pair[0] + pair[1] == 1));
+        // Each predicate holds for some pair and fails for another, so the
+        // sums above are not all of one kind.
+        assert!(sunk.chunks(2 * values.len().pow(2)).all(|of| {
+            let holds = of.chunks(2).filter(|pair| pair[0] == 1).count();
+            holds > 0 && holds < values.len().pow(2)
+        }));
+
+        for p in pred::FALSE..=pred::TRUE {
+            let Some(q) = pred::opposite(p) else {
+                assert_eq!(p, pred::UEQ);
+                continue;
+            };
+            assert_ne!(q, pred::ONE);
+            // Equal, greater, less, unordered.
+            for relation in [1, 2, 4, 8] {
+                assert_ne!(p & relation != 0, q & relation != 0, "{p} and {q}");
+            }
+        }
+        assert_eq!(pred::opposite(pred::OLT), Some(pred::UGE));
+        assert_eq!(pred::opposite(16), None);
     }
 
     #[test]

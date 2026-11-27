@@ -2,9 +2,9 @@
 //! [`LOOP_TOTAL_LIMIT`] for all of a lane's loops together: which back
 //! edges make one loop, the counts, the limits at a conditional back edge,
 //! and the tests. Each loop counts the iterations a lane has made since it
-//! entered that loop, the lane counts every back edge it takes, a back edge
-//! is taken only below both limits, and a lane either limit stops leaves
-//! the program through one block, where a pixel discards.
+//! entered that loop, the lane counts every back edge it takes, and a back
+//! edge is taken only below both limits. What a lane either limit stops
+//! does then is its stage's to say: the module `stopped`.
 //!
 //! # Loops
 //!
@@ -112,6 +112,15 @@
 //! at each back edge two adds, two compares and the `and` or `or` of the
 //! compares. A program without a loop has none of it.
 //!
+//! The block on a conditional latch's way out of its loop sends the
+//! stopped lanes to the end of the program in every stage but one: in a
+//! pixel program it discards them and lets them go on with the others,
+//! without a branch (`stopped`, which says what such a program has there
+//! beyond the list above: a select, and where the back edge is the side
+//! not taken a negation of the latch's condition, which is no `xor` where
+//! the condition is a compare). The rest of this section is about the
+//! block that branches.
+//!
 //! In two respects the shape is no closer to DXC's than loops were before
 //! this test existed. The block the stopped lanes leave through is one for
 //! the whole program: every latch and every such test branches to it, so
@@ -200,10 +209,14 @@ impl Lower<'_> {
                 true
             } else if read[b] {
                 // Forward edges only, from blocks placed before this one.
-                let held: Vec<Option<V>> = preds(self, b).iter().map(|&q| self.total[q]).collect();
+                let from = preds(self, b);
+                let held: Vec<Option<V>> = from.iter().map(|&q| self.total[q]).collect();
                 let first = held.first().copied().flatten();
                 self.total[b] = first;
+                // An edge on which a pixel's latch leaves its loop brings
+                // a count of its own (`Lower::leave_stopped`).
                 held.iter().any(|&other| other != first)
+                    || from.iter().any(|&q| self.leaves_stopped(q, b))
             } else {
                 false
             };
@@ -288,6 +301,8 @@ impl Lower<'_> {
     /// them apart once the loop is left: the stopped lanes go to the abort
     /// block, the others on to `via`. A lane whose own condition ends the
     /// loop on the last iteration the limits allow is one of the others.
+    /// (A pixel program's stopped lanes are discarded in this block and go
+    /// on to `via` too: [`Lower::leave_stopped`].)
     ///
     /// It tests the latch's own condition and nothing new, as the branch
     /// of an `if` after the loop would (whatever instruction `cond` is: the
@@ -309,6 +324,10 @@ impl Lower<'_> {
         cond: V,
         own: bool,
     ) -> usize {
+        // A pixel's stopped lanes go on along the edge as helpers.
+        if self.s.pixel {
+            return self.leave_stopped(b, to, via, cond, own);
+        }
         let abort = self.abort_block();
         if self.counters.contains_key(&to) && self.rpo[to] <= self.rpo[b] {
             let here = std::mem::replace(&mut self.cur, self.s.m.new_block());
@@ -332,21 +351,16 @@ impl Lower<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::tests::{lower_valu, lower_valu_limited, root};
-    use super::super::{LOOP_LIMIT, LOOP_TOTAL_LIMIT, Limits, Lowered, Parts, lower};
+pub(super) mod tests {
+    use super::super::tests::{lower_valu, lower_valu_limited};
+    use super::super::{LOOP_LIMIT, LOOP_TOTAL_LIMIT, Limits, Lowered};
     use crate::emit::bitcode::{Arg, Bin, Flow, FlowOp, FlowTerm, pred};
-    use crate::emit::container::SigElement;
-    use crate::native::{HwStage, NativeProgram, RootParam, RootType, StageIo};
-    use crate::{io, ir, resource, structure};
-
-    const S_ENDPGM: u32 = 0xBF81_0000;
 
     /// The limits a program is lowered with where a test gives it none.
     /// The inputs of those tests are chosen against the default ones, so
     /// with the `diagnostics` feature they need `VICTORY_SHADER_LOOP_LIMIT`
     /// and `VICTORY_SHADER_LOOP_TOTAL_LIMIT` out of the environment.
-    fn defaults() -> Limits {
+    pub(in crate::emit::lower) fn defaults() -> Limits {
         let set = Limits {
             each: crate::emit::loop_limit(),
             total: crate::emit::loop_total_limit(),
@@ -371,7 +385,7 @@ mod tests {
     /// twice, since every cycle of the function goes through a back edge.
     /// Every run of these tests has this budget and no more, so each of
     /// them shows its lane ending within it.
-    fn budget(l: &Lowered, limits: Limits) -> u64 {
+    pub(in crate::emit::lower) fn budget(l: &Lowered, limits: Limits) -> u64 {
         let size: usize = l.flow.blocks.iter().map(|b| 1 + b.insts.len()).sum();
         u64::from(limits.total) * size as u64
     }
@@ -463,20 +477,20 @@ mod tests {
 
     /// A back edge of a written function.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct Back {
+    pub(in crate::emit::lower) struct Back {
         /// The block whose branch takes it, and the header it goes to.
-        from: usize,
-        to: usize,
+        pub from: usize,
+        pub to: usize,
         /// The phi of its loop's count and the phi the lane's count is
         /// read from there.
-        count: u32,
-        total: u32,
+        pub count: u32,
+        pub total: u32,
     }
 
     /// The back edges of the function `l` has, by the branches that count
     /// one ([`counted`]). The phi of each one's loop is in its header, and
     /// the count the edge brings there is the phi's plus one.
-    fn back_edges(l: &Lowered, limits: Limits) -> Vec<Back> {
+    pub(in crate::emit::lower) fn back_edges(l: &Lowered, limits: Limits) -> Vec<Back> {
         let f = &l.flow;
         let mut found = Vec::new();
         for from in 0..f.blocks.len() {
@@ -717,97 +731,6 @@ mod tests {
         );
     }
 
-    /// A pixel program: the lane the limit stops discards its pixel and
-    /// exports nothing; the others export and discard nothing.
-    #[test]
-    fn a_loop_limit_stop_discards_a_pixel() {
-        let words = [
-            0xBE8C_0380, // s_mov_b32 s12, 0
-            0x810C_810C, // loop: s_add_i32 s12, s12, 1
-            0xBF07_000C, // s_cmp_lg_u32 s12, s0
-            0xBF85_FFFD, // s_cbranch_scc1 loop
-            0x7E08_020C, // v_mov_b32 v4, s12
-            0xF800_180F, // exp mrt0, v4, v4, v4, v4 done vm
-            0x0404_0404,
-            S_ENDPGM,
-        ];
-        let native = NativeProgram {
-            stage: HwStage::Ps,
-            wave64: false,
-            vgprs: 8,
-            layout: vec![RootParam {
-                sgprs: 4,
-                ..root(RootType::Constants, 0, 0)
-            }],
-            used: vec![],
-            io: StageIo::Ps {
-                inputs: vec![],
-                input_addr: 0,
-                db_shader_control: 0,
-                patches: vec![],
-            },
-            code: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
-        };
-        let p = ir::build(&native.code, false, native.vgprs).unwrap();
-        let st = structure::structure(&p).unwrap();
-        let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
-        let io = io::raise(&p, &native).unwrap();
-        let target = SigElement {
-            name: "SV_Target".into(),
-            index: 0,
-            kind: 16,
-            comp: 9,
-            interp: 0,
-            row: Some(0),
-            col: 0,
-            cols: 4,
-            usage: 0xF,
-            half: false,
-        };
-        let l = lower(&Parts {
-            native: &native,
-            p: &p,
-            st: &st,
-            io: &io,
-            res: &res,
-            inputs: vec![],
-            outputs: vec![target],
-            prims: vec![],
-            mesh_stride: 0,
-            view_marks: false,
-        })
-        .unwrap();
-        let f = &l.flow;
-        let blocks = 0..f.blocks.len();
-        let mut exports = blocks.filter(|&b| f.calls(b).contains(&"dx.op.storeOutput.f32"));
-        let export = exports.next().expect("an export");
-        assert_eq!(limit_stops(&l, defaults(), export).len(), 1);
-        assert_eq!(f.calls(l.limit_stop.unwrap()), ["dx.op.discard"]);
-        // What a lane with `s0` in the first root constant does.
-        let run = |s0: u32| {
-            let mut did = Vec::new();
-            let mut call = |name: &str, args: &[u64]| match name {
-                "dx.op.cbufferLoadLegacy.i32" => vec![u64::from(s0), 0, 0, 0],
-                "dx.op.discard" if args[1] != 0 => {
-                    did.push(("discard", 0));
-                    Vec::new()
-                }
-                // Opcode, output, row, column, value (the count's bits).
-                "dx.op.storeOutput.f32" if args[3] == 0 => {
-                    did.push(("export", args[4] as u32));
-                    Vec::new()
-                }
-                _ => vec![0],
-            };
-            f.run(budget(&l, defaults()), &mut call).unwrap();
-            did
-        };
-        let limit = defaults().each;
-        assert_eq!(run(5), [("export", 5)]);
-        assert_eq!(run(limit), [("export", limit)]);
-        assert_eq!(run(0), [("discard", 0)]);
-    }
-
     /// The loop's exit joins a branch round the loop: the test of the
     /// stopped lanes comes before the block that splits the edge, which
     /// the join's phi names. With the latch's branch on either sense.
@@ -874,12 +797,12 @@ mod tests {
 
     /// What a program's lane stores, by its model: `None` where a limit
     /// stops it.
-    type Model = fn(Limits, [u32; 4]) -> Option<u32>;
+    pub(in crate::emit::lower) type Model = fn(Limits, [u32; 4]) -> Option<u32>;
 
     /// `do { s12 += 1 } while (s12 != s0); do { s13 += 1 } while (s13 !=
     /// s1)`, then the store of s12 + s13: the first loop's exit is the
     /// second loop's preheader.
-    const TWO_LOOPS: [u32; 10] = [
+    pub(in crate::emit::lower) const TWO_LOOPS: [u32; 10] = [
         0xBE8C_0380, // s_mov_b32 s12, 0
         0xBE8D_0380, // s_mov_b32 s13, 0
         0x810C_810C, // first: s_add_i32 s12, s12, 1
@@ -948,7 +871,7 @@ mod tests {
     /// `do { s12 = 0; do { s12 += 1 } while (s12 != s0); s13 += 1 } while
     /// (s13 != s1)`, then the store of s12 + s13: a loop in a loop, each
     /// with a header of its own.
-    const NEST: [u32; 10] = [
+    pub(in crate::emit::lower) const NEST: [u32; 10] = [
         0xBE8D_0380, // s_mov_b32 s13, 0
         0xBE8C_0380, // outer: s_mov_b32 s12, 0
         0x810C_810C, // inner: s_add_i32 s12, s12, 1
@@ -1146,7 +1069,7 @@ mod tests {
     /// `for (;;) { s13 += 1; s12 = 0; if (s13 == s1) break; while (s12 !=
     /// s0) s12 += 1; }`, then the store of s13, laid out with the inner
     /// loop's test before the outer loop's code.
-    const LATCH_IS_INNER_HEADER: [u32; 10] = [
+    pub(in crate::emit::lower) const LATCH_IS_INNER_HEADER: [u32; 10] = [
         0xBE8D_0380, // s_mov_b32 s13, 0
         0xBF82_0003, // s_branch outer
         0x810C_810C, // body: s_add_i32 s12, s12, 1
@@ -1218,7 +1141,7 @@ mod tests {
     /// `for (;;) { s13 += 1; s12 = 0; if (s13 == s1) break; do { s12 += 1 }
     /// while (s12 != s0); }`, then the store of s13, laid out with the
     /// inner loop before the outer loop's code.
-    const BOTH_SIDES_BACK: [u32; 10] = [
+    pub(in crate::emit::lower) const BOTH_SIDES_BACK: [u32; 10] = [
         0xBE8D_0380, // s_mov_b32 s13, 0
         0xBF82_0003, // s_branch outer
         0x810C_810C, // inner: s_add_i32 s12, s12, 1
@@ -1473,7 +1396,7 @@ mod tests {
     /// `do { do { s14 += 1 } while (s14 != s0); s14 = 0; s13 += 1 } while
     /// (s13 != s1)`, then the store of s13: the outer loop's body begins
     /// with the inner loop, so both back edges go to the same block.
-    const SHARED_HEADER: [u32; 10] = [
+    pub(in crate::emit::lower) const SHARED_HEADER: [u32; 10] = [
         0xBE8D_0380, // s_mov_b32 s13, 0
         0xBE8E_0380, // s_mov_b32 s14, 0
         0x810E_810E, // head: s_add_i32 s14, s14, 1
@@ -1905,7 +1828,7 @@ mod tests {
     /// `do { s12 = 0; do { s12 += 1 } while (s12 != s0); s13 += 1 } while
     /// (s13 != s1); do { s14 += 1 } while (s14 != s2)`, then the store of
     /// s12 + s13 + s14: a nest, then a loop.
-    const NEST_THEN_LOOP: [u32; 15] = [
+    pub(in crate::emit::lower) const NEST_THEN_LOOP: [u32; 15] = [
         0xBE8D_0380, // s_mov_b32 s13, 0
         0xBE8C_0380, // outer: s_mov_b32 s12, 0
         0x810C_810C, // inner: s_add_i32 s12, s12, 1
@@ -2006,7 +1929,7 @@ mod tests {
     /// while (s12 != s0)`, then the store of s12, plus 0x4000_0000 after
     /// the `break` and 0x8000_0000 after the second exit: three ways out of
     /// one loop to three blocks.
-    const THREE_EXITS: [u32; 17] = [
+    pub(in crate::emit::lower) const THREE_EXITS: [u32; 17] = [
         0xBE8C_0380, // s_mov_b32 s12, 0
         0x810C_810C, // loop: s_add_i32 s12, s12, 1
         0xBF06_010C, // s_cmp_eq_u32 s12, s1
@@ -2026,8 +1949,8 @@ mod tests {
         0x7E00_020C, // v_mov_b32 v0, s12
     ];
 
-    const BROKEN: u32 = 0x4000_0000;
-    const SECOND: u32 = 0x8000_0000;
+    pub(in crate::emit::lower) const BROKEN: u32 = 0x4000_0000;
+    pub(in crate::emit::lower) const SECOND: u32 = 0x8000_0000;
 
     fn three_exits(limits: Limits, [s0, s1, s2, _]: [u32; 4]) -> Option<u32> {
         let mut lane = Lane::new(limits);
@@ -2104,7 +2027,7 @@ mod tests {
     /// `if (s2 != 0) do { s12 += 1 } while (s12 != s0); do { s13 += 1 }
     /// while (s13 != s1)`, then the store of s12 + s13: a loop in one arm of
     /// a branch, a join, and a loop after it.
-    const LOOP_IN_AN_ARM: [u32; 13] = [
+    pub(in crate::emit::lower) const LOOP_IN_AN_ARM: [u32; 13] = [
         0xBE8C_0380, // s_mov_b32 s12, 0
         0xBE8D_0380, // s_mov_b32 s13, 0
         0xBF06_8002, // s_cmp_eq_u32 s2, 0
@@ -2219,7 +2142,7 @@ mod tests {
 
     /// The programs of these tests that store one dword, each with the
     /// model of what its lane stores and how many of s0..s3 it reads.
-    const PROGRAMS: [(&str, &[u32], Model, usize); 15] = [
+    pub(in crate::emit::lower) const PROGRAMS: [(&str, &[u32], Model, usize); 15] = [
         ("two loops", &TWO_LOOPS, two_loops, 2),
         ("a nest", &NEST, nest, 2),
         ("a continue", &CONTINUE, continues, 2),

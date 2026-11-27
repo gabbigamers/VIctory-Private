@@ -2140,6 +2140,12 @@ fn a_low_dword_read_as_a_mask_with_two_high_dwords_is_refused() {
 fn stored_under(p: &Program, limits: Limits) -> (Stored, bool) {
     let l = p.lowered_limited(true, limits, false).unwrap();
     assert!(l.emulated && l.wave_size.is_none());
+    // The block the limits stop the wave's threads in is a compute
+    // program's (`lower/stopped.rs`): it calls nothing and returns.
+    if let Some(stop) = l.limit_stop {
+        assert!(l.flow.blocks[stop].insts.is_empty(), "{limits:?}: {:?}", l.flow.blocks[stop].insts);
+        assert_eq!(l.flow.blocks[stop].term, FlowTerm::Ret, "{limits:?}");
+    }
     let (lanes, threads) = (p.wave(), [p.wave(), 1, 1]);
     let mut first: Option<(Stored, u64)> = None;
     for schedule in SCHEDULES {

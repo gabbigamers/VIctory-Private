@@ -283,8 +283,12 @@ pub const DEFAULT_LOOP_TOTAL_LIMIT: u32 = lower::LOOP_TOTAL_LIMIT;
 
 /// The iteration count after which a translated loop is left, per lane and
 /// per entry into the loop: [`DEFAULT_LOOP_LIMIT`]. A lane that would go
-/// round once more ends there as killed: a pixel is discarded, and nothing
-/// after the loop runs in it. Each loop has its own count, which starts at
+/// round once more is stopped there. A compute, vertex or mesh lane ends
+/// at once, a vertex or mesh lane with a position that is not a number,
+/// so that no primitive of its vertex is drawn. A pixel is discarded and,
+/// where that branch has another side, runs on along it as a helper lane
+/// of its quad that writes nothing and goes round no loop again (`lower`'s
+/// module `stopped`). Each loop has its own count, which starts at
 /// 0 whenever the lane enters that loop from outside it. A loop inside
 /// another is counted afresh each time the outer loop comes round to it,
 /// also where the two begin at the same instruction (an outer loop whose

@@ -307,17 +307,27 @@ impl<'a> Lower<'a> {
             }
         }
         if self.totals.contains_key(&to) {
-            let all = self.total_at(from);
+            let all = self.total_along(from, to);
             let total = self.totals.get_mut(&to).expect("a phi");
             total.incoming.push((all, via));
         }
     }
 
     /// The lane's count of all its back edges as IR block `b` holds it.
-    fn total_at(&mut self, b: usize) -> V {
+    pub(super) fn total_at(&mut self, b: usize) -> V {
         match self.total[b] {
             Some(phi) => phi,
             None => self.s.m.i32(0),
+        }
+    }
+
+    /// That count as the edge from IR block `from` to `to` brings it: what
+    /// `from` holds, but for a pixel's stopped lanes where a latch leaves
+    /// its loop ([`Lower::leave_stopped`]).
+    fn total_along(&mut self, from: usize, to: usize) -> V {
+        match self.left.get(&(from, to)) {
+            Some(&all) => all,
+            None => self.total_at(from),
         }
     }
 
@@ -337,7 +347,7 @@ impl<'a> Lower<'a> {
         let own = header.of[&from];
         let phi = header.counts[own].phi;
         let next = self.s.m.bin(c, Bin::Add, phi, one);
-        let all = self.total_at(from);
+        let all = self.total_along(from, to);
         let all = self.s.m.bin(c, Bin::Add, all, one);
         let header = self.counters.get_mut(&to).expect("header");
         for (n, count) in header.counts.iter_mut().enumerate() {
@@ -363,7 +373,10 @@ impl<'a> Lower<'a> {
     }
 
     /// The block a lane stopped by [`LOOP_LIMIT`] or [`LOOP_TOTAL_LIMIT`]
-    /// leaves through.
+    /// ends the program in: a pixel discards there, and a vertex or mesh
+    /// lane writes its outputs ([`Lower::end_stopped`], once the program's
+    /// own exports are known). The module `stopped` says which lanes come
+    /// here and what each stage's end is.
     pub(super) fn abort_block(&mut self) -> usize {
         if let Some(a) = self.abort {
             return a;

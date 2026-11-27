@@ -1281,3 +1281,50 @@ Only what cannot be done from a cloud session.
     line or `COMPACTION NOT EXERCISED` (the compacting copy is then
     untested there); `victory gpu-info` for the last line; decisions
     on the placeholders and on `Kind::Video` in docs/memory.md.
+* Shaders, what a lane stopped by a loop limit does, by stage (the
+  owner's decisions of 2026-11-26 and 2026-11-27; the limits and the
+  loop rule are as they were): implemented, in every translation, no
+  switch; reviewed (5 findings, all upheld in substance) and
+  corrected. Tested (host tests): 12 tests in `emit/lower/stopped.rs`
+  and 1 in `emit/bitcode.rs`, each lane run alone against exact
+  models; Microsoft's validator accepts every container they emit
+  (830 in all, the same two census rejections). Type-checked for
+  Windows only: the tests' `dxil.dll` check of each module, never
+  executed. Not run on a device; not hardware-validated.
+  * By default: a pixel lane stopped at a latch whose branch has
+    another side is discarded there and runs on as a helper lane (one
+    conditional `discard`, one `select` that uses up its count of back
+    edges). A vertex lane ends at once, writing NaN to its position
+    and 0 to the other components its program writes; a mesh lane does
+    so for its own vertex and culls its primitive. Compute is as it
+    was. Every shader is translated again once.
+  * Defaults taken by the coordinator until the owner says otherwise:
+    after a stop a pixel helper takes no further back edge; a pixel
+    lane refused at a conditional `continue` is discarded and runs the
+    rest of that loop's body as a helper; a stopped vertex or mesh
+    lane's geometry disappears; a stopped pixel lane's later stores,
+    atomics and marks are suppressed by the host's discard rule alone;
+    latches that only go back keep the immediate end.
+  * Evidence: Direct3D's 11.3 functional specification as read (16.13,
+    15.4, 15.16.1) and logic tested on this host: no quad, no
+    derivative; one float latch, run on this host's `f32`. 547 of the
+    head's 548 containers are unchanged by hash, the other the
+    replaced test's. That a driver takes the shapes, drops a discarded
+    lane's view writes and discards for a NaN position is speculative.
+  * With the head's forms, compute only (tested at integration): a
+    thread past its thread limit and a stopped lane leave through one
+    block that only returns; an emulated wave is still stopped whole;
+    thread limits asked of another stage change no byte.
+  * What the review found: mesh bounds, integer outputs and unexported
+    channels untested; an `xor` of a compare beside a loop, the shape
+    a driver hung on (kept where the condition is no compare); two
+    statements stronger than the evidence.
+  * A defect of the committed loop counting, found by the reviewer, to
+    be fixed in the next lowering change and not here: a `while` loop
+    that begins a `do-while` body is counted as one loop with it, so a
+    genuine nest of that shape is stopped by the inner and outer
+    rounds together; "a count per loop" is not met for that shape.
+  * For the owner's machine: on Windows, `cargo test -p victory-shader
+    stopped`; on a card, that the driver compiles the exit block and
+    the vertex and mesh end blocks, drops a discarded lane's view
+    writes and removes a primitive whose position is NaN.

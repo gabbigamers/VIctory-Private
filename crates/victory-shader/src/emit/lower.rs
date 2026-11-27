@@ -43,6 +43,7 @@ mod operands;
 mod scalar;
 mod smem;
 mod stage;
+mod stopped;
 #[cfg(test)]
 mod thread_limit_tests;
 mod valu;
@@ -101,7 +102,9 @@ pub(crate) struct Lowered {
     #[cfg(test)]
     pub flow: super::bitcode::Flow,
     /// Where in [`Lowered::flow`] a lane stopped by [`LOOP_LIMIT`] or by
-    /// [`LOOP_TOTAL_LIMIT`] leaves the program, if any block can stop one.
+    /// [`LOOP_TOTAL_LIMIT`] ends the program at once, if any latch sends
+    /// one there (a pixel's stopped lanes mostly go on instead: the module
+    /// `stopped`).
     #[cfg(test)]
     pub limit_stop: Option<usize>,
     /// The wave size the program declares (`WaveSize`), if any.
@@ -377,8 +380,13 @@ struct Lower<'a> {
     /// DXIL block) pairs.
     totals: HashMap<usize, limit::Counter>,
     /// The block a lane stopped by [`LOOP_LIMIT`] or [`LOOP_TOTAL_LIMIT`]
-    /// leaves the program from.
+    /// ends the program in (`stopped` says which lanes do).
     abort: Option<usize>,
+    /// Pixel: the lane's count of its back edges along the edge on which a
+    /// latch leaves its loop, by the edge's IR blocks, where it is not what
+    /// the latch holds: a stopped lane's is used up there
+    /// ([`Lower::leave_stopped`]).
+    left: HashMap<(usize, usize), V>,
     /// The 16/64-bit round mode (MODE bits 3:2) each block starts with, and
     /// the one in force at the instruction being lowered (see [`round16`]).
     round16: Vec<Option<u8>>,
@@ -449,14 +457,18 @@ fn round16(p: &crate::ir::Program) -> Vec<Option<u8>> {
 /// loop as long as its data says; data the host has not mirrored yet (a
 /// null view reads zeros) can make that four billion iterations, which
 /// hangs the host GPU until the driver resets it. A lane the limit stops
-/// (it would have gone round its loop once more) leaves the program as
-/// killed: it goes to the abort block, where a pixel discards, and runs
-/// nothing that follows the loop. A latch with an unconditional back edge
-/// branches there itself; one with a conditional back edge leaves the loop
-/// first, and the block after it sends the stopped lanes there
-/// ([`Lower::limit_exit`]). A lane whose own condition ends the loop, also
-/// on the last iteration the limit allows, goes on as it would without a
-/// limit.
+/// (it would have gone round its loop once more) ends as its stage
+/// defines (the module `stopped`). A compute, vertex or mesh lane goes to
+/// the abort block and runs nothing that follows the loop; a vertex or
+/// mesh lane writes there the outputs that mark it. A latch with an
+/// unconditional back edge branches there itself; one with a conditional
+/// back edge leaves the loop first, and the block after it sends the
+/// stopped lanes there ([`Lower::limit_exit`]). A pixel lane is discarded
+/// in that block and goes on from it as a helper lane, which writes
+/// nothing and takes no further back edge; at an unconditional back edge
+/// it is discarded and ends. A lane whose own condition ends the loop,
+/// also on the last iteration the limit allows, goes on as it would
+/// without a limit.
 ///
 /// Each loop has its own count ([`Lower::header_loops`] says which back
 /// edges make one loop). It starts at 0 wherever the lane enters the loop
@@ -486,7 +498,9 @@ pub(super) const LOOP_LIMIT: u32 = 1 << 20;
 /// nest run for the product of its loops' limits (2^40 iterations two
 /// deep); this is what bounds a lane's work in all. A lane it stops ends
 /// exactly as one [`LOOP_LIMIT`] stops: the same branch of the same latch
-/// tests both, and the stopped lane goes to the same block.
+/// tests both, and the stopped lane goes the same way. A pixel lane that
+/// goes on as a helper after either stop does so with this count used up,
+/// so that this limit refuses it every further back edge.
 ///
 /// The value is four times [`LOOP_LIMIT`], between two needs that no value
 /// meets together. It has to be far enough above [`LOOP_LIMIT`] that a
@@ -872,6 +886,7 @@ impl<'a> Lower<'a> {
             total: vec![None; p.blocks.len()],
             totals: HashMap::new(),
             abort: None,
+            left: HashMap::new(),
             round16: round16(p),
             mode16: Some(0),
         }
@@ -963,6 +978,8 @@ impl<'a> Lower<'a> {
             self.tail[b] = Some(self.cur);
             self.exit(b)?;
         }
+        // A vertex or mesh lane a loop limit stopped writes its outputs.
+        self.end_stopped();
         self.fill_phis()?;
         // The limits sit past every dword the root parameters say they
         // hold; a read of the program's own that took one of their places
