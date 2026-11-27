@@ -239,6 +239,11 @@ mod flow_tests;
 #[cfg(all(windows, any(test, feature = "host")))]
 pub mod host;
 mod lower;
+pub mod rayquery;
+#[cfg(all(test, windows))]
+mod rayquery_gpu_tests;
+#[cfg(test)]
+mod rayquery_tests;
 mod rect;
 pub use rect::{rectangle_gs, right_angle};
 #[cfg(all(test, windows))]
@@ -265,7 +270,7 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 pub use sampler::StaticSampler;
 pub use shader::{
-    HEAP_SAMPLERS, HEAP_VIEWS, MEMORY_SPACE, NULL_BUFFER_VIEW, ROOT_CBV_SPACE, SAMPLER_SPACE,
+    ACCEL_SPACE, HEAP_SAMPLERS, HEAP_VIEWS, MEMORY_SPACE, NULL_BUFFER_VIEW, ROOT_CBV_SPACE, SAMPLER_SPACE,
     THREAD_LIMIT_NONE, USER_DATA_SPACE, USER_THREAD_LIMIT, VIEW_INTEGER, VIEW_MARK_NONE, VIEW_MARKS, VIEW_READS, VIEW_SIGNED, VIEW_STRIDE_BITS,
     VIEW_STRIDES, VIEW_WRITE_BITS, VIEW_WRITES,
 };

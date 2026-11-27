@@ -1186,3 +1186,49 @@ Only what cannot be done from a cloud session.
     (the generator's fingerprints, pinned on Linux, must hold) and
     `cargo test -p victory-shader the_validation_crates_node_test`;
     decisions on the policy numbers and on the band as a verdict.
+* Ray-tracing prototype, the shaders (DXR 1.1's inline ray queries in
+  the DXIL emitter, and three compute shaders built with them: over
+  triangles; over procedural boxes with the triangle tested in the
+  shader; one that only writes misses): implemented, a public module
+  (`emit::rayquery`) that nothing in the translation or in
+  `victory-gpu` calls; reviewed (8 findings, all upheld; 7 fixed in
+  code, 1 settled in the document) and corrected. Tested (host
+  tests): 27 tests, the shaders run one thread at a time by the module
+  interpreter against a model of a device's query written from the
+  specification; Microsoft's validator accepts the three containers
+  (at integration, by `scripts/validate-dxil.sh`). Type-checked for
+  Windows only: `dxil.dll` on the three containers, pipeline creation
+  where a device reports tier 1.1, a dispatch over a null scene. Not
+  run on a device; not hardware-validated; no timing.
+  * Evidence: the operations, flags and records were read in
+    DirectXShaderCompiler's sources, then seen in what its Linux
+    release compiled from HLSL written here
+    (`crates/victory-shader/tests/dxc-reference/`, sources only): the
+    same SRV record, flags, `SFI0` and `PSV0` record, 37 of 37
+    declarations. A validator and a compiler, not a driver: that any
+    driver compiles or runs these shaders is speculative, and the
+    device model is our reading of the specification.
+  * By default nothing in a run changes; no switch, log line, column
+    or allocation. The other host tests' containers are unchanged
+    (545, by hash, checked again at integration).
+  * A shader that cannot decide a ray writes no miss: kind bit 31 with
+    a reason (1: geometry of the other type; 2: the procedural form's
+    arithmetic left single precision), the other words 0 (accepted by
+    the coordinator). The host must count these rays and trace them
+    another way; a comparison must not read them as misses.
+  * Limits: the null form reads no ray record; the procedural form
+    reports no face and does not refuse the small end (a triangle
+    under about 1e-19 across as the ray sees it; pinned by a test);
+    the emulated node test in `lower/bvh.rs` shares the arithmetic and
+    has no refusal, untouched; the tolerances are proposals.
+  * What the review found: overflow giving a NaN distance, a miss for
+    a crossed triangle and a NaN converted to an integer; geometry of
+    the other type written as misses; a Windows test that could not
+    tell written from untouched; a group count past D3D12's limit; a
+    zero direction accepted; a document weaker than its evidence;
+    stale binaries served from a shared build directory.
+  * For the owner's machine: on Windows, `cargo test -p victory-shader
+    rayquery -- --nocapture`, keeping any `SKIPPED` line and the
+    results of `the_containers_validate` and
+    `pipelines_are_created_and_a_null_scene_is_missed`; decisions on
+    2^24 as the bound of synthetic scenes and on the node test's range.

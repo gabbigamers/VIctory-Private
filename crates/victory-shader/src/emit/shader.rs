@@ -52,6 +52,9 @@ pub const VIEW_WRITE_BITS: u32 = 1 << 22;
 /// marks"), after the written pages in the same bitmap: one bit per
 /// resource-heap index, [`HEAP_VIEWS`] of them.
 pub const VIEW_READS: u32 = VIEW_WRITE_BITS;
+/// Where acceleration structures are bound: `t<n>` in this space
+/// (`emit::rayquery`; no translated program declares one).
+pub const ACCEL_SPACE: u32 = 3;
 
 /// [`RootType::Other`](crate::native::RootType) code of a user-data dword
 /// the host sets for one dispatch: the number of threads that run along
@@ -74,6 +77,8 @@ pub(crate) mod flags {
     pub const ROVS: u64 = 1 << 18;
     pub const WAVE_OPS: u64 = 1 << 19;
     pub const INT64: u64 = 1 << 20;
+    /// Raytracing tier 1.1: inline ray queries (`AllocateRayQuery`).
+    pub const RAY_QUERY: u64 = 1 << 25;
     pub const ATOMIC64_TYPED: u64 = 1 << 27;
     pub const RESOURCE_HEAP: u64 = 1 << 30;
     pub const SAMPLER_HEAP: u64 = 1 << 31;
@@ -130,6 +135,9 @@ pub(crate) struct Shader {
     pub root_srvs: Vec<(u8, V)>,
     /// Root UAVs (raw buffers) read or written, likewise.
     pub root_uavs: Vec<(u8, V)>,
+    /// Acceleration structures traced, by register in [`ACCEL_SPACE`], with
+    /// their handles.
+    pub accels: Vec<(u32, V)>,
     /// The title-memory page table's handle, once read.
     pub memory: Option<V>,
     /// The written-pages bitmap's handle, once title memory is written.
@@ -209,6 +217,7 @@ impl Shader {
             root_cbvs: Vec::new(),
             root_srvs: Vec::new(),
             root_uavs: Vec::new(),
+            accels: Vec::new(),
             memory: None,
             memory_dirty: None,
             view_addresses: None,
@@ -376,6 +385,33 @@ impl Shader {
         let h = self.annotate(block, h, 11 | 0x1000, 0);
         self.flags |= flags::RAW_BUFFERS;
         self.root_uavs.push((slot, h));
+        h
+    }
+
+    /// The handle of the acceleration structure at `t<register>` in
+    /// [`ACCEL_SPACE`], made in the entry block: an SRV of resource kind 16
+    /// (`RTAccelerationStructure`), which carries no other property. The
+    /// host binds a top-level structure there, as a root SRV (its GPU
+    /// address) or through a descriptor.
+    pub fn accel_handle(&mut self, register: u32) -> V {
+        if let Some(&(_, h)) = self.accels.iter().find(|r| r.0 == register) {
+            return h;
+        }
+        let r = self.m.i32(register);
+        let bind = [r, r, self.m.i32(ACCEL_SPACE), self.m.i8(0)];
+        let bind = self.m.aggregate(self.t.bind, &bind);
+        let f = self.m.bool(false);
+        let block = self.entry;
+        let h = self.op(
+            block,
+            "createHandleFromBinding",
+            Attr::ReadNone,
+            self.t.handle,
+            217,
+            &[bind, r, f],
+        );
+        let h = self.annotate(block, h, 16, 0);
+        self.accels.push((register, h));
         h
     }
 
@@ -595,6 +631,7 @@ impl Shader {
             (flags::SAMPLER_HEAP, uses.sampler_heap),
             (flags::WAVE_OPS, uses.wave),
             (flags::INT64, uses.int64),
+            (flags::RAY_QUERY, uses.ray_query),
         ] {
             self.flags = if used { self.flags | flag } else { self.flags & !flag };
         }
@@ -618,6 +655,7 @@ impl Shader {
             || !self.root_cbvs.is_empty()
             || !self.root_srvs.is_empty()
             || !self.root_uavs.is_empty()
+            || !self.accels.is_empty()
             || self.memory.is_some()
             || self.memory_dirty.is_some()
             || self.view_addresses.is_some()
@@ -677,44 +715,80 @@ impl Shader {
                 cbvs = Some(self.m.md_node(cbv_list));
             }
             let mut srvs = None;
-            if !self.root_srvs.is_empty()
+            let raw_srvs = !self.root_srvs.is_empty()
                 || self.memory.is_some()
                 || self.view_addresses.is_some()
-                || self.view_marks.is_some()
-            {
-                let ty = self
-                    .m
-                    .named_struct("struct.ByteAddressBuffer", vec![self.t.i32]);
-                let p = self.m.ptr(ty);
-                let u = self.m.undef(p);
+                || self.view_marks.is_some();
+            if raw_srvs || !self.accels.is_empty() {
                 let mut list = Vec::new();
-                let all: Vec<(u32, u32)> = self
-                    .root_srvs
-                    .iter()
-                    .map(|&(slot, _)| (ROOT_CBV_SPACE, u32::from(slot)))
-                    .chain(self.memory.map(|_| (MEMORY_SPACE, 0)))
-                    .chain(self.view_addresses.map(|_| (MEMORY_SPACE, 1)))
-                    .chain(self.view_marks.map(|_| (MEMORY_SPACE, VIEW_MARKS)))
-                    .collect();
-                for (n, (space, slot)) in all.into_iter().enumerate() {
-                    let ops = vec![
-                        Some(i32c(&mut self, n as u32)),
-                        Some(self.m.md_value(u)),
-                        Some(empty),
-                        Some(i32c(&mut self, space)),
-                        Some(i32c(&mut self, slot)),
-                        Some(i32c(&mut self, 1)),
-                        Some(i32c(&mut self, 11)),
-                        Some(i32c(&mut self, 0)),
-                        None,
-                    ];
-                    list.push(Some(self.m.md_node(ops)));
-                    bindings.push(Binding {
-                        kind: 4,
-                        space,
-                        register: slot,
-                        dxil_kind: 11,
-                    });
+                if raw_srvs {
+                    let ty = self
+                        .m
+                        .named_struct("struct.ByteAddressBuffer", vec![self.t.i32]);
+                    let p = self.m.ptr(ty);
+                    let u = self.m.undef(p);
+                    let all: Vec<(u32, u32)> = self
+                        .root_srvs
+                        .iter()
+                        .map(|&(slot, _)| (ROOT_CBV_SPACE, u32::from(slot)))
+                        .chain(self.memory.map(|_| (MEMORY_SPACE, 0)))
+                        .chain(self.view_addresses.map(|_| (MEMORY_SPACE, 1)))
+                        .chain(self.view_marks.map(|_| (MEMORY_SPACE, VIEW_MARKS)))
+                        .collect();
+                    for (n, (space, slot)) in all.into_iter().enumerate() {
+                        let ops = vec![
+                            Some(i32c(&mut self, n as u32)),
+                            Some(self.m.md_value(u)),
+                            Some(empty),
+                            Some(i32c(&mut self, space)),
+                            Some(i32c(&mut self, slot)),
+                            Some(i32c(&mut self, 1)),
+                            Some(i32c(&mut self, 11)),
+                            Some(i32c(&mut self, 0)),
+                            None,
+                        ];
+                        list.push(Some(self.m.md_node(ops)));
+                        bindings.push(Binding {
+                            kind: 4,
+                            space,
+                            register: slot,
+                            dxil_kind: 11,
+                        });
+                    }
+                }
+                // Acceleration structures: shape 16, and the element type
+                // DXC's writer gives every SRV that is neither raw nor
+                // structured (tag 0), here the 32-bit integer (4) of the
+                // structure's one field; the validator refuses the record
+                // without a type. `PSV0` has them as raw SRVs of kind 16.
+                if !self.accels.is_empty() {
+                    let ty = self
+                        .m
+                        .named_struct("struct.RaytracingAccelerationStructure", vec![self.t.i32]);
+                    let p = self.m.ptr(ty);
+                    let u = self.m.undef(p);
+                    let element = [Some(i32c(&mut self, 0)), Some(i32c(&mut self, 4))];
+                    let element = self.m.md_node(element.to_vec());
+                    for (register, _) in self.accels.clone() {
+                        let ops = vec![
+                            Some(i32c(&mut self, list.len() as u32)),
+                            Some(self.m.md_value(u)),
+                            Some(empty),
+                            Some(i32c(&mut self, ACCEL_SPACE)),
+                            Some(i32c(&mut self, register)),
+                            Some(i32c(&mut self, 1)),
+                            Some(i32c(&mut self, 16)),
+                            Some(i32c(&mut self, 0)),
+                            Some(element),
+                        ];
+                        list.push(Some(self.m.md_node(ops)));
+                        bindings.push(Binding {
+                            kind: 4,
+                            space: ACCEL_SPACE,
+                            register,
+                            dxil_kind: 16,
+                        });
+                    }
                 }
                 srvs = Some(self.m.md_node(list));
             }
@@ -959,6 +1033,9 @@ impl Shader {
         }
         if self.flags & flags::INT64 != 0 {
             features |= 0x8000;
+        }
+        if self.flags & flags::RAY_QUERY != 0 {
+            features |= 0x10_0000;
         }
         if self.flags & flags::RESOURCE_HEAP != 0 {
             features |= 0x200_0000;

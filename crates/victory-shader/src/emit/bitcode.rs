@@ -313,6 +313,51 @@ impl Module {
         self.func_ids.contains_key(name)
     }
 
+    /// Type `t` as LLVM writes it.
+    #[cfg(test)]
+    fn type_name(&self, t: Ty) -> String {
+        let list = |ts: &[Ty]| {
+            ts.iter()
+                .map(|&t| self.type_name(t))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match &self.types[t.0 as usize] {
+            TypeDef::Void => "void".into(),
+            TypeDef::Int(bits) => format!("i{bits}"),
+            TypeDef::Float => "float".into(),
+            TypeDef::Ptr(to, _) => format!("{}*", self.type_name(*to)),
+            TypeDef::Struct(Some(name), _) => format!("%{name}"),
+            TypeDef::Struct(None, fields) => format!("{{ {} }}", list(fields)),
+            TypeDef::Array(n, of) => format!("[{n} x {}]", self.type_name(*of)),
+            TypeDef::Func(ret, params) => format!("{} ({})", self.type_name(*ret), list(params)),
+        }
+    }
+
+    /// Function `name` as LLVM declares it: `<result> @<name>(<parameter
+    /// types>) <attributes>`; `None` if the module has none of that name.
+    #[cfg(test)]
+    pub fn declaration(&self, name: &str) -> Option<String> {
+        let f = &self.funcs[*self.func_ids.get(name)? as usize];
+        let TypeDef::Func(ret, params) = &self.types[f.ty.0 as usize] else {
+            unreachable!()
+        };
+        let params: Vec<String> = params.iter().map(|&t| self.type_name(t)).collect();
+        // The attribute groups `write` gives each.
+        let attributes = match f.attr {
+            None => "",
+            Some(Attr::ReadNone) => " nounwind readnone",
+            Some(Attr::NoUnwind) => " nounwind",
+            Some(Attr::ReadOnly) => " nounwind readonly",
+            Some(Attr::NoDuplicate) => " noduplicate nounwind",
+        };
+        Some(format!(
+            "{} @{name}({}){attributes}",
+            self.type_name(*ret),
+            params.join(", ")
+        ))
+    }
+
     #[cfg(test)]
     pub fn has_i32_const(&self, v: u32) -> bool {
         let want = Const::Int(i64::from(v as i32));
@@ -539,6 +584,7 @@ impl Module {
                     u.sampler_heap |= sampler;
                 }
                 u.wave |= name.starts_with("dx.op.wave") || name.starts_with("dx.op.quad");
+                u.ray_query |= name == "dx.op.allocateRayQuery";
             }
         }
         u
@@ -1033,6 +1079,8 @@ pub struct Uses {
     pub wave: bool,
     /// 64-bit integers.
     pub int64: bool,
+    /// Inline ray queries (`AllocateRayQuery`).
+    pub ray_query: bool,
 }
 
 /// What [`Module::write`] writes ([`Module::plan`]).
@@ -1404,12 +1452,14 @@ impl Flow {
     }
 
     /// Runs the function once, as one lane: integer arithmetic, compares,
-    /// selects, casts, phis and branches as LLVM defines them. `call` gives
-    /// each call's result from the function's name and its arguments (the
+    /// selects, casts, phis and branches as LLVM defines them, and 32-bit
+    /// float arithmetic, compares and conversions as this host's `f32` does
+    /// them (a value is its bits; nothing is fused). `call` gives each
+    /// call's result from the function's name and its arguments (the
     /// fields of a structure; nothing for no result), and sees every call
-    /// in the order the lane makes them. Float arithmetic and memory
-    /// instructions are not run: reaching one is an error, as is running
-    /// more than `steps` instructions.
+    /// in the order the lane makes them. Memory instructions and float
+    /// remainders are not run: reaching one is an error, as is running more
+    /// than `steps` instructions.
     pub fn run(
         &self,
         mut steps: u64,
@@ -1459,7 +1509,19 @@ impl Flow {
                 steps = steps.checked_sub(1).ok_or("the step budget ran out")?;
                 let not_run = |what: &str| Err(format!("block {b}: {what} {} is not run", inst.id));
                 let result = match &inst.op {
-                    FlowOp::Bin(..) if inst.float => return not_run("float instruction"),
+                    FlowOp::Bin(op, x, y) if inst.float => {
+                        let x = f32::from_bits(get(&values, *x) as u32);
+                        let y = f32::from_bits(get(&values, *y) as u32);
+                        let r = match op {
+                            Bin::Add => x + y,
+                            Bin::Sub => x - y,
+                            Bin::Mul => x * y,
+                            // The float forms share the integer codes.
+                            Bin::SDiv => x / y,
+                            _ => return not_run("float instruction"),
+                        };
+                        u64::from(r.to_bits())
+                    }
                     FlowOp::Bin(op, x, y) => {
                         let (x, y, bits) = (get(&values, *x), get(&values, *y), inst.bits);
                         let r = match op {
@@ -1481,6 +1543,19 @@ impl Flow {
                             Bin::Xor => x ^ y,
                         };
                         r & ones(bits)
+                    }
+                    FlowOp::Cmp(p, _, x, y) if *p <= pred::TRUE => {
+                        let x = f32::from_bits(get(&values, *x) as u32);
+                        let y = f32::from_bits(get(&values, *y) as u32);
+                        // Predicate bits: equal 1, greater 2, less 4,
+                        // unordered 8.
+                        let relation = match x.partial_cmp(&y) {
+                            Some(std::cmp::Ordering::Equal) => 1,
+                            Some(std::cmp::Ordering::Greater) => 2,
+                            Some(std::cmp::Ordering::Less) => 4,
+                            None => 8,
+                        };
+                        u64::from(*p & relation != 0)
                     }
                     FlowOp::Cmp(p, bits, x, y) => {
                         let (x, y) = (get(&values, *x), get(&values, *y));
@@ -1504,10 +1579,23 @@ impl Flow {
                     }
                     FlowOp::Cast(op, bits, x) => {
                         let x = get(&values, *x);
+                        let f = f32::from_bits(x as u32);
                         match op {
                             Cast::Trunc | Cast::ZExt | Cast::Bitcast => x & ones(inst.bits),
                             Cast::SExt => signed(x, *bits) as u64 & ones(inst.bits),
-                            _ => return not_run("float cast"),
+                            // Out of the result's range the value is
+                            // undefined in LLVM: an error here.
+                            Cast::FpToSi if (-2147483648.0..2147483648.0).contains(&f) => {
+                                f as i64 as u64 & ones(inst.bits)
+                            }
+                            Cast::FpToUi if f > -1.0 && f < 4294967296.0 => {
+                                f as u64 & ones(inst.bits)
+                            }
+                            Cast::FpToSi | Cast::FpToUi => {
+                                return not_run("float conversion out of range in instruction");
+                            }
+                            Cast::UiToFp => u64::from((x as f32).to_bits()),
+                            Cast::SiToFp => u64::from((signed(x, *bits) as f32).to_bits()),
                         }
                     }
                     FlowOp::Extract(a, index) => {

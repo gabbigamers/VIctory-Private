@@ -936,6 +936,13 @@ pub enum Root {
     /// A root raw UAV of this many dwords, zeroed, read back after the
     /// heap's UAVs ([`Host::dispatch`] only).
     Uav(u32),
+    /// A root raw UAV holding these dwords, read back like [`Root::Uav`]:
+    /// what a dispatch did not write is still there afterwards
+    /// ([`Host::dispatch`] only).
+    UavOf(Vec<u32>),
+    /// A root SRV of address 0: a null acceleration structure, which every
+    /// ray misses ([`Host::dispatch`] only).
+    NullSrv,
 }
 
 /// Bindings for [`Host::draw`]: root arguments and the heap contents.
@@ -1174,7 +1181,9 @@ impl Host {
                         at.ptr += (index * size) as u64;
                         list.SetGraphicsRootDescriptorTable(*param, at);
                     }
-                    Root::View { .. } | Root::Uav(_) => return Err("root views in a draw".into()),
+                    Root::View { .. } | Root::Uav(_) | Root::UavOf(_) | Root::NullSrv => {
+                        return Err("root views in a draw".into());
+                    }
                 }
             }
             list.OMSetRenderTargets(1, Some(&rtv), false, None);
@@ -1947,6 +1956,7 @@ impl Host {
                         }
                         keep.push(b);
                     }
+                    Root::NullSrv => list.SetComputeRootShaderResourceView(*param, 0),
                     &Root::Uav(n) => {
                         let bytes = u64::from(n) * 4;
                         let b = make(
@@ -1956,6 +1966,30 @@ impl Host {
                         )?;
                         list.SetComputeRootUnorderedAccessView(*param, b.GetGPUVirtualAddress());
                         keep.push(zero(&b, None, n)?);
+                        let rb = make(
+                            D3D12_HEAP_TYPE_READBACK,
+                            &buffer(bytes, D3D12_RESOURCE_FLAG_NONE),
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                        )?;
+                        uavs.push((b, None, n, rb));
+                    }
+                    Root::UavOf(data) => {
+                        let n = data.len() as u32;
+                        let bytes = u64::from(n) * 4;
+                        let b = make(
+                            D3D12_HEAP_TYPE_DEFAULT,
+                            &buffer(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                        )?;
+                        list.SetComputeRootUnorderedAccessView(*param, b.GetGPUVirtualAddress());
+                        let from = upload(data)?;
+                        list.CopyBufferRegion(&b, 0, &from, 0, bytes);
+                        list.ResourceBarrier(&[transition(
+                            &b,
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        )]);
+                        keep.push(from);
                         let rb = make(
                             D3D12_HEAP_TYPE_READBACK,
                             &buffer(bytes, D3D12_RESOURCE_FLAG_NONE),
