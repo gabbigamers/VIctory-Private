@@ -334,7 +334,43 @@ pub(crate) fn build(parts: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
     }
     let digest = hash(&out[20..]);
     out[4..20].copy_from_slice(&digest);
+    dump(&out, &digest);
     out
+}
+
+/// With `VICTORY_DXIL_DUMP` naming a directory, every finished container is
+/// also written there under its hash, so that a validator outside the
+/// process can check what was emitted (`scripts/validate-dxil.sh`). Off
+/// unless set; a failure to write is reported once and changes nothing else.
+fn dump(container: &[u8], digest: &[u8; 16]) {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    static FAILED: AtomicBool = AtomicBool::new(false);
+    let Some(dir) = DIR.get_or_init(|| {
+        let dir = std::path::PathBuf::from(std::env::var_os("VICTORY_DXIL_DUMP")?);
+        (!dir.as_os_str().is_empty()).then_some(dir)
+    }) else {
+        return;
+    };
+    let name: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let path = dir.join(format!("{name}.dxil"));
+    if path.exists() {
+        return;
+    }
+    // Beside it, the name of the thread that finished it: under the test
+    // harness that is the test, which is what a rejected container is
+    // traced back by.
+    let from = std::thread::current().name().unwrap_or("").to_owned();
+    let written = std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&path, container))
+        .and_then(|()| std::fs::write(path.with_extension("from"), from));
+    if let Err(e) = written
+        && !FAILED.swap(true, Ordering::Relaxed)
+    {
+        eprintln!("VICTORY_DXIL_DUMP: {}: {e}", path.display());
+    }
 }
 
 /// The container hash D3D12 checks: MD5 whose last block carries the bit

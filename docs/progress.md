@@ -249,12 +249,13 @@ What a session can prove depends on where it runs.
 | Tier | Needs | Command | Proves |
 |---|---|---|---|
 | 1 | any Linux host | `scripts/check-linux.sh tests` | host tests of every crate but `apps/victory` |
+| 1b | tier 1, plus the `dxv` program of a DirectXShaderCompiler release for Linux (a tool the user supplies; not in this repository) | `VICTORY_DXV=/path/to/bin/dxv scripts/validate-dxil.sh` | every distinct DXIL container the host tests of `victory-shader` finish is accepted by Microsoft's validator; says nothing about running them or about a driver's compiler |
 | 2 | Linux host with LLVM (clang-cl, llvm-lib, llvm-ml) | `scripts/check-linux.sh windows` | CI's clippy for `x86_64-pc-windows-msvc`, both feature sets; type-checked, not linked |
 | 3 | Windows with MSVC build tools | `cargo test --workspace --locked` | everything in CI, including the Windows-only tests (loader, DXIL validator, shader probes on the GPU and WARP) |
 | 4 | Windows, the target GPU, the user's game files | `victory translate --cache`, `victory run ... --execute` | the title itself; every ledger row |
 
 A cloud session (Linux container, 4 cores, 15 GB RAM, no GPU, no game data,
-no Wine, no MSVC CRT or Windows SDK) reaches tiers 1 and 2. Tiers 3 and 4
+no Wine, no MSVC CRT or Windows SDK) reaches tiers 1, 1b and 2. Tiers 3 and 4
 are manual tests on the owner's machine or the Windows CI job. Code that
 only runs at tier 3 or 4 and was written at tier 2 is listed below as
 unverified until a run confirms it.
@@ -549,3 +550,40 @@ Only what cannot be done from a cloud session.
   the sources of the emulated node test, and `THIRD_PARTY_NOTICES.md` has
   no entry for either. To be checked (licence, and whether code or only
   the method was taken) and noticed, as a change of its own.
+* A validator on Linux (tier 1b), at the owner's word of 2026-11-27.
+  Microsoft's DirectXShaderCompiler release v1.8.2505.1 for Linux
+  (`linux_dxc_2025_07_14.x86_64.tar.gz`, sha256 `f2213da1...bc48c`; its
+  own licence files: Microsoft's terms for the binaries, the LLVM release
+  licence) is kept outside the repository as a tool and reports itself as
+  1.9. With `VICTORY_DXIL_DUMP` naming a directory, every finished
+  container is also written there under its hash, with the name of the
+  thread that finished it (under the test harness, the test);
+  `scripts/validate-dxil.sh` runs the host tests of `victory-shader` that
+  way and the validator over what they wrote. First run: 356 distinct
+  containers, 354 accepted, 2 rejected, both from the ISA census
+  (`every_opcode_translate_or_refuse_never_panic`), which puts each opcode
+  into a minimal pixel program:
+  * `s_barrier` in a pixel program is lowered to a thread-group barrier,
+    which DXIL allows only in compute, mesh and amplification stages. It
+    should be refused outside those stages. No title pixel program is
+    known to hold one.
+  * a pixel program that ends before its export (`s_endpgm` and its
+    variants first) gets a shader that declares `SV_Depth` and
+    `SV_StencilRef` and writes neither. An output that is declared and
+    never written is undefined on the host; on the console a pixel
+    program without a depth export keeps the rasteriser's depth. Whether
+    any title program declares an output its code never exports is not
+    known; it belongs with the owner's rule that no output is left
+    undefined, and with the work on what a stopped loop does.
+  Both are to be fixed in the lowering as a change of their own, after
+  the loop work in flight there. The same tool compiled two reference
+  shaders written here (inline RayQuery over triangles and over
+  procedural boxes, `cs_6_6`), which give the emitter work the exact
+  operations, the resource record of an acceleration structure (kind 16)
+  and the shader flags (bit 25 with bit 4) to match.
+* A host test that depends on the clock:
+  `frame::tests::waits_end_on_ticks_and_count_frames` (`victory-gpu`)
+  asserts a wait of at most 50 ms and failed once here with six
+  workflows building on four cores, then passed three times alone. Rerun
+  before reading it as a regression.
+
