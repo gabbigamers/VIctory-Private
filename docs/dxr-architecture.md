@@ -6,9 +6,13 @@ and which path runs when. Facts: [ray-tracing-research.md](ray-tracing-research.
 Semantics and the equivalence rule: [dxr-compatibility.md](dxr-compatibility.md).
 Testing and measuring: [dxr-validation.md](dxr-validation.md).
 
-**Nothing here was run on hardware, and the layer itself (recogniser,
-description, generators, registry, and selection joined to a run) is
-speculative.** What
+**Nothing here was run on hardware, and the layer itself (generators,
+registry, and selection joined to a run) is speculative.** One part of
+the layer is implemented and tested on this host, on synthetic programs
+only: region recognition
+([dxr-region-recognition.md](dxr-region-recognition.md): natural loops,
+regions, the workload description, a recogniser, a census command).
+Nothing consumes its result. What
 exists beside it, each with its own document and state: ray queries in
 the emitter with three prototype shaders
 ([dxr-shader-emission.md](dxr-shader-emission.md)), a host backend that
@@ -50,21 +54,27 @@ specification by line, `av:` and `lab:` are a fork and the reference notes.
 | 1 | **Nothing to traverse yet.** The title's structures never appear in this fork (`progress.md` C3): no guest structure, no software result to compare with | `README.md:51` |
 | 2 | **A software pipeline may not exist on the target.** A program that declares 64-lane waves gets no pipeline on a 32-lane host (G2); the wave size of no tracer is recorded. Without it there is no reference on that device | `gpu/caps.rs:94-96, 121-131` |
 | 3 | **No title trace loop has been read by anyone.** No disassembly, IR or fixture is in any tree. Every shape below is designed against a synthetic loop | research, "What the title does" |
-| 4 | **Nothing recognises a region.** Lowering is per instruction; there is no natural-loop analysis | `emit/lower.rs:662-672`; `emit/lower/flow.rs:170-183` |
+| 4 | **A region is recognised only in synthetic programs, and nothing uses it.** Natural loops, regions and one accepted loop shape exist (dxr-region-recognition.md); lowering is still per instruction | `crates/victory-shader/src/workload/`; `emit/lower.rs:662-672`; `emit/lower/flow.rs:170-183` |
 | 5 | **Host geometry has no source read yet**, and the builder's exports are not intercepted | `crates/victory-loader/src/windows.rs:163-183` |
 | 6 | **No timing exists for any path on any NVIDIA card**, and the title's files are gated | research, "The forks" |
 
 ## The layer: one description, three generators
 
 A **workload** is one recognised traversal region of one program; a
-program may hold several. The recogniser runs where every product of
-translation is still in hand (between `resource::track`/`io::raise` and
-`emit_with`, `emit/mod.rs:391-415`) and writes a description naming no path:
+program may hold several. The recogniser takes every product of
+translation (`workload::Parts`: the IR, the per-lane structure, the
+resources, the I/O) **and the fact that the per-lane lowering succeeded**:
+a lane mask read as a number is refused only by the lowering, so the
+per-lane structure of a program the lowering refuses is not known to be
+its meaning, and such a program has no software twin. It therefore runs
+once the software variant is made, not between `resource::track` and
+`emit_with` as first written here; today only the census calls it. It
+writes a description naming no path:
 
 | Field | Content | Why it is needed |
 |---|---|---|
 | Region | header block, body blocks, exit edges; SSA values read inside and defined outside (live-ins), defined inside and read outside (live-outs), lane masks among them | the lowering makes a block and a counter per IR block and wires phis by edge (`emit/lower.rs:654-672`; `emit/lower/flow.rs:895-953`) |
-| Ray source | origin, direction; the minimum compare and the extent compare, each with its form (strict or inclusive, ordered or unordered) and how the extent shrinks; whether the inverse operand is proven to be 1/direction | the instruction takes inverse and extent as the program's own operands and does no extent test for triangles (`emit/lower/bvh.rs:10-12, 44, 110-115`) |
+| Ray source | origin, direction; the minimum compare and the extent compare, each with its form (strict or inclusive, ordered or unordered) and how the extent shrinks; at which extents the accept passes the node test's answer for a missed triangle (none, +INF, a NaN); whether the inverse operand is proven to be 1/direction | the instruction takes inverse and extent as the program's own operands and does no extent test for triangles (`emit/lower/bvh.rs:10-12, 44, 110-115`) |
 | Structure source | root pointer from a root parameter, from a heap descriptor at a computed index, or from data | `res:1340-1407`; decides what is known when a dispatch is recorded |
 | Flags, mask | proven constants only: first-hit exit, face culling, mask width and test | an undefined host flag bit is undefined behaviour (`spec:6856`) |
 | Filter | the sub-region run on a candidate before it is accepted (an alpha test), what it reads, and whether its action is a decision alone, idempotent (a minimum, a maximum, an OR), or counting or accumulating | becomes the body run per non-opaque candidate; a candidate may repeat |
@@ -73,9 +83,30 @@ translation is still in hand (between `resource::track`/`io::raise` and
 | Order | **none** (yes or no, or a minimum of t with nothing else kept); **tie by visit** (one compare of t against the running minimum, `<` or `<=`, everything kept replaced with it: order matters only among exactly equal t); **tie by key** (equal t settled by a value of the candidate); **visit order** (a first hit kept with its distance or identity, an iteration or stack cap, order-dependent accumulation) | visit order is not reproducible (`spec:2087-2110`); the recogniser must prove the value, and anything unproven is visit order |
 | Memory effects, lanes | stores and shared-memory use that outlive the region; per-lane or whole-wave walk | no analysis summarises these today (`emit/lower/ds.rs:19-36`; `emit/lower.rs:474-477`) |
 
-The hash of every field but the region is the **workload class**: what
+The hash of the description's **forms** is the **workload class**: what
 the loop means, never a title shader's hash or name. A synthetic program
-and a title loop with the same fields are one class.
+and a title loop with the same forms are one class. (First written here
+as "every field but the region"; as built the values a field holds are
+not in it, below.)
+
+**As built** (dxr-region-recognition.md), narrower than the table: the
+structure source recognised is a root descriptor's address with a
+constant root pointer; the only flag is the first-hit exit; a loop with a
+filter, a mask test, instance code or a load of its own is refused, so
+those fields hold "none"; a kept node pointer that memory is reached
+through is a refusal (`NodeLoad`), not a kept form, until side tables
+exist, so such a loop goes to software and not to the hybrid; and order
+"none" is given only where nothing but a flag is kept (a distance kept
+alone is classed tie by visit, which is stricter than its meaning). The
+class is the hash of the forms alone (which compares, which kinds are
+kept, which order, first-hit, the miss-word form): the root parameter's
+index, the root pointer, the stack's stride, the constants of a facing
+or a flag, and whether a miss leaves a constant or a value are **not**
+in it, so a validation row keyed by class must carry what of those its
+generator depends on. And one thing the first design did not have (now
+in the ray source's row): the accept of an inclusive compare passes the
+emulated miss word at an infinite extent, that of a negated compare at a
+NaN extent (`miss_word`; dxr-compatibility.md, "Extents").
 
 | Generator | Emits | Needs at run time |
 |---|---|---|
@@ -99,8 +130,8 @@ Cost classes count operations, not time; no time is claimed anywhere.
 | **Structure construction.** The title hands the builder D3D12 build descriptions; its compute stages write console nodes (`lab:CONSOLE-DLL-EXPORTS.md:45`, static analysis) | a host build from the same description (`spec:4105-4110`) | addresses converted to host buffers; a NaN vertex written as an inactive triangle (`spec:2174-2176, 2199-2201`); every geometry not opaque is built with the no-duplicate flag (`spec:4303`). Bytes are never reused (`spec:2001-2046`) | structure build | per build |
 | **Which structure, and is it current.** A root pointer in a register (`res:1340-1407`) | a structure bound as a root view, or taken from the heap by index | *dual* form: both variants recorded, counts set at submission. *Both-loops* form: one variant holds the native and the software loop and reads a table written at submission ("Selection") | per dispatch; per ray in the both-loops form | dual: none in the shader. Both-loops: one read and one branch per region entry |
 | **Traversal.** The program's loop: a stack, four sorted children per box call, one triangle per call (`emit/lower/bvh.rs:26-36`) | `Proceed()` (`spec:1153-1164`) | none: visit order, the guest's box culling and caps are not reproduced. The order field decides whether that is allowed | translation | none |
-| **Ray parameters.** Origin, direction, inverse and extent on every call | one `RayDesc` (`spec:6858`) | the inverse is dropped once proven 1/direction. Screens, so the host never gets a ray it forbids (`spec:2564-2572`): NaN origin or direction, zero direction, negative extent: a miss without a trace (`emit/lower/bvh.rs:43, 357-360, 441-444`). NaN extent, by the recognised compare: ordered, a miss; unordered or negated, TMax = +INF; not recognised, the loop is refused. Infinite origin or direction: no native answer; a miss, counted, and the class is not validated while the count is not zero | translation; per ray | per ray: compares and selects, no memory read |
-| **Extents.** Triangles hit for t >= 0 with no extent test; the loop compares t itself (`emit/lower/bvh.rs:44, 481-492`) | TMin < t < TMax, TMin >= 0, +INF legal (`spec:2553, 2564-2565`) | `t < e`: TMax = e. `t <= e`: the next float above e for a finite e >= 0, +INF unchanged (one bit more is a NaN), -0.0 taken as +0.0. A minimum `t > m`: TMin = m; none: TMin = 0, and a hit at exactly t = 0 falls in the extent-boundary class | translation; per ray | strict: none. Inclusive: a compare, a select and an integer add per ray |
+| **Ray parameters.** Origin, direction, inverse and extent on every call | one `RayDesc` (`spec:6858`) | the inverse is dropped once proven 1/direction. Screens, so the host never gets a ray it forbids (`spec:2564-2572`): NaN origin or direction, zero direction, negative extent: a miss without a trace (`emit/lower/bvh.rs:43, 357-360, 441-444`). NaN extent, by the recognised compare: ordered, a miss (shown on the synthetic walks); unordered or negated, TMax = +INF **for a ray that hits something**; one that hits nothing has no native answer, because the software walk accepts the first missed triangle it tests as a hit at +INF (dxr-compatibility.md, "Illegal rays"): counted, and the class is not validated while the count is not zero; not recognised, the loop is refused. Infinite origin or direction: no native answer; a miss, counted, and the class is not validated while the count is not zero | translation; per ray | per ray: compares and selects, no memory read |
+| **Extents.** Triangles hit for t >= 0 with no extent test; the loop compares t itself (`emit/lower/bvh.rs:44, 481-492`) | TMin < t < TMax, TMin >= 0, +INF legal (`spec:2553, 2564-2565`) | `t < e`: TMax = e. `t <= e`: the next float above e for a finite e >= 0, -0.0 taken as +0.0. At e = +INF, TMax = +INF (one bit more is a NaN) serves a ray that hits something; one that hits nothing has no native answer (the software walk's `+INF <= +INF` accepts a missed triangle; dxr-compatibility.md, "Extents"): counted, as above. A minimum `t > m`: TMin = m; none: TMin = 0, and a hit at exactly t = 0 falls in the extent-boundary class | translation; per ray | strict: none. Inclusive: a compare, a select and an integer add per ray |
 | **Flags, first hit.** The loop's code | the `RayQuery` template constant (`spec:6554`; `allocateRayQuery(178, flags)` in the reference) | a proven constant set; the dynamic argument is 0; a yes-or-no loop gets accept-first-hit; procedural primitives are always skipped | translation | none |
 | **Masks.** "Id and mask" in the instance record, tested by the title's code (`av:docs/fork-ray-tracing.md:74-76`) | an 8-bit mask ANDed with the ray's low 8 bits (`spec:4401, 6857`) | 8 bits or fewer tested by AND: copied. Anything else: refused | top-level build | none |
 | **Facing and culling.** The denominator's sign, positive in front (`emit/lower/bvh.rs:40-41`); culling is the loop's code | clockwise from the origin, object space, reversible per instance (`spec:4427`); cull ray flags (`spec:5455-5469`) | vertex order and the instance flag; a proven "skip this facing" becomes a cull flag. Open: the two emulations give opposite facing for odd id bytes (research). By the forks' reading the build order settles it. By this repository's, a decoded node is built in node order and the id bits pick the weights per hit; from build descriptions a facing-dependent class is refused once an odd id byte occurs | structure build; translation | forks' reading: none. This repository's: per hit a table read, or none with triangles grouped into geometries by id byte |
@@ -139,7 +170,8 @@ work"), so a filter that counts or accumulates is not native.
 |---|---|
 | The code uses the denominator's magnitude, compares raw numerators of different triangles, or mixes them with guest-scale values from elsewhere | hybrid |
 | Order is tie by key; or it needs both triangles on a shared edge with an idempotent action | hybrid |
-| It reads guest structure memory through an address from the hit and no side table can be made (geometry from build descriptions: the builder reorders triangles, `lab:GHIDRA-BVH.md:55, 63`) | hybrid over decoded nodes |
+| It reads guest structure memory through an address from the hit and no side table can be made (geometry from build descriptions: the builder reorders triangles, `lab:GHIDRA-BVH.md:55, 63`) | hybrid over decoded nodes. **Superseded for now**: as built the recogniser refuses such a loop (`NodeLoad`), so it goes to software until side tables exist ("As built", above) |
+| The accept passes the emulated miss word at an extent its rays have (`miss_word`: an inclusive compare at +INF, a negated one at a NaN) | native and hybrid only while the count of such rays that hit nothing is zero; otherwise software: what such a ray leaves depends on which triangles the guest's boxes let it test |
 | A mask wider than 8 bits or not tested by AND; a flag whose meaning is not proven; per-instance code that is a pure skip-or-enter test | hybrid |
 | Order is visit order; a filter or per-candidate action counts or accumulates; per-instance code changes the ray; the inverse is not proven 1/direction; a compare's predicate is not recognised, or triangles are accepted with no compare of t against the extent the box calls got; procedural nodes | software |
 | No region recognised, or a live-out with no recipe | software |
@@ -272,8 +304,8 @@ sustained 30 frames a second, no loss of picture).
 
 | Piece | Place | Testable now |
 |---|---|---|
-| Natural loops, region live-in and live-out | `crates/victory-shader/src/ir.rs` | host tests on the loop fixtures |
-| Workload description, recogniser, class hash | a module of `victory-shader`; the plan reaches the lowering through `lower::Parts` (`emit/lower.rs:106-118`) | host tests: one synthetic single-lane stack loop as GFX10 words, one accept and one refusal per reason |
+| Natural loops, region live-in and live-out | `crates/victory-shader/src/ir.rs` (`natural_loops`, `region`), the loop limits' own rule moved there; memory touched and data reads in `workload/region.rs` | **implemented, tested (host tests)**: loop fixtures and the synthetic walks |
+| Workload description, recogniser, class hash | `crates/victory-shader/src/workload/`. Nothing reaches the lowering yet: `lower::Parts` (`emit/lower.rs:106-118`) is untouched | **implemented, tested (host tests)**: 26 synthetic programs as GFX10 words, 7 loops accepted in 6 classes, a program for each of 21 refusal reasons and 25 variations that each break one condition; the census in `victory translate` (`--rt-census`) type-checked for Windows only |
 | `RayQuery` ops 178 to 215, resource kind 16, flag bit 25, feature word | `emit/shader.rs:57-70, 667-705, 929-959`; a native generator in `emit/lower/` | `scripts/validate-dxil.sh`, and against the reference disassembly |
 | Native variant against a CPU model, the ray screens among it | the test-only interpreter, which runs integer and bit-pattern work and hands each `dx.op` to a callback (`emit/bitcode.rs:1382-1392`); the CPU reference moved out of the Windows-only tests | host tests: model against model |
 | The tolerance constant k | a host test over the random scene classes | host test; its value is one of the rule's constants, which a verdict in the record names by the rule's number, and goes into the probe's row as a field of its own |

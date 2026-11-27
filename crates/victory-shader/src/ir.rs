@@ -1082,6 +1082,247 @@ fn add_regs(op: &Operand, lanes: u8, out: &mut Vec<(Reg, Value)>) -> Result<(), 
     Ok(())
 }
 
+/// The blocks back edges to `b` come from: its reachable predecessors at
+/// or after it in reverse postorder (`rpo` is each block's position in it,
+/// `usize::MAX` for a block nothing reaches). In reducible flow, which is
+/// all that is built here, `b` is then on every path to each of them.
+pub(crate) fn latches(blocks: &[Block], rpo: &[usize], b: usize) -> Vec<usize> {
+    let preds = blocks[b].preds.iter().copied();
+    let mut from: Vec<usize> = preds
+        .filter(|&q| rpo[q] != usize::MAX && rpo[b] <= rpo[q])
+        .collect();
+    from.dedup();
+    from
+}
+
+/// The natural loop of the back edge from `q` to `h`: `h` with every
+/// reachable block that reaches `q` without passing `h`.
+fn natural(blocks: &[Block], rpo: &[usize], h: usize, q: usize) -> Vec<bool> {
+    let mut holds = vec![false; blocks.len()];
+    holds[h] = true;
+    let mut stack = vec![q];
+    while let Some(b) = stack.pop() {
+        if !std::mem::replace(&mut holds[b], true) {
+            let preds = blocks[b].preds.iter().copied();
+            stack.extend(preds.filter(|&x| rpo[x] != usize::MAX));
+        }
+    }
+    holds
+}
+
+/// The loops that begin at header `h`, whose back edges come from the
+/// blocks `from` ([`latches`]): for each of those blocks the place of its
+/// back edge, which is the loop it belongs to, the innermost loop 0.
+///
+/// A back edge's place is the length of the longest chain of back edges to
+/// `h`, the natural loop of each properly inside the next's, that ends
+/// properly inside its own: 0 where no back edge is properly inside it.
+/// Loop n of the header is what the natural loops of the back edges of
+/// place n and below hold together, and the back edges of place n are its
+/// own.
+///
+/// One natural loop contains another exactly where it holds the other's
+/// source: what reaches that source without passing the header goes on
+/// from it to the first one's. So one is properly inside another where the
+/// other holds its source and it does not hold the other's.
+///
+/// Two back edges of which one is properly inside the other have different
+/// places, whatever other back edges there are (a chain that ends inside
+/// the inner one goes on through it). Two with the same natural loop have
+/// the same place, and so have two of which neither is inside the other
+/// unless the back edges inside them say otherwise; then the one with the
+/// shorter chain belongs to the loop further in.
+///
+/// A back edge of place n starts from outside every loop of the header
+/// below n: were its source in the natural loop of a back edge of lesser
+/// place, its own would be that one or properly inside it, and its place
+/// the same or less. So loop n - 1 is properly inside loop n, a back edge
+/// of loop n enters the loops below it from outside them, and it is inside
+/// the loops above it.
+///
+/// This is the one rule for what a loop is: the loop limits count by it
+/// (`emit::lower::limit`) and [`natural_loops`] lists by it.
+pub(crate) fn back_edge_places(
+    blocks: &[Block],
+    rpo: &[usize],
+    h: usize,
+    from: &[usize],
+) -> HashMap<usize, usize> {
+    if let [q] = from {
+        return HashMap::from([(*q, 0)]);
+    }
+    let naturals: Vec<Vec<bool>> = from.iter().map(|&q| natural(blocks, rpo, h, q)).collect();
+    // Whether back edge `i`'s natural loop is properly inside `j`'s.
+    let inside = |i: usize, j: usize| naturals[j][from[i]] && !naturals[i][from[j]];
+    // A natural loop properly inside another holds fewer blocks, so in
+    // this order the place of every back edge inside one is known when
+    // its own is wanted.
+    let size = |i: usize| naturals[i].iter().filter(|&&held| held).count();
+    let mut order: Vec<usize> = (0..from.len()).collect();
+    order.sort_by_key(|&i| size(i));
+    let mut place = vec![0; from.len()];
+    for (n, &i) in order.iter().enumerate() {
+        let within = order[..n].iter().filter(|&&j| inside(j, i));
+        place[i] = within.map(|&j| place[j] + 1).max().unwrap_or(0);
+    }
+    from.iter().copied().zip(place).collect()
+}
+
+/// A loop of a program, by the rule of [`back_edge_places`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loop {
+    /// The block every way into the loop goes through.
+    pub header: usize,
+    /// Its place among the loops that begin at its header, the innermost 0.
+    pub place: usize,
+    /// Its blocks, the header among them, in block order.
+    pub blocks: Vec<usize>,
+    /// The blocks its own back edges come from, in block order.
+    pub latches: Vec<usize>,
+}
+
+impl Loop {
+    pub fn holds(&self, b: usize) -> bool {
+        self.blocks.binary_search(&b).is_ok()
+    }
+}
+
+/// Every loop of `p`: by header in reverse postorder, and of the loops
+/// that begin at one header the innermost first. A loop inside another is
+/// a loop of its own here, and the outer one holds its blocks too.
+pub fn natural_loops(p: &Program) -> Vec<Loop> {
+    let order = reverse_postorder(&p.blocks);
+    let mut rpo = vec![usize::MAX; p.blocks.len()];
+    for (n, &b) in order.iter().enumerate() {
+        rpo[b] = n;
+    }
+    let mut loops = Vec::new();
+    for &h in &order {
+        let from = latches(&p.blocks, &rpo, h);
+        if from.is_empty() {
+            continue;
+        }
+        let places = back_edge_places(&p.blocks, &rpo, h, &from);
+        let mut held = vec![false; p.blocks.len()];
+        for place in 0..=places.values().copied().max().unwrap_or(0) {
+            let mut own: Vec<usize> = from
+                .iter()
+                .copied()
+                .filter(|q| places[q] == place)
+                .collect();
+            own.sort_unstable();
+            for &q in &own {
+                for (b, inside) in natural(&p.blocks, &rpo, h, q).into_iter().enumerate() {
+                    held[b] |= inside;
+                }
+            }
+            loops.push(Loop {
+                header: h,
+                place,
+                blocks: (0..p.blocks.len()).filter(|&b| held[b]).collect(),
+                latches: own,
+            });
+        }
+    }
+    loops
+}
+
+/// A loop as a region of the program: one way in, the ways out, and the
+/// values that cross its border.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Region {
+    pub header: usize,
+    /// In block order.
+    pub blocks: Vec<usize>,
+    /// The blocks outside it that go to its header: the only way in.
+    pub entries: Vec<usize>,
+    /// The edges out of it: from a block inside to a block outside.
+    pub exits: Vec<(usize, usize)>,
+    /// The values the loop carries from one round to the next: the
+    /// header's phis.
+    pub carried: Vec<(Reg, Value)>,
+    /// Values defined outside it that are read inside it, by value. A phi
+    /// reads in its own block: the header's phis read what comes in.
+    pub live_in: Vec<(Reg, Value)>,
+    /// Values defined inside it that are read outside it, by value: by an
+    /// instruction, or by a phi of a block an exit goes to. These are
+    /// register reads as the machine makes them: a vector instruction also
+    /// reads EXEC and the old value of what it writes
+    /// (`workload::region::data_reads` leaves those out).
+    pub live_out: Vec<(Reg, Value)>,
+}
+
+impl Region {
+    pub fn holds(&self, b: usize) -> bool {
+        self.blocks.binary_search(&b).is_ok()
+    }
+}
+
+/// The region of loop `l` of `p`.
+pub fn region(p: &Program, l: &Loop) -> Region {
+    // Where each value is defined, and the register it is a value of.
+    let mut defined: HashMap<Value, (Reg, bool)> = HashMap::new();
+    for &(reg, v) in &p.inputs {
+        defined.insert(v, (reg, false));
+    }
+    for (b, block) in p.blocks.iter().enumerate() {
+        let inside = l.holds(b);
+        let phis = block.phis.iter().map(|phi| (phi.reg, phi.value));
+        let writes = block.insts.iter().flat_map(|i| i.writes.iter().copied());
+        for (reg, v) in phis.chain(writes) {
+            defined.insert(v, (reg, inside));
+        }
+    }
+    let (mut live_in, mut live_out) = (Vec::new(), Vec::new());
+    let mut read = |v: Value, inside: bool| match defined.get(&v) {
+        Some(&(reg, false)) if inside => live_in.push((reg, v)),
+        Some(&(reg, true)) if !inside => live_out.push((reg, v)),
+        _ => {}
+    };
+    for (b, block) in p.blocks.iter().enumerate() {
+        let inside = l.holds(b);
+        for phi in &block.phis {
+            for &v in &phi.args {
+                read(v, inside);
+            }
+        }
+        for inst in &block.insts {
+            for &(_, v) in &inst.reads {
+                read(v, inside);
+            }
+        }
+    }
+    for list in [&mut live_in, &mut live_out] {
+        list.sort_unstable_by_key(|&(_, v)| v);
+        list.dedup();
+    }
+    let header = &p.blocks[l.header];
+    let mut entries: Vec<usize> = header
+        .preds
+        .iter()
+        .copied()
+        .filter(|&q| !l.holds(q))
+        .collect();
+    entries.dedup();
+    let mut exits = Vec::new();
+    for &b in &l.blocks {
+        for s in p.blocks[b].exit.successors() {
+            if !l.holds(s) && !exits.contains(&(b, s)) {
+                exits.push((b, s));
+            }
+        }
+    }
+    Region {
+        header: l.header,
+        blocks: l.blocks.clone(),
+        entries,
+        exits,
+        carried: header.phis.iter().map(|phi| (phi.reg, phi.value)).collect(),
+        live_in,
+        live_out,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,6 +1444,147 @@ mod tests {
         assert_eq!(add.read(Reg::S(0)), Some(phi.value));
         assert_eq!(b1.insts[1].read(Reg::S(0)), add.write(Reg::S(0)));
         assert_eq!(b2.insts[0].name(), "s_endpgm");
+    }
+
+    #[test]
+    fn a_loop_is_a_region_with_its_border() {
+        let p = build_words(
+            &[
+                0xBE80_0380, // s_mov_b32 s0, 0
+                0x8000_8100, // 4: s_add_u32 s0, s0, 1
+                0xBF07_8400, // s_cmp_lg_u32 s0, 4
+                0xBF85_FFFD, // s_cbranch_scc1 -> 4
+                0x7E00_0200, // v_mov_b32 v0, s0
+                S_ENDPGM,
+            ],
+            false,
+        );
+        let loops = natural_loops(&p);
+        let [l] = &loops[..] else { panic!("{loops:?}") };
+        let own = (l.header, l.place, &l.blocks[..], &l.latches[..]);
+        assert_eq!(own, (1, 0, &[1][..], &[1][..]));
+        assert!(l.holds(1) && !l.holds(0) && !l.holds(2));
+        let r = region(&p, l);
+        assert_eq!((&r.entries[..], &r.exits[..]), (&[0][..], &[(1, 2)][..]));
+        // Carried: the count. In: its first value. Out: its last, which the
+        // move after the loop reads; the compare's SCC is read inside only.
+        let phi = &p.blocks[1].phis[0];
+        let first = p.blocks[0].insts[0].write(Reg::S(0)).unwrap();
+        let last = p.blocks[1].insts[0].write(Reg::S(0)).unwrap();
+        assert_eq!(r.carried, [(Reg::S(0), phi.value)]);
+        assert_eq!(r.live_in, [(Reg::S(0), first)]);
+        assert_eq!(r.live_out, [(Reg::S(0), last)]);
+        assert_eq!(p.blocks[2].insts[0].read(Reg::S(0)), Some(last));
+    }
+
+    /// A value the loop defines can leave it through nothing but a phi of
+    /// the block its exit goes to (here the loop is jumped over on one
+    /// path, so the block after it joins two values of the count). A phi
+    /// reads in its own block: the value is live out.
+    #[test]
+    fn a_value_that_leaves_through_a_phi_of_the_exit_block_is_live_out() {
+        let p = build_words(
+            &[
+                0xBE80_0380,        // s_mov_b32 s0, 0
+                0xBF07_8001,        // s_cmp_lg_u32 s1, 0
+                s_cbranch_scc1(3),  // -> 24, past the loop
+                0x8000_8100,        // 12: s_add_u32 s0, s0, 1
+                0xBF07_8400,        // s_cmp_lg_u32 s0, 4
+                s_cbranch_scc1(-3), // -> 12
+                0x7E00_0200,        // 24: v_mov_b32 v0, s0
+                S_ENDPGM,
+            ],
+            false,
+        );
+        let loops = natural_loops(&p);
+        let [l] = &loops[..] else { panic!("{loops:?}") };
+        assert_eq!((l.header, &l.blocks[..]), (1, &[1][..]));
+        let r = region(&p, l);
+        assert_eq!((&r.entries[..], &r.exits[..]), (&[0][..], &[(1, 2)][..]));
+        // The block after the loop joins the count from before the loop
+        // with the loop's last, and its one instruction reads the join.
+        let first = p.blocks[0].insts[0].write(Reg::S(0)).unwrap();
+        let last = p.blocks[1].insts[0].write(Reg::S(0)).unwrap();
+        let [join] = &p.blocks[2].phis[..] else {
+            panic!("{:?}", p.blocks[2].phis)
+        };
+        assert_eq!(join.reg, Reg::S(0));
+        assert!(join.args.contains(&first) && join.args.contains(&last));
+        assert_eq!(p.blocks[2].insts[0].read(Reg::S(0)), Some(join.value));
+        // No instruction outside the loop reads the loop's value itself.
+        let outside = [&p.blocks[0], &p.blocks[2]];
+        let reads = outside.iter().flat_map(|b| &b.insts).flat_map(|i| &i.reads);
+        assert!(reads.clone().all(|r| r.1 != last));
+        assert_eq!(r.live_out, [(Reg::S(0), last)]);
+        // And the join's other value is not the loop's to give.
+        assert_eq!(r.live_in, [(Reg::S(0), first)]);
+    }
+
+    #[test]
+    fn two_loops_of_one_header_are_two_regions() {
+        // An outer loop whose body begins with its inner loop.
+        let p = build_words(
+            &[
+                0xBE80_0380,        // s_mov_b32 s0, 0
+                0xBE81_0380,        // s_mov_b32 s1, 0
+                0x8000_8100,        // 8: s_add_u32 s0, s0, 1
+                0xBF07_8400,        // s_cmp_lg_u32 s0, 4
+                s_cbranch_scc1(-3), // -> 8
+                0x8001_8101,        // s_add_u32 s1, s1, 1
+                0xBF07_8401,        // s_cmp_lg_u32 s1, 4
+                s_cbranch_scc1(-6), // -> 8
+                S_ENDPGM,
+            ],
+            false,
+        );
+        let loops = natural_loops(&p);
+        let [inner, outer] = &loops[..] else {
+            panic!("{loops:?}")
+        };
+        assert_eq!(
+            (
+                inner.header,
+                inner.place,
+                &inner.blocks[..],
+                &inner.latches[..]
+            ),
+            (1, 0, &[1][..], &[1][..])
+        );
+        assert_eq!(
+            (
+                outer.header,
+                outer.place,
+                &outer.blocks[..],
+                &outer.latches[..]
+            ),
+            (1, 1, &[1, 2][..], &[2][..])
+        );
+        // The inner loop is entered from before both and from the outer
+        // loop's end, and leaves into the outer loop's body.
+        let (ri, ro) = (region(&p, inner), region(&p, outer));
+        assert_eq!(
+            (&ri.entries[..], &ri.exits[..]),
+            (&[0, 2][..], &[(1, 2)][..])
+        );
+        assert_eq!((&ro.entries[..], &ro.exits[..]), (&[0][..], &[(2, 3)][..]));
+        // The outer count is carried by both (the header's phi), changed
+        // by the outer loop alone: live into the inner loop from the outer
+        // body, where it is defined.
+        let s1 = p.blocks[2].insts[0].write(Reg::S(1)).unwrap();
+        assert!(ri.carried.iter().any(|c| c.0 == Reg::S(1)) && ri.carried == ro.carried);
+        assert!(ri.live_in.contains(&(Reg::S(1), s1)) && !ro.live_in.contains(&(Reg::S(1), s1)));
+        // The rule is the one the loop limits count by: the place of each
+        // back edge is its loop.
+        let order = reverse_postorder(&p.blocks);
+        let mut rpo = vec![usize::MAX; p.blocks.len()];
+        for (n, &b) in order.iter().enumerate() {
+            rpo[b] = n;
+        }
+        let from = latches(&p.blocks, &rpo, 1);
+        assert_eq!(
+            back_edge_places(&p.blocks, &rpo, 1, &from),
+            HashMap::from([(1, 0), (2, 1)])
+        );
     }
 
     #[test]

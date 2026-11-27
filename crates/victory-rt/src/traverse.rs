@@ -24,7 +24,8 @@
 //!     and then the bottom level's root are pushed.
 //!   * A triangle pointer: the node test gives `(tn, d, i, j)`; `tn` of
 //!     +infinity is a miss. Otherwise `t = tn / d`, `u = i / d`, `v = j /
-//!     d`, and the candidate is tested in this order: `tmin < t` and `t <
+//!     d` (or each as a product with `1 / d`, [`Quotient::Reciprocal`]),
+//!     and the candidate is tested in this order: `tmin < t` and `t <
 //!     committed t` (both strict, so of two candidates with the same `t`
 //!     the one met first stays); facing (front when `d > 0`, swapped by the
 //!     instance's counter-clockwise flag) against the ray's cull flags
@@ -72,6 +73,21 @@ pub enum Boxes {
     AllVisited,
 }
 
+/// How a candidate's distance and weights are made of the node test's
+/// numerators and denominator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Quotient {
+    /// `tn / d`, `i / d`, `j / d`: a division each.
+    #[default]
+    Divided,
+    /// `r = 1 / d`, then `tn * r`, `i * r`, `j * r`: what a console program
+    /// can write, whose instruction set has a reciprocal and a product but
+    /// no division, with the reciprocal exact as the translation makes it
+    /// (`victory-shader` lowers `v_rcp_f32` to a division). It can differ
+    /// from [`Quotient::Divided`] in the last bit of each number.
+    Reciprocal,
+}
+
 /// What one traversal did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Work {
@@ -97,6 +113,16 @@ fn node(words: &[u32], base: usize, pointer: u32, slots: usize) -> Result<&[u32]
 
 /// The hit of `ray` (which must pass [`Ray::validate`]) in `scene`.
 pub fn trace(scene: &SwScene, ray: &Ray, boxes: Boxes) -> Result<(Hit, Work), Refusal> {
+    trace_as(scene, ray, boxes, Quotient::Divided)
+}
+
+/// [`trace`] with the candidate's numbers formed as `quotient` says.
+pub fn trace_as(
+    scene: &SwScene,
+    ray: &Ray,
+    boxes: Boxes,
+    quotient: Quotient,
+) -> Result<(Hit, Work), Refusal> {
     let words = &scene.words[..];
     let mut work = Work::default();
     let mut hit = Hit::MISS;
@@ -184,7 +210,13 @@ pub fn trace(scene: &SwScene, ray: &Ray, boxes: Boxes) -> Result<(Hit, Work), Re
                     continue;
                 }
                 let [tn, d, i, j] = r.map(f32::from_bits);
-                let (t, u, v) = (tn / d, i / d, j / d);
+                let (t, u, v) = match quotient {
+                    Quotient::Divided => (tn / d, i / d, j / d),
+                    Quotient::Reciprocal => {
+                        let r = 1.0 / d;
+                        (tn * r, i * r, j * r)
+                    }
+                };
                 // Written so that a NaN fails.
                 if !(ray.tmin < t && t < committed) {
                     continue;
@@ -321,6 +353,43 @@ mod tests {
         assert_eq!((h.t, h.kind, h.geometry_index), (5.0, hit_kind::BACK, 4));
         assert!(hit(&sw, &down(1.5, 0.5)).is_miss());
         assert_eq!(hit(&sw, &down(1.5, 0.5)), Hit::MISS);
+    }
+
+    #[test]
+    fn a_reciprocal_gives_the_same_triangle_and_numbers_a_step_apart_at_most() {
+        let sw = one(layers(5, true), Transform::IDENTITY, 0);
+        let (mut same, mut apart) = (0, 0);
+        for k in 0..400u32 {
+            // Rays that leave the squares' plane at many slopes.
+            let (x, y) = (0.05 + 0.0021 * k as f32, 0.9 - 0.0019 * k as f32);
+            let ray = Ray::new(
+                [x, y, -3.7],
+                [0.013 * (k % 7) as f32, 0.0, 1.9 + 0.01 * k as f32],
+                0.0,
+                100.0,
+            );
+            let divided = trace_as(&sw, &ray, Boxes::Tested, Quotient::Divided)
+                .unwrap()
+                .0;
+            assert_eq!(divided, hit(&sw, &ray));
+            let reciprocal = trace_as(&sw, &ray, Boxes::Tested, Quotient::Reciprocal)
+                .unwrap()
+                .0;
+            assert_eq!(reciprocal.ids(), divided.ids(), "{ray:?}");
+            assert_eq!(reciprocal.kind, divided.kind);
+            for (a, b) in [
+                (reciprocal.t, divided.t),
+                (reciprocal.u, divided.u),
+                (reciprocal.v, divided.v),
+            ] {
+                let steps = (i64::from(a.to_bits()) - i64::from(b.to_bits())).abs();
+                assert!(steps <= 1, "{ray:?}: {a} {b}");
+                same += u32::from(steps == 0);
+                apart += u32::from(steps == 1);
+            }
+        }
+        // Both happen: the two forms are not one.
+        assert!(same > 0 && apart > 0, "{same} {apart}");
     }
 
     #[test]

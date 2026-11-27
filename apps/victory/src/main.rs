@@ -101,6 +101,13 @@ enum Command {
         /// (with `--pipelines`, then the shader pack's pipelines).
         #[arg(long, conflicts_with_all = ["validate", "list"])]
         cache: bool,
+        /// Print only the census of traversal loops (ray tracing) on
+        /// standard output: counts, the class hashes of forms, the forms
+        /// and the refusal reasons. No file, record name, offset or shader
+        /// hash is in those lines; every other part of this command's
+        /// report can name files and records, and is left out.
+        #[arg(long, conflicts_with_all = ["validate", "pipelines", "list", "cache"])]
+        rt_census: bool,
     },
     /// Prepare, map and bind a title executable; with --execute, run it.
     Run {
@@ -229,12 +236,14 @@ fn main() -> Result<()> {
             list,
             jobs,
             cache: false,
+            rt_census,
         } => translate::run(
             paths,
             validate,
             pipelines,
             list,
             jobs.map(NonZeroUsize::get),
+            rt_census,
         ),
         Command::Run {
             exe,

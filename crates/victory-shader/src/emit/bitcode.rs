@@ -1516,14 +1516,38 @@ impl Flow {
         steps: u64,
         call: &mut dyn FnMut(&str, &[u64]) -> Vec<u64>,
     ) -> Result<(), String> {
-        self.walk(steps, call, None)
+        self.run_in(steps, None, call, None)
     }
 
     /// [`Flow::run`], with `enter` told each block the lane enters, in
     /// order, before the block's instructions run.
     pub fn walk(
         &self,
+        steps: u64,
+        call: &mut dyn FnMut(&str, &[u64]) -> Vec<u64>,
+        enter: Option<&mut dyn FnMut(usize)>,
+    ) -> Result<(), String> {
+        self.run_in(steps, None, call, enter)
+    }
+
+    /// [`Flow::run`] for a lane that uses memory of the module's own (a
+    /// thread's part of group-shared memory): `shared` holds the dwords
+    /// stored, by address (the global's number plus one in the high half,
+    /// the element in the low), and a load of one nothing stored is an
+    /// error. One lane only: nothing here orders two threads.
+    pub fn run_shared(
+        &self,
+        steps: u64,
+        shared: &mut HashMap<u64, u32>,
+        call: &mut dyn FnMut(&str, &[u64]) -> Vec<u64>,
+    ) -> Result<(), String> {
+        self.run_in(steps, Some(shared), call, None)
+    }
+
+    fn run_in(
+        &self,
         mut steps: u64,
+        mut shared: Option<&mut HashMap<u64, u32>>,
         call: &mut dyn FnMut(&str, &[u64]) -> Vec<u64>,
         mut enter: Option<&mut dyn FnMut(usize)>,
     ) -> Result<(), String> {
@@ -1539,7 +1563,9 @@ impl Flow {
             match a {
                 Arg::Inst(i) => values[i as usize],
                 Arg::Int(x) => x,
-                Arg::Global(_) | Arg::Other => 0,
+                // An address: the global, then the element.
+                Arg::Global(g) => (u64::from(g) + 1) << 32,
+                Arg::Other => 0,
             }
         }
         #[inline(always)]
@@ -1678,6 +1704,23 @@ impl Flow {
                         let first = result.first().copied().unwrap_or(0);
                         fields.insert(inst.id, result);
                         first
+                    }
+                    FlowOp::Element(array, index) if shared.is_some() => {
+                        get(&values, *array) + get(&values, *index)
+                    }
+                    FlowOp::Load(at) if shared.is_some() => {
+                        let held = shared.as_deref().and_then(|m| m.get(&get(&values, *at)));
+                        match held {
+                            Some(&x) => u64::from(x),
+                            None => return not_run("load of memory nothing stored, instruction"),
+                        }
+                    }
+                    FlowOp::Store(at, x) if shared.is_some() => {
+                        let (at, x) = (get(&values, *at), get(&values, *x) as u32);
+                        if let Some(m) = shared.as_deref_mut() {
+                            m.insert(at, x);
+                        }
+                        0
                     }
                     FlowOp::Element(..)
                     | FlowOp::Load(_)

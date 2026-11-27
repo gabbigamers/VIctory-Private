@@ -31,6 +31,13 @@ windows = { workspace = true, optional = true, features = [
     "Win32_Graphics_Dxgi_Common",
 ] }
 
+[dev-dependencies]
+# The BVH tests (Windows) hold the CPU reference of the node test;
+# victory-rt has a copy of it for the DXR validation, and one of those tests
+# keeps the two the same. The synthetic walks (`workload`) are run against
+# victory-rt's traversal over the trees it builds, on any host.
+victory-rt.workspace = true
+
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
@@ -39,10 +46,6 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
 ] }
-# The BVH tests hold the CPU reference of the node test; victory-rt has a
-# copy of it for the DXR validation, and one of those tests keeps the two
-# the same.
-victory-rt.workspace = true
 
 [lints]
 workspace = true

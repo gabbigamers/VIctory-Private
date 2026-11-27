@@ -1623,3 +1623,48 @@ Only what cannot be done from a cloud session.
   * For the owner: the rule with [C1] to [C7]; k = 8 or 4; the bound;
     the hybrid's bar. On Windows, `cargo test -p victory-rt`: the 27
     fingerprints and the measured k must hold there.
+* Ray tracing, region recognition, the translation-time half of the
+  layer (`victory-shader`, `workload/`, loops and regions in `ir.rs`;
+  `dxr-region-recognition.md`): a loop of a compute program becomes a
+  workload description that names no path, or a named refusal.
+  Implemented. Tested (host tests). Type-checked for Windows only: the
+  census call in `victory translate` and its switch. Hardware-validated:
+  nothing; it ran on no device and nothing consumes a description. No
+  title program was read: every finding is about synthetic programs
+  written here, speculative as to the title until the census runs.
+  * Found, on the CPU model and the test interpreter only: a candidate
+    is not a hit. The emulated node test answers a missed triangle with
+    a distance of +inf, which `t <= extent` accepts at an infinite
+    extent and a negated compare at a NaN extent: of 384 rays with an
+    infinite extent, 33 that hit nothing store a hit in the inclusive
+    walk, none in the strict. The description marks it (`miss_word`).
+  * By default no translation, dispatch or allocation changes. `victory
+    translate` prints the census lines after its wave tallies, the other
+    tallies as they were; behind `--rt-census`, those lines alone. The
+    loop limits count by the same two functions, moved to `ir.rs`.
+    `victory-rt` gains `traverse::trace_as`; `trace` is as it was.
+  * Tested: one accepted loop shape, as truth tables over the lane's
+    compares. 26 synthetic GFX10 programs: 7 loops accepted in 6
+    classes, a program for each of 21 refusal reasons; 25 more each
+    break one condition of a recognised walk and are refused for it. 22
+    translated walks store what their specification gives; the probe's
+    bottom-level software walk equals `victory-rt`'s traversal bit for
+    bit over 1,280 rays.
+  * The review found (9 findings, all upheld and corrected): a root only
+    some lanes push and a kept pointer loaded through at a later pass
+    accepted; a missed triangle taken for a hit; a hand-off that would
+    have carried file names; checks no test could fail (of 34 switched
+    off one at a time 33 now fail a test; the lane-mask check does not).
+  * Defaults until the owner says otherwise: a loop whose accept passes
+    the miss word is recognised and marked; a kept node pointer loaded
+    through, and a loop with an iteration or stack cap, are refused to
+    software. The class is the key `rt/record.rs` is keyed by, joined to
+    nothing: 64 bits here, 32 bytes there, open.
+  * Checked on the integrated commit: 1110 host tests (20 new); the
+    validator, 924 containers, 0 rejected: the head's 877 byte for byte,
+    23 added by `emit::walk_tests`, 24 by `workload::tests`; the Windows
+    type-check; the asset policy. The 34 faults were not repeated.
+  * For the owner's machine: `victory translate <shader folder>
+    --rt-census > rt-census.txt`; send that file only (the rest of the
+    report names files and pack records). It must show loops recognised
+    by class and refused by reason: whether a title loop has this shape.

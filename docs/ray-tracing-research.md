@@ -143,8 +143,10 @@ Lacks:
   (`gpu/caps.rs:94-96, 121-131`).
 * Any host structure, `RayQuery` operation, structure resource kind or
   flag bit in the emitter (`emit/shader.rs:57-70, 667-705, 929-959`); any
-  natural-loop analysis, region live-in and live-out, or memory-effect
-  summary (`emit/lower.rs:474-477, 662-672`).
+  use of a recognised region by the lowering (`emit/lower.rs:474-477,
+  662-672`). Natural loops, region live-in and live-out and the memory a
+  region touches now exist as analyses, with a recogniser tested on
+  synthetic loops only ([dxr-region-recognition.md](dxr-region-recognition.md)).
 * Any registry of structures, interception of the builder's exports
   (the loader has a place for one, `crates/victory-loader/src/windows.rs:163-183`),
   builder classification, read marks, variant slots or path selector.

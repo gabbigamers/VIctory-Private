@@ -444,6 +444,14 @@ the end at an empty stack or a first-hit ray's first accepted hit. Stack overflo
 node type, the step limit and an origin beyond the padded reach are errors, never a quiet miss; each
 has a test that reaches it.
 
+A candidate's `t`, `u` and `v` are quotients of the node test's numerators by its denominator. The
+model forms them by division (`trace`); `trace_as` with `Quotient::Reciprocal` forms them as
+`tn * (1 / d)`, which is what a console program can write (its instruction set has a reciprocal and
+a product, no division; the translation makes the reciprocal an exact division). The two give the
+same triangle and numbers at most one step apart on the cases of one test, and differ on some: a
+synthetic guest program is compared with the form it computes
+([dxr-region-recognition.md](dxr-region-recognition.md)).
+
 `node.rs` is a second copy of the CPU reference in `victory-shader`'s Windows tests
 (`emit/bvh_tests.rs`), which those tests compare with the GPU. One test there,
 `the_validation_crates_node_test_equals_the_reference`, compares the two copies word for word on

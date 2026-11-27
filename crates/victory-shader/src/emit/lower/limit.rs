@@ -27,7 +27,7 @@
 //! count for it; those of lesser place belong to the loops inside it. Each
 //! of a header's loops is properly inside the next, and a back edge starts
 //! from outside every loop of the header below its own
-//! ([`Lower::header_loops`]).
+//! ([`crate::ir::back_edge_places`], which the region analysis shares).
 //!
 //! Two back edges of which one's natural loop is properly inside the
 //! other's are therefore always two loops, whatever else goes back to the
@@ -179,12 +179,9 @@ impl Lower<'_> {
             let preds = p.blocks[b].preds.iter().copied();
             preds.filter(|&q| l.block[q].is_some()).collect()
         };
-        let latches = |l: &Self, b: usize| -> Vec<usize> {
-            let mut from = preds(l, b);
-            from.retain(|&q| l.rpo[b] <= l.rpo[q]);
-            from.dedup();
-            from
-        };
+        // The rule for what a back edge and a loop are is `ir`'s, which the
+        // region analysis shares.
+        let latches = |l: &Self, b: usize| crate::ir::latches(&p.blocks, &l.rpo, b);
         // The blocks a back edge can still follow: only there is the
         // lane's count read.
         let mut read = vec![false; p.blocks.len()];
@@ -231,66 +228,10 @@ impl Lower<'_> {
 
     /// The loops that begin at header `h`, whose back edges come from the
     /// IR blocks `from`: for each of those blocks the place of its back
-    /// edge, which is the loop it counts for, the innermost loop 0.
-    ///
-    /// A back edge's place is the length of the longest chain of back
-    /// edges to `h`, the natural loop of each properly inside the next's,
-    /// that ends properly inside its own: 0 where no back edge is properly
-    /// inside it. Loop n of the header is what the natural loops of the
-    /// back edges of place n and below hold together, and the back edges
-    /// of place n are the ones that count for it.
-    ///
-    /// One natural loop contains another exactly where it holds the other's
-    /// source: what reaches that source without passing the header goes on
-    /// from it to the first one's. So one is properly inside another where
-    /// the other holds its source and it does not hold the other's.
-    ///
-    /// Two back edges of which one is properly inside the other have
-    /// different places, whatever other back edges there are (a chain that
-    /// ends inside the inner one goes on through it). Two with the same
-    /// natural loop have the same place, and so have two of which neither
-    /// is inside the other unless the back edges inside them say otherwise;
-    /// then the one with the shorter chain counts for the loop further in.
-    ///
-    /// A back edge of place n starts from outside every loop of the header
-    /// below n: were its source in the natural loop of a back edge of
-    /// lesser place, its own would be that one or properly inside it, and
-    /// its place the same or less. So loop n - 1 is properly inside loop n,
-    /// a back edge of loop n enters the loops below it from outside them,
-    /// and it is inside the loops above it.
+    /// edge, which is the loop it counts for, the innermost loop 0. The
+    /// rule, and why it is the rule, is at [`crate::ir::back_edge_places`].
     fn header_loops(&self, h: usize, from: &[usize]) -> HashMap<usize, usize> {
-        if let [q] = from {
-            return HashMap::from([(*q, 0)]);
-        }
-        let p = self.x.p;
-        // Each back edge's natural loop.
-        let natural = |q: usize| {
-            let mut holds = vec![false; p.blocks.len()];
-            holds[h] = true;
-            let mut stack = vec![q];
-            while let Some(b) = stack.pop() {
-                if !std::mem::replace(&mut holds[b], true) {
-                    let preds = p.blocks[b].preds.iter().copied();
-                    stack.extend(preds.filter(|&x| self.block[x].is_some()));
-                }
-            }
-            holds
-        };
-        let naturals: Vec<Vec<bool>> = from.iter().map(|&q| natural(q)).collect();
-        // Whether back edge `i`'s natural loop is properly inside `j`'s.
-        let inside = |i: usize, j: usize| naturals[j][from[i]] && !naturals[i][from[j]];
-        // A natural loop properly inside another holds fewer blocks, so in
-        // this order the place of every back edge inside one is known when
-        // its own is wanted.
-        let size = |i: usize| naturals[i].iter().filter(|&&held| held).count();
-        let mut order: Vec<usize> = (0..from.len()).collect();
-        order.sort_by_key(|&i| size(i));
-        let mut place = vec![0; from.len()];
-        for (n, &i) in order.iter().enumerate() {
-            let within = order[..n].iter().filter(|&&j| inside(j, i));
-            place[i] = within.map(|&j| place[j] + 1).max().unwrap_or(0);
-        }
-        from.iter().copied().zip(place).collect()
+        crate::ir::back_edge_places(&self.x.p.blocks, &self.rpo, h, from)
     }
 
     /// The block latch `b`'s conditional branch goes to in place of `via`,

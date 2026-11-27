@@ -13,7 +13,7 @@ use victory_shader::structure::{self, Atom, LaneExit};
 use victory_shader::{
     Container, FourCC, HwStage, NativeProgram, RootType, ShaderError, ir, native_programs,
 };
-use victory_shader::{io, resource};
+use victory_shader::{io, resource, workload};
 
 use crate::shader::{MAX_FILE, Source, sources};
 
@@ -83,6 +83,10 @@ struct Tally {
     /// the program do not agree (`HostShader::output_notes`): reason →
     /// programs, the first one, and programs by output.
     noted: BTreeMap<emit::OutputReason, (usize, String, BTreeMap<String, usize>)>,
+    /// Traversal loops of the compute programs: how many hold a node
+    /// instruction, and what the recogniser makes of each loop that does
+    /// (`victory_shader::workload`). Counts, forms and reasons only.
+    traversal: workload::Census,
     /// Reason → programs stopped by it, and the first one.
     failed: BTreeMap<String, (usize, String)>,
     /// With `--list`: one line per program and outcome.
@@ -151,6 +155,7 @@ impl Tally {
             *self.waves.entry(k).or_default() += n;
         }
         self.no_per_lane += other.no_per_lane;
+        self.traversal.merge(other.traversal);
         for (mine, theirs) in self.emulated.iter_mut().zip(other.emulated) {
             *mine += theirs;
         }
@@ -183,12 +188,15 @@ struct Checks {
     host: Option<(Host, emit::HostShader)>,
 }
 
+/// `census`: print the census of traversal loops and nothing else
+/// (`--rt-census`).
 pub fn run(
     paths: Vec<PathBuf>,
     validate: bool,
     pipelines: bool,
     list: bool,
     jobs: Option<usize>,
+    census: bool,
 ) -> Result<()> {
     // Dumped shaders and validator reports are game-derived (rule #1).
     if let Some(dir) = std::env::var_os("VICTORY_EMIT_DUMP") {
@@ -269,6 +277,16 @@ pub fn run(
         }
     }
     let t = total.into_inner().unwrap_or_else(|e| e.into_inner());
+    if census {
+        // The census alone (docs/dxr-region-recognition.md). Its lines hold
+        // counts, forms and reasons; the rest of the report (the listing,
+        // the first example of each failure) names files and records, so
+        // none of it is printed here. Progress goes to standard error.
+        for line in t.traversal.lines() {
+            println!("{line}");
+        }
+        return Ok(());
+    }
     println!(
         "containers   {} ({} duplicates skipped)",
         t.containers, t.duplicates
@@ -343,6 +361,12 @@ pub fn run(
     waves.sort_by_key(|(kind, n)| (std::cmp::Reverse(**n), kind.as_str()));
     for (kind, n) in waves {
         println!("  {n:>7}  {kind}");
+    }
+    // The census of traversal loops (docs/dxr-region-recognition.md): a
+    // class is named by the hash of its forms, never by a program. The
+    // lines after it do name files: `--rt-census` prints these alone.
+    for line in t.traversal.lines() {
+        println!("{line}");
     }
     if !pairs.is_empty() {
         let host = Host::new(false).map_err(anyhow::Error::msg)?;
@@ -623,6 +647,9 @@ fn translate(
                 // Why a compute program has no per-lane form, if it has
                 // none: its structure's refusal, or its lowering's.
                 let mut no_per_lane = None;
+                // Whether the program was lowered per lane: only then is a
+                // loop of it recognised.
+                let mut lowered = false;
                 let structured = match structured {
                     Ok(s) => {
                         tally_structured(&program, &s, t);
@@ -651,6 +678,7 @@ fn translate(
                     match emit::emit_with(&container, &p, &program, s, i, r, marks) {
                         Ok(shader) => {
                             *counter(t, p.stage, 1) += 1;
+                            lowered = !shader.wave.emulated;
                             // A program that asks the host for the console's
                             // wave: counted by why, with what its emulated
                             // form comes to (which is checked like any
@@ -685,6 +713,17 @@ fn translate(
                         Err(e) => t.fail(format!("emit: {e}"), label),
                     }
                 }
+                if compute {
+                    let parts = workload::Parts {
+                        native: &p,
+                        p: &program,
+                        st: structured.as_ref(),
+                        res: res.as_ref(),
+                        io: raised.as_ref(),
+                        lowered,
+                    };
+                    t.traversal.add(&workload::recognise(&parts));
+                }
                 // A compute program the per-lane form refuses declares no
                 // wave size and would be in no count above, though it may
                 // be one that depends on the wave: counted here by that
@@ -712,6 +751,11 @@ fn translate(
                     ShaderError::Unsupported { what, .. } => format!("unsupported: {what}"),
                     e => e.to_string(),
                 };
+                // A compute program with no IR is not examined for
+                // traversal loops: the census says how many there are.
+                if p.stage == HwStage::Cs {
+                    t.traversal.not_built();
+                }
                 t.fail(reason, || format!("{} {:?}", example(), p.stage));
             }
         }
@@ -1035,7 +1079,7 @@ mod tests {
         // SAFETY: no other test in this binary touches the environment.
         unsafe { std::env::set_var("VICTORY_EMIT_DUMP", env!("CARGO_MANIFEST_DIR")) };
         let missing = std::env::temp_dir().join("victory-translate-no-such-dir");
-        let err = super::run(vec![missing], false, false, false, Some(1)).unwrap_err();
+        let err = super::run(vec![missing], false, false, false, Some(1), false).unwrap_err();
         // SAFETY: as above; unset so a later test's `run` is not refused.
         unsafe { std::env::remove_var("VICTORY_EMIT_DUMP") };
         assert!(

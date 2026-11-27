@@ -269,6 +269,8 @@ mod synthetic_tests;
 pub mod validator;
 #[cfg(all(test, windows))]
 mod valu_tests;
+#[cfg(test)]
+mod walk_tests;
 #[cfg(all(test, windows))]
 mod waterfall_tests;
 mod wave;

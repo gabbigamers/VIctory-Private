@@ -35,9 +35,12 @@ a dated revision. `emit/` is
 Still absent from the tree (the first version below runs without them,
 and is the less for it):
 
-* The smallest version of the layer (dxr-architecture.md): region
-  analysis, the workload description, a recogniser and a native generator
-  for the synthetic programs. `RayQuery` is in the emitter
+* The smallest version of the layer (dxr-architecture.md): a native
+  generator for the synthetic programs. (Region analysis, the workload
+  description and a recogniser now exist for synthetic programs, with
+  the programs themselves as GFX10 words and one of them as the software
+  path's container: [dxr-region-recognition.md](dxr-region-recognition.md).)
+  `RayQuery` is in the emitter
   (`emit/rayquery.rs`), with three prototype shaders that no translated
   program reaches.
 * **R-ref**, the geometry in double precision with the classes of the
@@ -311,7 +314,11 @@ distance pair, barycentrics, facing and the instance id; the same
 keeping a node pointer (N-d and H-node only); the same with a candidate
 filter (the form of `ref:rq_tri.hlsl`); one with face culling; one with
 instance masks; one whose order is tie by key (N must refuse it). Each
-has code after its region that stores what level 2 compares. Node data
+has code after its region that stores what level 2 compares. Of these,
+written and recognised today (bottom level only, so no instance id): the
+yes-or-no loop, the nearest-hit loop keeping distance, barycentrics and
+facing, the same keeping a node pointer, and the tie-by-key loop; the
+filter, culling and mask programs are not written. Node data
 for S and H is read as the runtime reads it, through the page-table path
 (`gpu/host.rs:3955-3965`; `emit/lower/bvh.rs:259-288`); timings are
 repeated with the buffer on the card, as separate rows.
@@ -342,7 +349,7 @@ Scene parameters are fixed from R-ref alone, before a device runs.
 | `edge` | directed | two triangles sharing an edge, a fan, a closed mesh; rays exactly on edges and vertices and 1, 2, 8 spacings either side | admissibility at shared, boundary and silhouette edges |
 | `thin`, `large-thin` | directed | slivers and needles to aspect 2^20; small triangles at 2^16, 2^20, 2^24 from the origin | admissibility where every pair is a sliver pair. Reported, never a pass alone |
 | `cull-edge` | directed | an edge shared by a front and a back face, under each cull flag | which triangle a driver reports; the specification is silent |
-| `extent` | directed | hits at exactly t = 0, at the extent, one spacing either side; extents of +INF, -0.0 and the largest finite float | the next-float-up bound and its special cases |
+| `extent` | directed | hits at exactly t = 0, at the extent, one spacing either side; extents of +INF, -0.0 and the largest finite float | the next-float-up bound and its special cases; under an inclusive compare, the rays with an infinite extent that hit nothing (S stores a missed triangle as a hit there: dxr-compatibility.md, "Extents") |
 | `tie` | directed | coplanar duplicates of one material and of two; hits a few spacings apart | which wins; stability between runs. Reported, never a pass alone |
 | `far-graze`, `flat` | directed | the `edge` scenes far from the origin; triangles in axis planes | guest hits accepted through rounding that a host may not present (H); gained hits (N) |
 | `degenerate` | directed | zero-area and collinear triangles, a NaN vertex; NaN in the extent, origin, direction, one at a time; a zero and an infinite direction, an infinite origin; a negative extent | the screens; inactive triangles keep indices aligned |
@@ -615,7 +622,8 @@ run.
 | The first version's device-free parts: a scene as build inputs, the mapping of rays, record decoding with refusals and unwritten records, the statistics, the result files and the check of where they go, the switch, the run over a stand-in (every measurement column held against what the stand-in reported for it), `rt-summary` and its comparison of two files | implemented; tested (host tests) | 1 |
 | The first version's three containers | accepted by Microsoft's validator on Linux (dxr-shader-emission.md) | 1b |
 | The first version on a device: `hardware.rs` (the debug layer and its messages among it), `gpu/rt/device.rs`, the command | type-checked for Windows only; hardware-validated: nothing is | 2 |
-| Region analysis, description, recogniser, native generator, R-ref, the constant k, the scene classes of "Scenes", the record and selection, levels 2 and 3 | speculative; all testable on any host | 1, 1b |
+| Region analysis, description, recogniser, the synthetic guest programs (and 25 variations the recogniser must refuse) and the bottom-level software walk for the probe | implemented; tested (host tests); the programs' containers accepted by Microsoft's validator on Linux | 1, 1b |
+| Native generator, R-ref, the constant k, the scene classes of "Scenes", the record and selection, levels 2 and 3 | speculative; all testable on any host | 1, 1b |
 | Native variant against a CPU model in the test-only interpreter | speculative; model against model only | 1 |
 | The software traversal as a shader over console-format nodes (S, `software-gpu`) | speculative; a named path with status `not built` | 3 |
 | Store redirection and the per-class switch for the title comparison; every timing and memory figure | speculative | 3 |
