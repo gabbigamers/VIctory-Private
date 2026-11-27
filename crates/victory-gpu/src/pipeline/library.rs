@@ -208,6 +208,7 @@ fn tag(blob: &[u8]) -> String {
     let limit = victory_shader::emit::loop_limit().to_le_bytes();
     let total = victory_shader::emit::loop_total_limit().to_le_bytes();
     let thread_limits = [u8::from(crate::shader_cache::thread_limits())];
+    let emulated_waves = [crate::waves::emulated()];
     let translator = victory_shader::SOURCE_HASH.as_bytes();
     let mut h = blake3::Hasher::new();
     for part in [
@@ -217,6 +218,7 @@ fn tag(blob: &[u8]) -> String {
         &limit,
         &total,
         &thread_limits,
+        &emulated_waves,
         include_bytes!("host.rs"),
         include_bytes!("library.rs"),
     ] {

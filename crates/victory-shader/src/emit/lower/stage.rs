@@ -240,7 +240,8 @@ impl<'a> Lower<'a> {
     /// plus the lane index. (A bijection while each host wave holds a
     /// wave-aligned run of flat ids, as the console's waves do.)
     fn thread_id(&mut self, c: u8) -> Val {
-        if !self.console_lanes {
+        // (An emulated wave's lanes are the group's threads as they are.)
+        if !self.console_lanes || self.emu.is_some() {
             return self.compute_id("threadIdInGroup.i32", 95, c);
         }
         let [x, y, _] = self.s.threads.expect("compute");
@@ -296,6 +297,9 @@ impl<'a> Lower<'a> {
     /// * one with `s_barrier`: a thread that has returned never reaches the
     ///   host's group barrier, and what the others then wait for is not
     ///   defined;
+    /// * an emulated wave (`emulated`), for the same reason: its lanes meet
+    ///   at group barriers of the translation's own, and every thread of
+    ///   the group is a lane the others exchange with;
     /// * one that depends on the lane layout in a group of more than one
     ///   dimension: how the console packs a partial two-dimensional group
     ///   into waves is not known here;
@@ -319,7 +323,7 @@ impl<'a> Lower<'a> {
         let size = cs.threads;
         let barrier = self.x.p.blocks.iter().flat_map(|b| &b.insts).any(|i| i.name() == "s_barrier");
         let flat_lanes = self.console_lanes && size[1..] != [1, 1];
-        if size.iter().all(|&n| n <= 1) || barrier || flat_lanes {
+        if size.iter().all(|&n| n <= 1) || barrier || flat_lanes || self.emu.is_some() {
             return Vec::new();
         }
         let layout = self.x.native.layout.iter();

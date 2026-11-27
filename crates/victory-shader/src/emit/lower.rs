@@ -32,6 +32,7 @@ mod bvh;
 mod crosslane;
 mod descriptors;
 mod ds;
+mod emulated;
 mod flow;
 mod half;
 mod image;
@@ -103,6 +104,71 @@ pub(crate) struct Lowered {
     /// [`LOOP_TOTAL_LIMIT`] leaves the program, if any block can stop one.
     #[cfg(test)]
     pub limit_stop: Option<usize>,
+    /// The wave size the program declares (`WaveSize`), if any.
+    pub wave_size: Option<u32>,
+    /// Why a compute program's lanes must be the console's: bits of
+    /// [`wave_need`]; 0 if they need not be.
+    pub wave_needs: u32,
+    /// The thread group carries the console's wave itself (`emulated`).
+    pub emulated: bool,
+    /// The meetings of an emulated wave's lanes that were written.
+    #[cfg(test)]
+    pub meetings: u32,
+}
+
+/// Why a compute program depends on the console's wave: its size and which
+/// thread is which lane. A program with any of these declares the console's
+/// wave size, unless its thread group carries the wave itself (`emulated`).
+pub mod wave_need {
+    /// `ds_swizzle_b32`.
+    pub const SWIZZLE: u32 = 1;
+    /// A lane permute through shared-memory addresses (`ds_bpermute_b32`).
+    pub const PERMUTE: u32 = 1 << 1;
+    /// The count of a mask's lanes below each lane (`v_mbcnt`).
+    pub const COUNT_BELOW: u32 = 1 << 2;
+    /// A read of one lane by number (`v_readlane_b32`), other than
+    /// [`RESTORED`].
+    pub const LANE_READ: u32 = 1 << 3;
+    /// A read of a neighbouring lane (DPP).
+    pub const DPP: u32 = 1 << 4;
+    /// A lane mask read as a number.
+    pub const MASK_READ: u32 = 1 << 5;
+    /// A lane mask made from a number or a constant lane set.
+    pub const MASK_MADE: u32 = 1 << 6;
+    /// Shared memory in a thread group of one wave, which the console
+    /// compiler orders without barriers.
+    pub const SHARED_MEMORY: u32 = 1 << 7;
+    /// Cross-lane steps of a whole-wave section only (a wave reduction or
+    /// prefix the console compiler expanded), which are lowered to the
+    /// host's wave operations.
+    pub const SECTION: u32 = 1 << 8;
+    /// A write of one lane by number (`v_writelane_b32`): the lane named
+    /// takes a scalar. Like a mask made from a number, it needs a lane's
+    /// own number and nothing of the other lanes.
+    pub const LANE_WRITE: u32 = 1 << 9;
+    /// A `v_readlane_b32` that gives back the scalar a `v_writelane_b32`
+    /// put in that lane (`Structured::restored`: a scalar the console
+    /// compiler parked in a vector register). It is lowered as that
+    /// scalar and reads no lane; it is named apart so that a program whose
+    /// lane reads are all of this kind can be told from one that reads
+    /// other lanes. The write that parked the scalar is a [`LANE_WRITE`],
+    /// so a program with this reason always has that one too.
+    pub const RESTORED: u32 = 1 << 10;
+
+    /// Each bit's name, in bit order.
+    pub const NAMES: [&str; 11] = [
+        "swizzle",
+        "lane permute",
+        "count below a lane",
+        "lane read",
+        "DPP",
+        "mask read as a number",
+        "mask made from a number",
+        "shared memory within one wave",
+        "whole-wave section",
+        "lane write",
+        "scalar read back from its lane",
+    ];
 }
 
 pub(crate) struct Parts<'a> {
@@ -163,7 +229,7 @@ pub(crate) fn lower_with(parts: &Parts, thread_limits: bool) -> Result<Lowered, 
 
 /// [`lower_with`] with the loop limits given: the tests of the counting
 /// run loops against small ones.
-fn lower_limited(parts: &Parts, limits: Limits, mut thread_limits: bool) -> Result<Lowered, ShaderError> {
+pub(crate) fn lower_limited(parts: &Parts, limits: Limits, mut thread_limits: bool) -> Result<Lowered, ShaderError> {
     let mut bad = HashMap::new();
     loop {
         match Lower::new(parts, &bad, limits).run(thread_limits) {
@@ -252,6 +318,17 @@ struct Lower<'a> {
     /// Compute code that reads other lanes: thread ids follow the host
     /// lanes, so lane n is console lane n.
     console_lanes: bool,
+    /// Why ([`wave_need`]), with the need for shared memory in one wave.
+    wave_needs: u32,
+    /// The thread group carries the console's wave itself (`emulated`): the
+    /// program is in its wave form, a thread's lane is its place in the
+    /// group, and no host wave operation is used.
+    emu: Option<emulated::Emulated>,
+    /// Why the wave form cannot be lowered, found before lowering starts.
+    emu_refused: Option<Why>,
+    /// How deep the code being written is in parts only some lanes run
+    /// ([`Lower::begin_guarded`]).
+    in_guarded: u32,
     /// Pixel: an ordered section (POPS), whose UAVs the host makes
     /// rasterizer-ordered views.
     pops: bool,
@@ -578,21 +655,48 @@ impl<'a> Lower<'a> {
         let root_memory = x.res.scalar.iter().any(|s| matches!(s.1.param, MEMORY | USER_DATA))
             || insts().any(|i| i.name().starts_with("image_bvh"));
         let mut console_lanes = false;
+        let mut wave_needs = 0;
+        let (mut emu, mut emu_refused) = (None, None);
         if let StageIo::Cs(cs) = x.native.io {
             s.threads = Some(cs.threads);
             s.lds_dwords = cs.lds_bytes() / 4;
             // Code reading other lanes needs the console's wave size and
             // lane order; so do lane masks read as numbers, and LDS shared
             // within one wave, where the console compiler leaves out barriers.
-            console_lanes = insts().any(|i| {
-                let n = i.name();
-                n.starts_with("ds_swizzle")
-                    || n.contains("permute")
-                    || n.starts_with("v_mbcnt")
-                    || matches!(n, "v_readlane_b32" | "v_writelane_b32")
-                    || matches!(&i.fields, Fields::Valu(v) if v.dpp.is_some())
-                    || reads_mask_as_data(x.st, i)
-            }) || {
+            for (b, block) in p.blocks.iter().enumerate() {
+                // Whole-wave sections' steps are named as such (found only
+                // for a block that has such an instruction).
+                let mut sections = None;
+                for (n, i) in block.insts.iter().enumerate() {
+                    let name = i.name();
+                    let need = if name.starts_with("ds_swizzle") {
+                        wave_need::SWIZZLE
+                    } else if name.contains("permute") {
+                        wave_need::PERMUTE
+                    } else if name.starts_with("v_mbcnt") {
+                        wave_need::COUNT_BELOW
+                    } else if name == "v_readlane_b32" {
+                        match i.writes.first() {
+                            Some(w) if x.st.restored.contains_key(&w.1) => wave_need::RESTORED,
+                            _ => wave_need::LANE_READ,
+                        }
+                    } else if name == "v_writelane_b32" {
+                        wave_need::LANE_WRITE
+                    } else if matches!(&i.fields, Fields::Valu(v) if v.dpp.is_some()) {
+                        wave_need::DPP
+                    } else if reads_mask_as_data(x.st, i) {
+                        wave_need::MASK_READ
+                    } else {
+                        continue;
+                    };
+                    let inside = sections
+                        .get_or_insert_with(|| wave::sections(p, b))
+                        .iter()
+                        .any(|(&start, sec)| n > start && n < sec.end);
+                    wave_needs |= if inside { wave_need::SECTION } else { need };
+                }
+            }
+            {
                 // Masks held as numbers or constant lane sets: the lane
                 // tests its own bit by its console lane.
                 let whens = x.st.exits.iter().filter_map(|e| match *e {
@@ -609,18 +713,38 @@ impl<'a> Lower<'a> {
                         .collect();
                 all.sort_unstable();
                 all.dedup();
-                all.into_iter().any(|g| {
+                if all.into_iter().any(|g| {
                     x.st.bools
                         .support(g)
                         .iter()
                         .any(|a| matches!(a, Atom::Opaque(_) | Atom::Constant(_)))
-                })
-            };
+                }) {
+                    wave_needs |= wave_need::MASK_MADE;
+                }
+            }
+            console_lanes = wave_needs != 0;
             let wave = if x.native.wave64 { 64 } else { 32 };
-            let one_wave = cs.threads.iter().product::<u32>() <= wave;
-            if console_lanes || one_wave && s.lds_dwords > 0 {
+            let one_wave = cs.threads.iter().fold(1u32, |count, &n| count.saturating_mul(n)) <= wave;
+            if one_wave && s.lds_dwords > 0 {
+                wave_needs |= wave_need::SHARED_MEMORY;
+            }
+            if x.st.waves {
+                // The group is the wave: nothing is asked of the host's.
+                match emulated::Emulated::plan(x, s.lds_dwords) {
+                    Ok(e) => {
+                        s.lds_extra = emulated::dwords(e.wave);
+                        emu = Some(e);
+                        // A lane tests its own bit of a mask held as a
+                        // number by its place in the group.
+                        console_lanes = true;
+                    }
+                    Err(why) => emu_refused = Some(why),
+                }
+            } else if wave_needs != 0 {
                 s.wave_size = Some(wave);
             }
+        } else if x.st.waves {
+            emu_refused = Some(emulated::NOT_COMPUTE);
         }
         let mut no_barrier = HashSet::new();
         if let StageIo::Ms(ms) = &x.native.io {
@@ -709,6 +833,10 @@ impl<'a> Lower<'a> {
             heap: [false; 2],
             src0: None,
             console_lanes,
+            wave_needs,
+            emu,
+            emu_refused,
+            in_guarded: 0,
             pops: matches!(x.native.io, StageIo::Ps { db_shader_control, .. }
                 if db_shader_control & 1 << 16 != 0),
             root_memory,
@@ -768,7 +896,13 @@ impl<'a> Lower<'a> {
         // its back edges (`LOOP_TOTAL_LIMIT`).
         self.count_loops(&order);
         self.cur = self.s.entry;
-        self.find_sections();
+        if let Some(why) = self.emu_refused {
+            return Err(unsupported(0, why));
+        }
+        // An emulated wave runs a whole-wave section's steps as they are.
+        if self.emu.is_none() {
+            self.find_sections();
+        }
         self.inputs()?;
         if let Some(mesh) = self.s.mesh {
             self.mesh_prologue(mesh).map_err(|w| unsupported(0, w))?;
@@ -878,6 +1012,11 @@ impl<'a> Lower<'a> {
             limit_stop: self.abort.and_then(|a| flow.at(a)),
             #[cfg(test)]
             flow,
+            wave_size: self.s.wave_size,
+            wave_needs: self.wave_needs,
+            emulated: self.emu.is_some(),
+            #[cfg(test)]
+            meetings: self.emu.as_ref().map_or(0, |e| e.meetings),
             dxil: self.s.finish(),
             user_data,
             samplers: self.samplers,
@@ -921,6 +1060,17 @@ impl<'a> Lower<'a> {
                 && !(name.starts_with("ds_read")
                     || name.starts_with("ds_swizzle")
                     || name.contains("permute"));
+        // An emulated wave's lanes meet where memory must be as the
+        // console's wave left it (`emulated`, "Memory order").
+        if self.emu_meets_before(b, i) {
+            // Every lane must get there: an instruction's own guard is
+            // closed by the time the next one starts, unless its lowering
+            // stopped half way.
+            if self.in_guarded > 0 {
+                return Err(unsupported(offset, emulated::SOME_LANES));
+            }
+            self.emu_meet(self.cur);
+        }
         let r = match &inst.fields {
             Fields::Sop { .. } => self.sop(inst),
             Fields::Sopp { .. } if name == "s_barrier" && self.no_barrier.contains(&b) => Ok(()),
@@ -936,7 +1086,7 @@ impl<'a> Lower<'a> {
                 Ok(())
             }
             Fields::Sopp { .. } => Ok(()),
-            Fields::Smem { .. } => self.smem(inst, (b, i)),
+            Fields::Smem { .. } => self.smem(inst, (b, i)).and_then(|()| self.emu_shared(inst, (b, i))),
             Fields::Valu(_) if name.starts_with("v_interp_") => self.interp(inst, (b, i)),
             Fields::Valu(_) => self.valu(inst, b, i),
             Fields::Vintrp { .. } => self.interp(inst, (b, i)),

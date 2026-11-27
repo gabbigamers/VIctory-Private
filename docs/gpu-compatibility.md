@@ -90,7 +90,7 @@ when the device is made; `victory gpu-info` prints it without a title.
 | Mesh shaders | the world does not run | `D3D12_OPTIONS7` |
 | Resource binding tier 3 | the world does not run | `D3D12_OPTIONS` |
 | 32-lane waves | programs that declare them are left out | `D3D12_OPTIONS1` |
-| 64-lane waves | programs that declare them are left out (G2) | `D3D12_OPTIONS1` |
+| 64-lane waves | programs that declare them are left out (G2), or carry the wave themselves where asked to ("The console's wave on any host" below) | `D3D12_OPTIONS1` |
 | A view heap of 2^21 slots | slots past the host's limit are not there (G3) | found by trying |
 | Fused multiply-add | the console's fused results can differ in kind (G4) | measured by running one |
 | 64-bit atomics on heap resources | translated 64-bit image atomics | `D3D12_OPTIONS9`, `D3D12_OPTIONS11` |
@@ -108,7 +108,7 @@ Read in the code on 2026-11-26. "Open" means the rule above is not met yet.
 | # | Dependency | Where | State |
 |---|---|---|---|
 | G1 | Capability checks are scattered single queries; the wave lane count, binding tier and ray-tracing tier were never asked outside tests | `host.rs` (`mesh_shaders`, `heap_atomics64`, depth bounds), `sampler.rs`, `emit/host.rs` | **Started**: one record, assessed and logged (`caps.rs`, `Host::caps`). The older queries still stand beside it and move into it as they are touched |
-| G2 | A compute program that depends on the lane layout declares the console's wave size (32 or 64) and is lowered so that host lane *n* is console lane *n*. A host whose waves cannot be that wide makes no pipeline for it | `emit/lower.rs` (where `wave_size` is set), `emit/lower/crosslane.rs`, `emit/shader.rs` (the `WaveSize` property) | **Open.** The lowering must carry the guest's lanes itself where the host's waves do not match (rule 3), chosen from the device's lane range |
+| G2 | A compute program that depends on the lane layout declares the console's wave size (32 or 64) and is lowered so that host lane *n* is console lane *n*. A host whose waves cannot be that wide makes no pipeline for it | `emit/lower.rs` (where `wave_size` is set), `emit/lower/crosslane.rs`, `emit/shader.rs` (the `WaveSize` property) | **Started, behind a switch.** Counted per program and reason in every build. A second lowering carries the console's wave in the thread group itself, chosen from the device's lane range (`VICTORY_WAVE_EMULATION`, off by default): covered by host tests against a model of the console's wave, type-checked for Windows, not yet run on a GPU. See "The console's wave on any host" |
 | G3 | Translated shaders clamp heap indices below 2^21 and read a null buffer view two slots below that; both numbers are compiled in. A host that gives a smaller heap gets a fallback the code itself marks as a shortcut, with the 1,000,000-slot size written as a constant | `emit/shader.rs` (`HEAP_VIEWS`, `NULL_BUFFER_VIEW`), `descriptor/host.rs` (`HostHeap::new`, `PORTABLE_VIEWS`) | **Open.** The heap layout becomes a function of the size the device gives, and the shaders' bound and null slot follow it |
 | G4 | The console's fused multiply-adds are emitted as the host's multiply-add, which the driver may or may not fuse. Measured at device creation and warned about; a test marked as a known defect documents the difference | `emit/lower/arith.rs` (`fmad`), `emit/host.rs` (`fuses_fmad`), `emit/semantics_tests.rs` | **Open.** An exact lowering where the device does not fuse |
 | G5 | Float behaviour the lowering leaves to the host (denormals in plain arithmetic, float-to-integer conversion of NaN and out-of-range values, integer data through float-typed views) is pinned only by the shader probes; code comments record single NVIDIA observations, but no full probe run on an NVIDIA card is recorded | `emit/lower/` (`arith.rs`, `valu.rs`, `buffer.rs`), `emit/semantics_tests.rs`, `emit/valu_tests.rs` | **Open.** The probes run on NVIDIA (C2 in progress.md); every probe that differs gets an explicit lowering |
@@ -173,6 +173,141 @@ as met, degraded, missing or unknown. Its text and the test summary go into
 the table above with the commit and date. A title run adds a ledger row in
 progress.md.
 
+## The console's wave on any host (G2)
+
+The console runs a compute wave of 64 lanes (some programs: 32). Its
+machine code has one program counter for the wave: branches test the whole
+wave (EXEC or VCC empty, a scalar flag), EXEC says which lanes an
+instruction touches, and some instructions move data between lanes. A host
+wave may have another size, and nothing in Direct3D says which threads of a
+group a host wave holds.
+
+### What depends on the wave
+
+Read in `emit/lower.rs` (where a program's reasons are collected,
+`wave_need`), `emit/lower/crosslane.rs`, `emit/lower/masks.rs`,
+`emit/wave.rs` and `structure.rs`.
+
+| Class | Operations | Lowered today as |
+|---|---|---|
+| 1. Independent of the wave | everything a lane does with its own values; a branch on a wave-wide test of a mask, taken as the lane's own bit (`structure.rs`: compiled code only skips what lanes outside the mask would not change); masks joined at a block; a waterfall loop's first-lane read of a descriptor (each lane's own); a `v_readlane` that gives back the scalar a `v_writelane` parked in that lane (it is that scalar, in every stage; the write that parked it is class 2a in a compute program); in vertex, pixel and mesh programs, a mask's count, first lane, count below a lane and equality over the *host's* wave | per lane: no wave operation that depends on the size, no wave size |
+| 2. Exact on any wave with a transformation that needs no exchange | **(a) the lane's own number only:** a mask made from a number or a constant lane set (the lane tests its own bit), `v_writelane` (a scalar parked in a lane included: in a compute program the write is lowered by the lane's number in the host's wave, so a program that only parks and reads back scalars still declares the console's wave size; such programs are counted apart, reasons "lane write" and "scalar read back from its lane" with no "lane read"), `v_mbcnt` of such a mask. Transformation: the lane number from the thread's place in its group instead of from the host wave. **(b) confined to a part of the wave:** DPP (rows of 16 lanes), `ds_swizzle` and `ds_bpermute` (halves of 32), `v_permlanex16` (a half). Transformation: host waves of a size the part divides, each host wave a run of console lanes; a 64-lane program then runs in 32-lane waves | host waves of the console's size (class 3's lowering): neither transformation is implemented as its own form. For a group of one wave the emulated wave covers both, at the price of exchanges the operations themselves would not need |
+| 3. Exact only with the whole console wave | a mask read as a number (`s_bcnt1`, `s_ff1`, scalar arithmetic and compares, stored or pushed); `v_readlane` and `v_readfirstlane` across halves; `v_mbcnt` of a ballot; the steps of a whole-wave section where its value is used as the wave's; shared memory the console compiler orders without barriers in a group of one wave | **host waves** of exactly the console's size (`WaveSize` declared, host lane *n* is console lane *n*): no pipeline on a host without that size. Or the **emulated wave** (below), for a thread group of exactly one console wave |
+| 4. Not known | whether the title's wave reductions and prefixes are only used in ways that do not care how threads are divided into waves (a count that reserves slots and each lane's place in them); such a program would be class 1 over host waves of any size. How many programs are in thread groups of several console waves, which the emulated wave does not take | host waves, as class 3. The counts a run reports ("What a run reports") size both questions |
+
+Class 3's host-wave lowering also assumes that a host wave holds a run of
+consecutive threads of the group in order, which Direct3D does not promise
+(`emit/lower/stage.rs`, `thread_id`). The emulated wave does not.
+
+### The emulated wave
+
+`structure::waves` gives the program as the console's wave runs it: every
+thread runs every block the wave runs, a branch on a mask is one decision
+for all of them, EXEC is a thread's own bit and guards each vector
+instruction. Nothing is assumed about what compiled code skips.
+`emit/lower/emulated.rs` then lowers cross-lane operations as exchanges
+through group-shared memory: a thread's lane is its flattened id in the
+group; a lane sets or clears its own bit of a mask with two atomics, or
+puts its value in its own dword; all threads meet at a group barrier; each
+reads what it needs; they meet again before the memory is reused. No wave
+operation and no wave size are left in the module, so it does not matter
+how the host packs threads into waves.
+
+Two things the console's wave gives for free are kept explicitly. Memory
+order: on the console an instruction's access is done in every lane before
+any lane's next one, so the threads meet before a memory access whenever a
+lane may have written that kind of memory since they last met, and before
+a write whenever a lane may have read it since (two kinds: the program's
+shared memory, and everything reached through views or addresses, taken
+as one). One load for the wave: a scalar load from memory is lane 0's load
+in every thread (on the console it happens once; threads that read
+different values could take different branches and never meet again).
+
+Not kept: which of two lanes that write the same address *in the same
+instruction* stays. The console's order there is not modelled; the tests
+have no such program.
+
+Refused, and then translated the first way with the reason kept
+(`HostShader::wave`): a thread group of several console waves or of less
+than one; `v_permlanex16` under a lane mask; an exchange asked for inside
+code only some lanes run; a scalar load of more than sixteen dwords from
+memory; an instruction the lowering refuses in either form.
+
+A program the per-lane form refuses altogether (its structure or its
+lowering: a mask pushed as two numbers and joined with numbers at a loop
+header is one case the tests have) has no first way. Where the switch asks
+for its wave size, it is given its emulated wave if that can be made, and
+the reason there is no other form is kept; otherwise the translation fails
+as it does without the switch.
+
+**State.** Implemented. Covered by host tests
+(`emit/emulated_tests.rs`): hand-assembled programs for one wave of 64 or
+32 lanes (masks read as numbers and made from numbers, every kind of branch
+on a mask, a loop the wave leaves together, first-lane reads, lanes read
+and written by number, counts below a lane, DPP patterns under full and
+partial EXEC, a wave reduction step by step, a scalar load, a small packet
+walk that pushes and pops masks; and memory order in shared memory and in
+a buffer: write then read, read then write, write then write, and round a
+loop), each run on a model of the console's wave written from the
+instruction set and as the emulated wave under ten thread schedules (host
+waves of 4 to 128 lanes, threads one at a time, arbitrary interleavings),
+with every lane's stores and what the buffer holds in the end compared;
+the runner refuses a barrier some thread never reaches and a read of
+shared memory bits nothing wrote. The same tests show the walk, which has
+no per-lane form, translated through the translation's own entry when the
+switch asks. "Exact" above means agreement on these programs; it is not a
+proof for programs unlike them. Type-checked for Windows. **Not run on any
+GPU.** Microsoft's validator outside Windows (`scripts/validate-dxil.sh`,
+the `dxv` of a DirectXShaderCompiler release) accepts every container
+these tests emit: well-formed DXIL by its rules, which is not a driver
+compiling or running them; `dxil.dll` on Windows has not seen them. Its
+cost is unknown: two barriers for every exchange (a scalar load from
+memory is one), and one before a memory access that follows a write or a
+write that follows a read. Drivers are untested with group barriers inside
+loops and branches, which this form has by design.
+
+The loop limits (`VICTORY_SHADER_LOOP_LIMIT`, `_TOTAL_LIMIT`) count in an
+emulated wave as in any translation. Every thread counts its own back
+edges, and all count alike because every thread takes the wave's branches,
+so a limit stops the whole wave at one back edge and no thread waits at a
+meeting for one that left (host tests: a loop and a nest against small
+limits, under the ten schedules). Thread limits
+(`VICTORY_DISPATCH_THREADS`) are not given to an emulated wave: a thread
+that left at entry would never reach the meetings. Such a program is
+translated as without them, and the host treats it as it does any program
+that cannot stop its own threads (a dispatch that fills no whole groups
+is dropped and counted, or with `=round` run whole).
+
+**Use.** `VICTORY_WAVE_EMULATION` (any build; part of the shader cache
+key): unset or `0`, off; `1` or `auto`, the wave sizes this device cannot
+run; `32`, `64` or `all`, those sizes on any device, to compare the two
+forms on a device that runs both. Off by default until it has run.
+
+### What a run reports
+
+In every build, with or without the switch:
+
+* the log, once per kind of program: `wave sizes: compute programs
+  declaring 64-lane waves, which the device does not run ...: NO HOST
+  PIPELINE ...` with the reasons, and every five seconds the count of each
+  kind when it has changed;
+* the log, once per kind: compute programs that do not translate at all,
+  by their console wave and whether their thread group is one console wave
+  (`wave sizes: compute programs of 64-lane console waves that do not
+  translate ...`). Such a program declares nothing, so it is in none of
+  the counts above; whether it depends on the wave is not known from a run;
+* the performance log: programs that declare a wave size the device runs,
+  that carry the wave themselves, that get no pipeline for their wave
+  size, and compute programs that do not translate
+  (`wave_programs_host`, `_emulated`, `_refused`, `_untranslated`); the
+  refused ones by reason (`wave_refused_*`);
+* `victory translate`: the same counts over a shader folder without a run,
+  with what the emulated form of each program comes to (made, or refused
+  and why), for the programs that declare a wave size and for the compute
+  programs with no per-lane form (listed with the per-lane form's
+  refusal), and with `--validate` and `--pipelines` whether the validator
+  and this device's driver take the emulated modules.
+
 ## Roadmap
 
 In this order where they compete; correctness items first.
@@ -181,7 +316,7 @@ In this order where they compete; correctness items first.
 |---|---|---|---|
 | G1 | architecture | `gpu-info` report from the RTX 5070 Ti; then move the remaining single queries into the record | owner's machine; then any |
 | G5 | correctness | run the shader probes on the RTX 5070 Ti and record every difference | owner's machine |
-| G2 | correctness | count the programs that declare each wave size and why (a tally in `victory translate`); then the lane-carrying lowering for hosts whose waves do not match | tally: any host; counts: owner's machine |
+| G2 | correctness | the counts from the owner's machine (`victory translate`, or a run's log); the emulated form validated and run on the card (`translate --validate --pipelines`, then a run with `VICTORY_WAVE_EMULATION=1`), compared with the host-wave form on a card that runs 64-lane waves (`VICTORY_WAVE_EMULATION=64` there); then thread groups of several waves | owner's machine; comparison: a 64-lane host |
 | G3 | correctness | the heap layout as a tested function of the device's size; then the shaders' bound and null slot from it | logic: any host; confirmation: owner's machine |
 | G4 | correctness | an exact fused multiply-add for devices that do not fuse, checked against a CPU model | any host; cost measured on the owner's machine |
 | G6 | stability | adapter choice by report, with an override | owner's machine to confirm |

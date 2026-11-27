@@ -154,10 +154,27 @@ impl Shader {
                         "shader does not translate; its pipelines' draws are dropped"
                     ),
                 }
-                // Kept with the container for the run (the map of
-                // containers only inserts): added, never released.
-                if let Ok(t) = &done {
-                    crate::account::gauge(crate::account::Owner::Shaders).add(t.host.dxil.capacity() as u64);
+                match &done {
+                    Ok(t) => {
+                        // Kept with the container for the run (the map of
+                        // containers only inserts): added, never released.
+                        // With the DXIL, the texts of what it asks of the
+                        // host's waves.
+                        let wave = &t.host.wave;
+                        let kept = t.host.dxil.capacity() + wave.refusal.capacity() + wave.per_lane.capacity();
+                        crate::account::gauge(crate::account::Owner::Shaders).add(kept as u64);
+                        // What it asks of the host's waves, counted once a
+                        // program (`crate::waves`).
+                        crate::waves::note(wave);
+                    }
+                    // A compute program that does not translate declares
+                    // nothing; it is counted by its console wave and group.
+                    Err(_) => {
+                        if let Some((lanes, threads)) = compute_group(&self.container) {
+                            let asked = crate::waves::emulated() & victory_shader::emit::emulate::bit(lanes) != 0;
+                            crate::waves::note_untranslated(lanes, threads, asked);
+                        }
+                    }
                 }
                 done.ok()
             })
@@ -219,6 +236,26 @@ fn with_resources(
     });
     let used = program.map(|p| p.used).unwrap_or_default();
     Ok(Translated { host, used, threads })
+}
+
+/// The console wave's lanes and the thread group of the compute program in
+/// `container`, if the program a translation would take is one.
+#[cfg(windows)]
+fn compute_group(container: &[u8]) -> Option<(u32, [u32; 3])> {
+    use victory_shader::native::StageIo;
+    use victory_shader::{Container, FourCC, HwStage};
+    let c = Container::parse(container).ok()?;
+    let part = c.part(FourCC::DXIL).or(c.part(FourCC::ACCC))?;
+    let program = victory_shader::native_programs(part.data).ok()?.into_iter().find(|p| {
+        matches!(
+            p.stage,
+            HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs
+        )
+    })?;
+    match program.io {
+        StageIo::Cs(cs) => Some((if program.wave64 { 64 } else { 32 }, cs.threads)),
+        _ => None,
+    }
 }
 
 #[repr(C)]

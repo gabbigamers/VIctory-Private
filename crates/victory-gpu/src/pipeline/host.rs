@@ -619,6 +619,29 @@ impl HostPipeline {
             let pso = match made {
                 Ok(pso) => pso,
                 Err(e) => {
+                    // A wave size the device cannot run is the reason the
+                    // device would give, were it asked: said here once per
+                    // size, and counted per program by `crate::waves`.
+                    let wave = stages.first().and_then(|(s, _)| s.translated()).map(|t| &t.host.wave);
+                    let unrun = |w: &&victory_shader::emit::WaveUse| {
+                        w.size != 0 && crate::waves::device_runs(w.size) == Some(false)
+                    };
+                    if let Some(wave) = wave.filter(unrun) {
+                        tracing::debug!(
+                            error = %e,
+                            ?shaders,
+                            needs = %victory_shader::emit::wave_needs_text(wave.needs),
+                            "host pipeline refused: wave size"
+                        );
+                        host.log_messages();
+                        return refuse(
+                            match wave.size {
+                                32 => "the compute program declares 32-lane waves, which the host GPU does not run",
+                                _ => "the compute program declares 64-lane waves, which the host GPU does not run",
+                            },
+                            shaders,
+                        );
+                    }
                     tracing::warn!(error = %e, ?shaders, "host pipeline refused");
                     host.log_messages();
                     return None;

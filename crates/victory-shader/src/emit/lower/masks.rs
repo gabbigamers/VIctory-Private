@@ -17,7 +17,9 @@ impl<'a> Lower<'a> {
             None => (v, false),
         };
         let &m = self.x.st.masks.get(&lo).ok_or(LANE_MASK)?;
-        if !self.x.st.active.contains(&lo) && !self.ballots.contains_key(&lo) {
+        // (An emulated wave has every lane at every block: the ballot where
+        // a mask is written is the mask, whatever lanes it holds.)
+        if self.emu.is_none() && !self.x.st.active.contains(&lo) && !self.ballots.contains_key(&lo) {
             let xy = self.mask_number(lo)?;
             self.ballots.insert(lo, xy);
         }
@@ -35,14 +37,7 @@ impl<'a> Lower<'a> {
                 }
                 let bit = self.boolean(m, at);
                 self.balloting.remove(&lo);
-                let bit = bit?;
-                let i32t = self.s.t.i32;
-                let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
-                let r = self
-                    .s
-                    .op(at, "waveActiveBallot", Attr::NoUnwind, four, 116, &[bit]);
-                self.s.flags |= flags::WAVE_OPS;
-                let xy = (self.s.m.extract(at, r, 0), self.s.m.extract(at, r, 1));
+                let xy = self.ballot(at, bit?)?;
                 self.ballots.insert(lo, xy);
                 xy
             }
@@ -243,7 +238,18 @@ impl<'a> Lower<'a> {
             // With console lanes, a mask held as a number is the console's:
             // the lane tests its own bit.
             Atom::Opaque(v) if self.console_lanes => {
-                let hi = match self.pair_high(v) {
+                // Wave64: the high dword the mask was read with, which is
+                // not always written by the instruction that wrote the low
+                // one (two 32-bit moves, two loads).
+                let high = match self.x.st.opaque_high.get(&v) {
+                    Some(&Some(h)) => Some(h),
+                    Some(None) => return Err("a lane mask's low dword read with two high dwords"),
+                    None => self.pair_high(v),
+                };
+                if high.is_none() && self.x.native.wave64 {
+                    return Err("a lane mask held as a number without its high dword");
+                }
+                let hi = match high {
                     Some(h) => Some(self.get(h)?),
                     None => None,
                 };
@@ -263,6 +269,7 @@ impl<'a> Lower<'a> {
             }
             Atom::Opaque(_) => Err("an opaque lane mask"),
             Atom::Constant(_) => Err("a constant lane mask"),
+            Atom::Wave(n) => self.emu_decision(n, at),
         }
     }
 
@@ -284,15 +291,19 @@ impl<'a> Lower<'a> {
 
     /// This lane's bit of the mask `lo`, `hi` (wave64).
     pub(super) fn lane_bit(&mut self, at: usize, lo: V, hi: Option<V>) -> V {
-        self.s.flags |= flags::WAVE_OPS;
-        let lane = self.s.op(
-            at,
-            "waveGetLaneIndex",
-            Attr::ReadOnly,
-            self.s.t.i32,
-            111,
-            &[],
-        );
+        let lane = if self.emu.is_some() {
+            self.emu_lane()
+        } else {
+            self.s.flags |= flags::WAVE_OPS;
+            self.s.op(
+                at,
+                "waveGetLaneIndex",
+                Attr::ReadOnly,
+                self.s.t.i32,
+                111,
+                &[],
+            )
+        };
         let (k31, k32, one, z) = (
             self.s.m.i32(31),
             self.s.m.i32(32),

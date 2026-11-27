@@ -118,7 +118,9 @@ does not map title DLLs; `victory run` without `--execute` does).
 instruction per machine instruction. `victory_shader::structure` then
 removes EXEC: lane masks become per-lane booleans, wave-wide mask tests
 become per-lane branches, and vector instructions keep a guard only where
-a lane can reach them with its EXEC bit clear. `victory_shader::range::build`
+a lane can reach them with its EXEC bit clear. (`structure::waves` keeps
+the wave instead: one decision per mask branch for all lanes, for the
+emulated waves of docs/gpu-compatibility.md.) `victory_shader::range::build`
 runs both, again where a bound on the index of a register-relative move
 (`v_movrel*`) is proven on the per-lane form, so the move names only the
 registers it can reach. `victory_shader::resource`

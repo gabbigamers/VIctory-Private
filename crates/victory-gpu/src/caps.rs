@@ -129,8 +129,9 @@ pub fn assess(caps: &HostCaps) -> Vec<Finding> {
             } else {
                 format!(
                     "host waves have {min} to {max} lanes: a program that declares {lanes}-lane waves gets no \
-                     host pipeline and its work is left out, until such programs are lowered without \
-                     depending on the host's wave"
+                     host pipeline and its work is left out (counted in the log as \"wave sizes\"); \
+                     VICTORY_WAVE_EMULATION=1 translates those whose thread group is one console wave to \
+                     carry the wave themselves (experimental, off by default)"
                 )
             },
         );

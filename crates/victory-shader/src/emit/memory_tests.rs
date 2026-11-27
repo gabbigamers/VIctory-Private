@@ -208,6 +208,7 @@ fn program() -> HostShader {
         heap: l.heap,
         heap_writes: l.heap_writes,
         view_marks: l.view_marks,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone()).expect("DXIL validation failed");
@@ -443,6 +444,7 @@ fn root_views_read_their_copy_and_zeros_past_it() {
         heap: l.heap,
         heap_writes: l.heap_writes,
         view_marks: l.view_marks,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone()).expect("DXIL validation failed");
@@ -578,6 +580,7 @@ fn writes_through_views_mark_their_pages() {
         heap: l.heap,
         heap_writes: l.heap_writes,
         view_marks: l.view_marks,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone()).expect("DXIL validation failed");
@@ -711,6 +714,7 @@ fn heap_direct_texture_reads_mark_their_heap_index() {
         heap: l.heap,
         heap_writes: l.heap_writes,
         view_marks: l.view_marks,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone()).expect("DXIL validation failed");
@@ -818,6 +822,7 @@ fn straddling_writes_across_256mib_and_4gib_boundaries_mark_exact_pages() {
         heap: l.heap,
         heap_writes: l.heap_writes,
         view_marks: l.view_marks,
+        wave: Default::default(),
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone())

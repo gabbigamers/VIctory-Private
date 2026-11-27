@@ -1114,7 +1114,9 @@ pub(crate) enum Arg {
     /// An integer constant's bits in its own width (`true` is 1), or a
     /// float constant's.
     Int(u64),
-    /// A global, a function, an undefined value or an aggregate.
+    /// A global variable, by its number in the module.
+    Global(u32),
+    /// A function, an undefined value or an aggregate.
     Other,
 }
 
@@ -1131,7 +1133,17 @@ pub(crate) enum FlowOp {
     Call(String, Vec<Arg>),
     /// (value, block it comes from).
     Phi(Vec<(Arg, usize)>),
-    /// Memory instructions, with what they read.
+    /// The address of an element of an array: the array's address, the
+    /// element's index.
+    Element(Arg, Arg),
+    /// The value at an address.
+    Load(Arg),
+    /// Address, value.
+    Store(Arg, Arg),
+    /// `atomicrmw`: the operation, the address, the operand; the result is
+    /// the old value.
+    Atomic(Rmw, Arg, Arg),
+    /// The other memory instructions, with what they read.
     Other(Vec<Arg>),
 }
 
@@ -1163,7 +1175,8 @@ impl Module {
                 (_, Const::Float(bits)) => Arg::Int(u64::from(bits)),
                 _ => Arg::Other,
             },
-            _ => Arg::Other,
+            V::Global(g) => Arg::Global(g),
+            V::Func(_) => Arg::Other,
         };
         let at = |b: usize| plan.pos[plan.to(b)] as usize;
         let blocks = plan
@@ -1195,6 +1208,14 @@ impl Module {
                                     .map(|&(v, b)| (arg(v), plan.pos[plan.src(b)] as usize))
                                     .collect(),
                             ),
+                            // An element of the array itself (index 0
+                            // of the pointer, then the element).
+                            Op::Gep(_, ptr, index) if index.len() == 2 => {
+                                FlowOp::Element(arg(*ptr), arg(index[1]))
+                            }
+                            Op::Load(ptr) => FlowOp::Load(arg(*ptr)),
+                            Op::Store(ptr, v) => FlowOp::Store(arg(*ptr), arg(*v)),
+                            Op::AtomicRmw(op, ptr, v) => FlowOp::Atomic(*op, arg(*ptr), arg(*v)),
                             other => {
                                 let mut read = Vec::new();
                                 for_each_operand(other, |v| read.push(arg(v)));
@@ -1359,9 +1380,13 @@ impl Flow {
                         body = true;
                         let mut read = Vec::new();
                         match op {
-                            FlowOp::Bin(_, a, b) | FlowOp::Cmp(_, _, a, b) => read.extend([*a, *b]),
+                            FlowOp::Bin(_, a, b)
+                            | FlowOp::Cmp(_, _, a, b)
+                            | FlowOp::Element(a, b)
+                            | FlowOp::Store(a, b)
+                            | FlowOp::Atomic(_, a, b) => read.extend([*a, *b]),
                             FlowOp::Select(a, b, c) => read.extend([*a, *b, *c]),
-                            FlowOp::Cast(_, _, a) | FlowOp::Extract(a, _) => read.push(*a),
+                            FlowOp::Cast(_, _, a) | FlowOp::Extract(a, _) | FlowOp::Load(a) => read.push(*a),
                             FlowOp::Call(_, args) | FlowOp::Other(args) => read.extend(args),
                             FlowOp::Phi(_) => unreachable!(),
                         }
@@ -1402,7 +1427,7 @@ impl Flow {
             match a {
                 Arg::Inst(i) => values[i as usize],
                 Arg::Int(x) => x,
-                Arg::Other => 0,
+                Arg::Global(_) | Arg::Other => 0,
             }
         }
         #[inline(always)]
@@ -1501,7 +1526,11 @@ impl Flow {
                         fields.insert(inst.id, result);
                         first
                     }
-                    FlowOp::Other(_) => return not_run("memory instruction"),
+                    FlowOp::Element(..)
+                    | FlowOp::Load(_)
+                    | FlowOp::Store(..)
+                    | FlowOp::Atomic(..)
+                    | FlowOp::Other(_) => return not_run("memory instruction"),
                     FlowOp::Phi(_) => return not_run("phi after another instruction,"),
                 };
                 values[inst.id as usize] = result;

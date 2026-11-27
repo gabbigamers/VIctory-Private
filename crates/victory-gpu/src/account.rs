@@ -242,7 +242,9 @@ pub enum Owner {
     /// the save has written it.
     PipelineSave,
     /// C3: the bytes of the shader containers kept for the run and of the
-    /// DXIL of each one translated. Not the translations' other tables or
+    /// DXIL of each one translated, with the texts of what it asks of the
+    /// host's waves; and the count of programs by wave size
+    /// (`crate::waves`, bounded). Not the translations' other tables or
     /// the map itself.
     Shaders,
     /// G11 (last here so that the log's earlier columns stay where they

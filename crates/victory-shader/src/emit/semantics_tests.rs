@@ -310,6 +310,7 @@ fn lower_program(words: &[u32]) -> Result<HostShader, String> {
         heap: lowered.heap,
         heap_writes: lowered.heap_writes,
         view_marks: lowered.view_marks,
+        wave: Default::default(),
     })
 }
 

@@ -1087,3 +1087,51 @@ Only what cannot be done from a cloud session.
     saying whether ray-traced shadows or indirect light appear; on
     Windows, `cargo test -p victory-gpu --features diagnostics
     a_dispatch_counted_in_threads`, the entry test's only device check.
+* Ray-tracing prerequisite, wave sizes (candidate cause 4: compute
+  programs that depend on the console's 64-lane wave, on hosts whose
+  waves are narrower): implemented, the counts in every run and an
+  emulated wave behind `VICTORY_WAVE_EMULATION`, off by default;
+  reviewed (8 findings, all upheld) and corrected. Tested (host
+  tests): 32 tests of the emulated wave against a separately written
+  model of the console's wave under ten thread schedules, 9 of the
+  census and the switch; Microsoft's validator accepts the containers
+  those tests emit. Type-checked for Windows only: the shader cache's
+  key and entries, the library tag, the census's call sites, the
+  pipeline's refusal text, `victory translate`'s tally. Not run on a
+  device; not hardware-validated; the barriers' cost is not measured.
+  * Evidence, mixed. Read in this repository's own code: such a
+    program declares the console's wave size, and a host that cannot
+    run it made no pipeline, with a generic warning and no count.
+    Speculative, resting on the forks alone (one line of descent): that
+    the title's trace programs are among them. The emulated form agrees
+    with the model on hand-assembled programs; no proof for others.
+  * By default translations are as before but for one fix, accepted
+    as a default: a 64-lane mask held as a number reads its high dword
+    for lanes 32 to 63, and one low dword read with two high dwords is
+    refused by name (a test against the model shows the earlier
+    reading wrong; of 86 synthetic programs 2 differ, both by this).
+    What else changes: "wave sizes" log lines; fifteen performance-log
+    columns (`wave_programs_*`, `wave_refused_*`); a warning per kind
+    of compute program that does not translate; a thread-group product
+    that saturates; the census counted in `own_shaders_mb`; every
+    shader translated again once.
+  * Behind the switch (`1`: the sizes this device cannot run; `32`,
+    `64`, `all`): a compute program whose thread group is exactly one
+    console wave carries the wave itself. Lanes exchange through
+    group-shared memory at group barriers, meet where memory order
+    needs it and share lane 0's scalar loads; a program with no
+    per-lane form is given this one where it can be made. The loop
+    limits stop such a wave whole, at one back edge, and it takes no
+    thread limits (`VICTORY_DISPATCH_THREADS`); both tested. Not done:
+    groups of several waves or of less than one.
+  * What the review found: a lane's read not kept ahead of another's
+    later write (lane 63 read 111 for 50); programs the per-lane form
+    refuses out of the switch's reach and missing from the counts;
+    view memory untested; the census's memory not accounted; "exact
+    on any host" and other claims stronger than the evidence.
+  * For the owner's machine: `victory translate --validate --pipelines
+    <shaders>` before any run with the switch; a default run, keeping
+    the "wave sizes" lines and the `wave_programs_*` columns; then
+    `VICTORY_WAVE_EMULATION=1`, watching for device removal (the forks
+    report it with barriers inside loops and branches, which this form
+    has); on a card with 64-lane waves, `=64` against unset.

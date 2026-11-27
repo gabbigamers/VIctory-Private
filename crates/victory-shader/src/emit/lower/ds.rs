@@ -2,7 +2,7 @@
 //! `ds_bpermute`.
 
 use super::{Lower, Why};
-use crate::emit::bitcode::{Attr, Bin, V, pred};
+use crate::emit::bitcode::{Bin, V, pred};
 use crate::gfx10::{Fields, Operand};
 use crate::ir::{Inst, Reg};
 
@@ -74,7 +74,7 @@ impl<'a> Lower<'a> {
                 self.s.m.bin(c, Bin::Xor, t, xor)
             };
             let use_quad = mesh_quad || self.helpers_read(quad);
-            let src_ok = self.src_lane_active(src, guard, mesh_quad);
+            let src_ok = self.src_lane_active(src, guard, mesh_quad)?;
             let mut r = if use_quad {
                 self.quad_pick(x, src)
             } else {
@@ -82,7 +82,7 @@ impl<'a> Lower<'a> {
                     Some(ok) => self.s.m.select(c, ok, src, lane),
                     None => src,
                 };
-                self.read_lane(x, safe_src)
+                self.read_lane(x, safe_src)?
             };
             if let Some(ok) = src_ok {
                 let zero = k(self, 0);
@@ -113,17 +113,9 @@ impl<'a> Lower<'a> {
             } else {
                 within_half
             };
-            let r = self.read_lane(x, lane);
+            let r = self.read_lane(x, lane)?;
             let on = guard.unwrap_or_else(|| self.s.m.bool(true));
-            let i32t = self.s.t.i32;
-            let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
-            let ballot = self
-                .s
-                .op(c, "waveActiveBallot", Attr::NoUnwind, four, 116, &[on]);
-            let (lo, hi) = (
-                self.s.m.extract(c, ballot, 0),
-                self.s.m.extract(c, ballot, 1),
-            );
+            let (lo, hi) = self.ballot(c, on)?;
             let running = self.lane_bit_of(c, lane, lo, hi);
             let z = k(self, 0);
             let r = self.s.m.select(c, running, r, z);

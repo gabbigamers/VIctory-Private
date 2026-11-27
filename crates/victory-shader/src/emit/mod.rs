@@ -2,7 +2,9 @@
 //! or mesh shader as a PC DXIL container (SM 6.6) that host D3D12 accepts.
 //! Compute shaders keep the console's thread-group size; one that depends
 //! on the lane layout (cross-lane operations) declares the console's wave
-//! size (`WaveSize`), so the host device must support it.
+//! size (`WaveSize`), so the host device must support it, unless its thread
+//! group carries the console's wave itself ("Emulated waves" below).
+//! [`HostShader::wave`] says which, and why.
 //!
 //! What the host binds for a translated shader ([`HostShader`]):
 //!
@@ -197,7 +199,8 @@
 //!   dimension, and programs that themselves read user data where the
 //!   limits would go (past what the root parameters say they hold) get no
 //!   such dwords and are translated as without the option; neither do
-//!   groups of one thread, which need none.
+//!   groups of one thread, which need none, nor emulated waves
+//!   ([`WaveUse`]), whose lanes meet at group barriers.
 //!
 //! Entry points: [`translate`] (container bytes as the title passes them
 //! at pipeline creation → [`HostShader`]), [`emit`] (the same with the
@@ -227,6 +230,8 @@ mod bvh_tests;
 mod container;
 #[cfg(all(test, windows))]
 mod crosslane_tests;
+#[cfg(test)]
+mod emulated_tests;
 #[cfg(all(test, windows))]
 mod diff_tests;
 #[cfg(all(test, windows))]
@@ -347,6 +352,83 @@ fn parse_limit(value: Option<&str>, default: u32) -> u32 {
     }
 }
 
+pub use lower::wave_need;
+
+/// The names of the reasons in `needs` ([`wave_need`]'s bits), joined by
+/// " + "; "none" for no bit.
+pub fn wave_needs_text(needs: u32) -> String {
+    let names: Vec<&str> = wave_need::NAMES
+        .iter()
+        .enumerate()
+        .filter(|&(bit, _)| needs >> bit & 1 != 0)
+        .map(|(_, &name)| name)
+        .collect();
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(" + ")
+    }
+}
+
+/// What a translated compute program asks of the host's waves.
+///
+/// # Emulated waves
+///
+/// The console runs a compute wave of 64 (or 32) lanes; a host's waves may
+/// have another size, and DXIL's wave operations work on the host's. A
+/// program that only uses each lane's own values does not care. One that
+/// reads other lanes, or reads a lane mask as a number, does
+/// ([`wave_need`]), and is translated in one of two forms:
+///
+/// * **Host waves** (the default): the program declares the console's wave
+///   size and its cross-lane operations are the host's wave operations.
+///   Exact where the host runs waves of that size and packs a thread group
+///   into them in order; a host that cannot run that size makes no pipeline.
+/// * **Emulated waves** ([`Options::emulated_waves`]): the thread group
+///   itself is the console's wave. Each thread is a lane, every thread
+///   takes the wave's branches, and what one lane learns of another goes
+///   through group-shared memory at a group barrier (`lower/emulated.rs`).
+///   No wave operation and no wave size, so nothing depends on the host's
+///   waves; the lanes' results are the console's on the programs of
+///   `emulated_tests`, against a model of the console's wave (no GPU has
+///   run one). It costs two barriers for every exchange and one where
+///   memory order needs it. Only for a thread group of exactly one console
+///   wave; a program outside what it covers is translated the first way
+///   and says why ([`WaveUse::refusal`]).
+///
+/// A program is given its emulated wave where it would otherwise declare a
+/// wave size asked for in [`Options::emulated_waves`], and also where it
+/// has no per-lane form at all (its structure or its lowering is refused)
+/// and its console wave's size is asked for: the wave form takes control
+/// flow the per-lane form does not ([`WaveUse::per_lane`] keeps the
+/// reason). Where neither form can be made, the per-lane form's refusal is
+/// the translation's.
+///
+/// The loop limits count in an emulated wave as anywhere ([`loop_limit`],
+/// [`loop_total_limit`]): each thread counts its own back edges, and since
+/// every thread takes the wave's branches the counts are the same in all
+/// of them, so a limit stops the whole wave at one back edge and no thread
+/// is left waiting at a meeting (`emulated_tests`). An emulated wave takes
+/// no thread limits ([`Options::thread_limits`]): a thread that left at
+/// entry would never reach the meetings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WaveUse {
+    /// The wave size the program declares: the host must run waves of
+    /// exactly this many lanes. 0: any wave will do.
+    pub size: u32,
+    /// Why the program's lanes must be the console's: bits of
+    /// [`wave_need`]. 0: they need not be.
+    pub needs: u32,
+    /// The thread group carries the console's wave itself.
+    pub emulated: bool,
+    /// Why not, where that was asked for and could not be done; empty
+    /// otherwise.
+    pub refusal: String,
+    /// Why the program has no per-lane form, where its emulated wave is
+    /// the only translation there is; empty otherwise.
+    pub per_lane: String,
+}
+
 /// A translated shader and what the host binds for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostShader {
@@ -393,6 +475,8 @@ pub struct HostShader {
     /// `u`[`VIEW_WRITES`] in [`MEMORY_SPACE`] (module notes, "Write
     /// marks").
     pub view_marks: bool,
+    /// What a compute program asks of the host's waves.
+    pub wave: WaveUse,
 }
 
 impl HostShader {
@@ -449,6 +533,27 @@ pub struct Options {
     /// must set each [`USER_THREAD_LIMIT`] dword of
     /// [`HostShader::user_data`] before every dispatch.
     pub thread_limits: bool,
+    /// The console wave sizes whose lane-dependent compute programs are
+    /// translated as emulated waves, and whose compute programs without a
+    /// per-lane form are given one where it can be made ([`WaveUse`]): a
+    /// set of [`emulate`]'s bits. 0, the default: none, and every
+    /// translation and refusal is as it was before the option existed.
+    pub emulated_waves: u8,
+}
+
+/// [`Options::emulated_waves`]: the console's two wave sizes.
+pub mod emulate {
+    pub const WAVE32: u8 = 1;
+    pub const WAVE64: u8 = 2;
+
+    /// The bit of a wave of `lanes` lanes; 0 for a size the console has not.
+    pub const fn bit(lanes: u32) -> u8 {
+        match lanes {
+            32 => WAVE32,
+            64 => WAVE64,
+            _ => 0,
+        }
+    }
 }
 
 /// Translates the vertex, pixel, compute or mesh program of a console
@@ -479,10 +584,40 @@ pub fn translate_with(container: &[u8], options: Options) -> Result<HostShader, 
     // Structurisation first: tracing per-lane descriptors needs it (its
     // failure is reported after the earlier stages').
     let (p, st) = crate::range::build(&native.patched_code(), native.wave64, native.vgprs)?;
-    let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
-    let io = io::raise(&p, &native)?;
-    let st = st?;
-    emit_with(&c, &native, &p, &st, &io, &res, options)
+    let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok());
+    let io = io::raise(&p, &native);
+    emit_stages(&c, &native, &p, st, io, res, options)
+}
+
+/// [`emit_with`] on the earlier stages' results, whose failures are the
+/// translation's in this order: resources, I/O, structure. A compute
+/// program whose per-lane structure is refused is given its emulated wave
+/// where `options` ask for it and it can be made ([`WaveUse`]).
+fn emit_stages(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    st: Result<structure::Structured, ShaderError>,
+    io: Result<io::Io, ShaderError>,
+    res: Result<resource::Resources, ShaderError>,
+    options: Options,
+) -> Result<HostShader, ShaderError> {
+    match (res, io, st) {
+        (Ok(res), Ok(io), Ok(st)) => emit_with(c, native, p, &st, &io, &res, options),
+        // No per-lane form (the resources were then traced without it,
+        // and may have failed for that).
+        (res, Ok(io), Err(no_form)) => {
+            if let ShaderError::Unsupported { what, .. } = no_form
+                && options.emulates(native)
+                && let Ok(mut shader) = emit_emulated(c, native, p, &io, options)
+            {
+                shader.wave.per_lane = what.into();
+                return Ok(shader);
+            }
+            Err(res.err().unwrap_or(no_form))
+        }
+        (Err(e), ..) | (_, Err(e), _) => Err(e),
+    }
 }
 
 /// Emits a program whose earlier stages already ran, without write marks.
@@ -507,85 +642,213 @@ pub fn emit_with(
     res: &resource::Resources,
     options: Options,
 ) -> Result<HostShader, ShaderError> {
-    let sig = |fourcc| -> Result<Vec<container::SigElement>, ShaderError> {
-        match c.part(fourcc) {
-            Some(part) => signature(part.data),
-            None => Ok(Vec::new()),
-        }
-    };
-    let pixel = native.stage == HwStage::Ps;
-    let mut inputs = sig(FourCC::ISG1)?;
-    let mut outputs = sig(FourCC::OSG1)?;
-    // Interpolation as DXC declares it by default; pixel inputs that are
-    // read get the mode their barycentrics say.
-    let interpolated = if pixel { &mut inputs } else { &mut outputs };
-    for e in interpolated {
-        e.interp = match (e.kind, e.comp) {
-            (3, _) => 4,
-            // Constant, as DXC declares it (the AMD compiler crashed on a
-            // front face without a mode).
-            (13, _) => 1,
-            (0 | 6 | 7, 9) => 2,
-            (0, _) => 1,
-            _ => 0,
-        };
-    }
-    // With a conservative depth output (SV_DepthLessEqual, GreaterEqual) DXIL
-    // wants the position centroid (or per sample), as DXC declares it then.
-    if pixel && outputs.iter().any(|e| matches!(e.kind, 18 | 19)) {
-        for e in inputs.iter_mut().filter(|e| e.kind == 3) {
-            e.interp = 5;
-        }
-    }
-    // Per-primitive outputs are constant. The console never exports a
-    // primitive id or cull flag a mesh shader writes (it culls with the
-    // primitive export), so those rows are left out.
-    let mut prims = sig(FourCC::PSG1)?;
-    prims.retain(|e| !matches!(e.kind, 10 | 30));
-    for e in &mut prims {
-        e.interp = 1;
-    }
-    // A mesh group's id arrives multiplied by max(threads, vertices,
-    // primitives) (the code divides by that); the thread count is in PSV0
-    // from runtime info version 2 on.
-    // shortcut: older containers fall back to the group's lane count, right
-    // when the HLSL group fills its waves (Grand Theft Auto VI's do).
-    let mesh_stride = match &native.io {
-        crate::native::StageIo::Ms(ms) => {
-            let psv = c.part(FourCC::PSV0).map(|p| p.data);
-            let threads = psv
-                .filter(|d| crate::dxbc::u32_at(d, 0).is_ok_and(|n| n >= 48))
-                .and_then(|d| crate::dxbc::u32_at(d, 4 + 36).ok());
-            threads.map_or(ms.threads, |t| {
-                t.max(ms.max_vertices).max(ms.max_primitives)
-            })
-        }
-        _ => 0,
-    };
-    let parts = |st, res| lower::Parts {
-        native,
-        p,
-        st,
-        io,
-        res,
-        inputs: inputs.clone(),
-        outputs: outputs.clone(),
-        prims: prims.clone(),
-        mesh_stride,
-        view_marks: options.view_marks,
-    };
-    let l = match lower::lower_with(&parts(st, res), options.thread_limits) {
+    let sigs = Signatures::of(c, native)?;
+    let parts = |st, res| sigs.parts(native, p, st, io, res, options);
+    let per_lane = match lower::lower_with(&parts(st, res), options.thread_limits) {
         // Discarded lanes kept on as helpers can read what no surviving
         // lane does (a register only killed lanes skipped writing); such a
         // program kills them as the console does (`structure::killing`).
         Err(_) if !st.discards.is_empty() => {
             let st = structure::killing(p)?;
             let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
-            lower::lower_with(&parts(&st, &res), options.thread_limits)?
+            lower::lower_with(&parts(&st, &res), options.thread_limits)
         }
-        l => l?,
+        l => l,
     };
-    Ok(HostShader {
+    let mut l = match per_lane {
+        Ok(l) => l,
+        // No per-lane form: the wave form alone, where the caller wants
+        // the console's wave of this size carried by the program.
+        Err(ShaderError::Unsupported { offset, what }) if options.emulates(native) => {
+            return match sigs.emulated(native, p, io, options) {
+                Ok(e) => {
+                    let wave = WaveUse {
+                        needs: e.wave_needs,
+                        emulated: true,
+                        per_lane: what.into(),
+                        ..WaveUse::default()
+                    };
+                    Ok(host_shader(native, e, wave))
+                }
+                Err(_) => Err(ShaderError::Unsupported { offset, what }),
+            };
+        }
+        Err(e) => return Err(e),
+    };
+    let mut wave = WaveUse {
+        size: l.wave_size.unwrap_or(0),
+        needs: l.wave_needs,
+        ..WaveUse::default()
+    };
+    // A program that would ask the host for the console's wave, where the
+    // caller wants such programs to carry the wave themselves: its wave
+    // form, or the form above with the reason there is no other.
+    if wave.size != 0 && options.emulated_waves & emulate::bit(wave.size) != 0 {
+        match sigs.emulated(native, p, io, options) {
+            Ok(e) => {
+                l = e;
+                wave.size = 0;
+                wave.emulated = true;
+            }
+            Err(ShaderError::Unsupported { what, .. }) => wave.refusal = what.into(),
+            Err(e) => wave.refusal = e.to_string(),
+        }
+    }
+    Ok(host_shader(native, l, wave))
+}
+
+/// The emulated wave of a compute program alone ([`WaveUse`]), whatever
+/// wave sizes `options` name and whether or not the program has a per-lane
+/// form: for a caller that reports what each form comes to, and for a
+/// program whose per-lane structure is refused. The refusal is the wave
+/// form's own.
+pub fn emit_emulated(
+    c: &Container,
+    native: &NativeProgram,
+    p: &ir::Program,
+    io: &io::Io,
+    options: Options,
+) -> Result<HostShader, ShaderError> {
+    let l = Signatures::of(c, native)?.emulated(native, p, io, options)?;
+    let wave = WaveUse {
+        needs: l.wave_needs,
+        emulated: true,
+        ..WaveUse::default()
+    };
+    Ok(host_shader(native, l, wave))
+}
+
+impl Options {
+    /// Whether these options ask for `native`'s console wave to be carried
+    /// by the program: a compute program whose wave size is among
+    /// [`Options::emulated_waves`].
+    fn emulates(&self, native: &NativeProgram) -> bool {
+        let lanes = if native.wave64 { 64 } else { 32 };
+        native.stage == HwStage::Cs && self.emulated_waves & emulate::bit(lanes) != 0
+    }
+}
+
+/// A container's signature parts as the lowering takes them.
+struct Signatures {
+    inputs: Vec<container::SigElement>,
+    outputs: Vec<container::SigElement>,
+    prims: Vec<container::SigElement>,
+    mesh_stride: u32,
+}
+
+impl Signatures {
+    fn of(c: &Container, native: &NativeProgram) -> Result<Signatures, ShaderError> {
+        let sig = |fourcc| -> Result<Vec<container::SigElement>, ShaderError> {
+            match c.part(fourcc) {
+                Some(part) => signature(part.data),
+                None => Ok(Vec::new()),
+            }
+        };
+        let pixel = native.stage == HwStage::Ps;
+        let mut inputs = sig(FourCC::ISG1)?;
+        let mut outputs = sig(FourCC::OSG1)?;
+        // Interpolation as DXC declares it by default; pixel inputs that are
+        // read get the mode their barycentrics say.
+        let interpolated = if pixel { &mut inputs } else { &mut outputs };
+        for e in interpolated {
+            e.interp = match (e.kind, e.comp) {
+                (3, _) => 4,
+                // Constant, as DXC declares it (the AMD compiler crashed on a
+                // front face without a mode).
+                (13, _) => 1,
+                (0 | 6 | 7, 9) => 2,
+                (0, _) => 1,
+                _ => 0,
+            };
+        }
+        // With a conservative depth output (SV_DepthLessEqual, GreaterEqual) DXIL
+        // wants the position centroid (or per sample), as DXC declares it then.
+        if pixel && outputs.iter().any(|e| matches!(e.kind, 18 | 19)) {
+            for e in inputs.iter_mut().filter(|e| e.kind == 3) {
+                e.interp = 5;
+            }
+        }
+        // Per-primitive outputs are constant. The console never exports a
+        // primitive id or cull flag a mesh shader writes (it culls with the
+        // primitive export), so those rows are left out.
+        let mut prims = sig(FourCC::PSG1)?;
+        prims.retain(|e| !matches!(e.kind, 10 | 30));
+        for e in &mut prims {
+            e.interp = 1;
+        }
+        // A mesh group's id arrives multiplied by max(threads, vertices,
+        // primitives) (the code divides by that); the thread count is in PSV0
+        // from runtime info version 2 on.
+        // shortcut: older containers fall back to the group's lane count, right
+        // when the HLSL group fills its waves (Grand Theft Auto VI's do).
+        let mesh_stride = match &native.io {
+            crate::native::StageIo::Ms(ms) => {
+                let psv = c.part(FourCC::PSV0).map(|p| p.data);
+                let threads = psv
+                    .filter(|d| crate::dxbc::u32_at(d, 0).is_ok_and(|n| n >= 48))
+                    .and_then(|d| crate::dxbc::u32_at(d, 4 + 36).ok());
+                threads.map_or(ms.threads, |t| {
+                    t.max(ms.max_vertices).max(ms.max_primitives)
+                })
+            }
+            _ => 0,
+        };
+        Ok(Signatures {
+            inputs,
+            outputs,
+            prims,
+            mesh_stride,
+        })
+    }
+
+    /// What the lowering of one form of the program takes.
+    fn parts<'a>(
+        &self,
+        native: &'a NativeProgram,
+        p: &'a ir::Program,
+        st: &'a structure::Structured,
+        io: &'a io::Io,
+        res: &'a resource::Resources,
+        options: Options,
+    ) -> lower::Parts<'a> {
+        lower::Parts {
+            native,
+            p,
+            st,
+            io,
+            res,
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            prims: self.prims.clone(),
+            mesh_stride: self.mesh_stride,
+            view_marks: options.view_marks,
+        }
+    }
+
+    /// The program lowered in its wave form (`structure::waves`), with
+    /// its resources traced on that form.
+    fn emulated(
+        &self,
+        native: &NativeProgram,
+        p: &ir::Program,
+        io: &io::Io,
+        options: Options,
+    ) -> Result<lower::Lowered, ShaderError> {
+        let st = structure::waves(p)?;
+        let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
+        // (With thread limits asked for too, the wave form takes none: a
+        // thread that left at entry would never reach the lanes' meetings.
+        // `Lower::limit_threads` leaves such a program as it is.)
+        let parts = self.parts(native, p, &st, io, &res, options);
+        let l = lower::lower_with(&parts, options.thread_limits)?;
+        debug_assert!(l.emulated && l.wave_size.is_none());
+        Ok(l)
+    }
+}
+
+/// A lowered program as its caller binds it.
+fn host_shader(native: &NativeProgram, l: lower::Lowered, wave: WaveUse) -> HostShader {
+    HostShader {
         stage: native.stage,
         dxil: l.dxil,
         user_data: l.user_data,
@@ -611,7 +874,8 @@ pub fn emit_with(
         heap: l.heap,
         heap_writes: l.heap_writes,
         view_marks: l.view_marks,
-    })
+        wave,
+    }
 }
 
 /// The rows of an `ISG1`/`OSG1` part.
@@ -1154,6 +1418,7 @@ mod tests {
             heap: false,
             heap_writes: false,
             view_marks: false,
+            wave: Default::default(),
         };
         let file = |var: &str, stage| {
             std::env::var(var).ok().map(|p| super::HostShader {
@@ -1171,6 +1436,7 @@ mod tests {
                 heap: false,
                 heap_writes: false,
                 view_marks: false,
+                wave: Default::default(),
             })
         };
         let ps = file("VICTORY_REF_PS", crate::HwStage::Ps).unwrap_or(ps);

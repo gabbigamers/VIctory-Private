@@ -296,7 +296,7 @@ first run with the log is also the first check of these figures.
 | `own_list_buffers_mb` | G7 | scratch, upload, readback, argument and budget buffers of host lists | command allocators and lists |
 | `own_pipeline_library_mb` | C1 | the pipeline library's bytes held for the library | |
 | `own_pipeline_save_mb` | C2 | the buffer a save serialises into, while it lives | |
-| `own_shaders_mb` | C3 | container and DXIL bytes kept in the shader map | the translations' other tables |
+| `own_shaders_mb` | C3 | container and DXIL bytes kept in the shader map; with each translation, the texts of what it asks of the host's waves; the count of programs by wave size and reason (`waves.rs`: at most 64 kinds, a few kilobytes, kept for the process) | the translations' other tables |
 | `own_demand_pages_mb` | G11 | whole 4 MiB buffers of pages held on demand, from a buffer's first copy until its last copy is gone | the maps and counters beside them (process heap, bounded: see the case below) |
 | `own_structure_slots` | G12 | host view heap slots that hold a view of a ray-tracing structure, as far as they are followed (a count) | slots past 2^14 a heap; the fixed tables of what was logged (static, 400 bytes) |
 | `own_rt_capture_mb` | R1 | the capture registry's entries and the addresses structures were made at; 0 unless `VICTORY_RT_CAPTURE` is on | the registry's own map nodes; a description while it is read |

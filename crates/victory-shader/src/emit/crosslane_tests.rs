@@ -429,6 +429,7 @@ fn build_wave32_cs(pattern: MaskPattern, div: Divergence, op_words: &[u32]) -> H
         heap: lowered.heap,
         heap_writes: lowered.heap_writes,
         view_marks: lowered.view_marks,
+        wave: Default::default(),
     };
 
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {

@@ -346,6 +346,7 @@ impl<'a> Lower<'a> {
         self.s.m.terminate(self.cur, Term::CondBr(g, then, join));
         let head = self.cur;
         self.cur = then;
+        self.in_guarded += 1;
         Some((head, join))
     }
 
@@ -357,6 +358,7 @@ impl<'a> Lower<'a> {
         let then = self.cur;
         self.s.m.terminate(then, Term::Br(join));
         self.cur = join;
+        self.in_guarded -= 1;
         values
             .iter()
             .map(|&(inside, outside)| {

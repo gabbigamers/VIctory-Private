@@ -157,6 +157,9 @@ pub(crate) struct Shader {
     pub wave_size: Option<u32>,
     /// Thread-group shared memory, in dwords.
     pub lds_dwords: u32,
+    /// Dwords of the translation's own after the program's (`lower`'s
+    /// emulated waves): set before the first [`Shader::lds`].
+    pub lds_extra: u32,
     lds: Option<V>,
     main: V,
     pub entry: usize,
@@ -219,19 +222,20 @@ impl Shader {
             threads: None,
             wave_size: None,
             lds_dwords: 0,
+            lds_extra: 0,
             lds: None,
             main,
             entry,
         }
     }
 
-    /// The thread-group shared memory: `[lds_dwords x i32]` in address
-    /// space 3.
+    /// The thread-group shared memory: `[lds_dwords + lds_extra x i32]` in
+    /// address space 3.
     pub fn lds(&mut self) -> V {
         if let Some(g) = self.lds {
             return g;
         }
-        let arr = self.m.array(self.lds_dwords, self.t.i32);
+        let arr = self.m.array(self.lds_dwords + self.lds_extra, self.t.i32);
         let g = self.m.global("lds", arr, 3);
         self.lds = Some(g);
         g

@@ -814,6 +814,7 @@ fn fmad_probe() -> Result<HostShader, crate::ShaderError> {
         heap: lowered.heap,
         heap_writes: lowered.heap_writes,
         view_marks: lowered.view_marks,
+        wave: Default::default(),
     })
 }
 
@@ -913,6 +914,7 @@ fn stub(pixel: bool, outputs: Vec<SigElement>) -> HostShader {
         heap: false,
         heap_writes: false,
         view_marks: false,
+        wave: Default::default(),
     }
 }
 

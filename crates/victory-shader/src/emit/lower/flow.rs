@@ -130,7 +130,8 @@ impl<'a> Lower<'a> {
         let preds = &self.x.p.blocks[b].preds;
         preds.iter().filter(|&&q| self.block[q].is_some()).all(|&q| match st.exits[q] {
             LaneExit::Branch { when, taken, not_taken } if taken != not_taken => {
-                st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_)))
+                // (A wave's decision is one edge for every lane too.)
+                st.bools.support(when).iter().all(|a| matches!(a, Atom::Uniform(_) | Atom::Wave(_)))
             }
             _ => true,
         })
@@ -538,6 +539,11 @@ impl<'a> Lower<'a> {
                 | Atom::Quad(v)
                 | Atom::Opaque(v) => Some(v),
                 Atom::Constant(_) => None,
+                // A wave's decision tests what its lanes' bits test.
+                Atom::Wave(n) => {
+                    stack.push(self.x.st.wave[n as usize].when);
+                    None
+                }
             };
             if v.is_some_and(|v| tainted.contains(&v)) {
                 return true;
@@ -1016,6 +1022,21 @@ impl<'a> Lower<'a> {
                 let x = match (self.x.st.masks.get(&arg), self.vals.get(&arg)) {
                     (Some(&m), _) => self.boolean(m, qb).map_err(|w| unsupported(offset, w))?,
                     (None, Some(&Val::I32(word))) if number => self.lane_bit(qb, word, None),
+                    // An emulated wave of 64 lanes: both dwords of the
+                    // number that comes in on this edge.
+                    (None, Some(&Val::I32(_)))
+                        if self.emu.is_some() && self.x.native.wave64 && self.uniform_join(b) =>
+                    {
+                        let dwords = self.x.st.join_args.get(&phi.value).and_then(|args| args.get(n));
+                        let dword = |v: Value| match self.vals.get(&v) {
+                            Some(&Val::I32(x)) => Some(x),
+                            _ => None,
+                        };
+                        match dwords.and_then(|&(lo, hi)| dword(lo).zip(dword(hi))) {
+                            Some((low, high)) => self.lane_bit(qb, low, Some(high)),
+                            None => return Err(unsupported(offset, UNTRACKED)),
+                        }
+                    }
                     (None, _) if !self.uniform_join(b) && self.no_mask_lane_on_edge(b, &phi.args, n) => {
                         self.s.m.bool(false)
                     }

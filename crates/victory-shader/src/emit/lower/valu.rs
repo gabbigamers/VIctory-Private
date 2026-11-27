@@ -32,6 +32,21 @@ impl<'a> Lower<'a> {
             }
             return r;
         }
+        if self.emu.is_some()
+            && name == "v_readfirstlane_b32"
+            && v.dpp.is_none()
+            && !inst
+                .writes
+                .first()
+                .is_some_and(|w| self.x.res.waterfall.reads.contains(&w.1))
+        {
+            // The wave's first lane is the lowest whose EXEC bit is set,
+            // which the lanes find together.
+            let exec = self.guard(b, i)?;
+            let a = self.src(inst, 0)?;
+            let r = self.emu_first_lane(a, exec)?;
+            return self.write_i(inst, r, None);
+        }
         // A scalar result (`v_readlane`, `v_readfirstlane`) is written
         // whatever EXEC holds.
         let mut guard = match v.dst {
@@ -737,7 +752,7 @@ impl<'a> Lower<'a> {
                 } else {
                     self.cross_lane(false)?;
                 }
-                let r = self.read_lane(a, lane);
+                let r = self.read_lane(a, lane)?;
                 int(self, r)
             }
             "v_writelane_b32" => {
@@ -754,6 +769,52 @@ impl<'a> Lower<'a> {
                 let me = self.lane_index();
                 let is = self.s.m.cmp(c, pred::EQ, me, lane);
                 let r = self.s.m.select(c, is, a, old);
+                int(self, r)
+            }
+            "v_permlanex16_b32" if self.emu.is_some() => {
+                // Each lane reads a lane of the other row of its half of the
+                // wave: lane i's pick there is nibble i of {src2, src1}
+                // (what `wave`'s simulation of whole-wave sections follows,
+                // which an emulated wave runs step by step instead).
+                // shortcut: only with every lane in EXEC; what the lanes
+                // EXEC leaves out give and get is not modelled.
+                if guard.is_some() {
+                    return Err("a lane permute under a lane mask in an emulated wave");
+                }
+                let sel = |k: usize| match v.src.get(k) {
+                    Some(&Operand::Const(c)) => crate::resource::inline(c),
+                    Some(&Operand::Literal(x)) => Some(x),
+                    _ => None,
+                };
+                let (Some(s1), Some(s2)) = (sel(1), sel(2)) else {
+                    return Err("a lane permute by a computed selection");
+                };
+                let a = s(self, 0)?;
+                let lane = self.lane_index();
+                let k = |l: &mut Self, n: u32| l.s.m.i32(n);
+                let (not31, k16, k8, k7, k2, k15, z) = (
+                    k(self, !31),
+                    k(self, 16),
+                    k(self, 8),
+                    k(self, 7),
+                    k(self, 2),
+                    k(self, 15),
+                    k(self, 0),
+                );
+                let half = self.s.m.bin(c, Bin::And, lane, not31);
+                let row = self.s.m.bin(c, Bin::And, lane, k16);
+                let row = self.s.m.bin(c, Bin::Xor, row, k16);
+                let other = self.s.m.bin(c, Bin::Or, half, row);
+                let upper = self.s.m.bin(c, Bin::And, lane, k8);
+                let upper = self.s.m.cmp(c, pred::NE, upper, z);
+                let (s1, s2) = (k(self, s1), k(self, s2));
+                let word = self.s.m.select(c, upper, s2, s1);
+                let pos = self.s.m.bin(c, Bin::And, lane, k7);
+                let sh = self.s.m.bin(c, Bin::Shl, pos, k2);
+                let pick = self.s.m.bin(c, Bin::LShr, word, sh);
+                let pick = self.s.m.bin(c, Bin::And, pick, k15);
+                let src = self.s.m.bin(c, Bin::Or, other, pick);
+                let r = self.read_lane(a, src)?;
                 int(self, r)
             }
             "v_readfirstlane_b32"

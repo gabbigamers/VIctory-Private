@@ -133,18 +133,14 @@ impl<'a> Lower<'a> {
                 let r = self.s.m.bin(c, Bin::And, r, low);
                 // Lane `hi` runs the section on the console even where it is
                 // elsewhere on the host; there it holds the identity.
-                let i32t = self.s.t.i32;
-                let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
-                let b = self
-                    .s
-                    .op(c, "waveActiveBallot", Attr::NoUnwind, four, 116, &[on]);
-                let word = self.s.m.extract(c, b, hi / 32);
+                let (lo_word, hi_word) = self.ballot(c, on)?;
+                let word = if hi < 32 { lo_word } else { hi_word };
                 let (sh, one, z) = (self.s.m.i32(hi % 32), self.s.m.i32(1), self.s.m.i32(0));
                 let bit = self.s.m.bin(c, Bin::LShr, word, sh);
                 let bit = self.s.m.bin(c, Bin::And, bit, one);
                 let there = self.s.m.cmp(c, pred::NE, bit, z);
                 let lane = self.s.m.i32(hi);
-                let at = self.read_lane(x, lane);
+                let at = self.read_lane(x, lane)?;
                 let top = self.s.m.select(c, there, at, id);
                 let high = self.s.m.i32(0xFFFF_0000);
                 let top = self.s.m.bin(c, Bin::And, top, high);
@@ -234,6 +230,10 @@ impl<'a> Lower<'a> {
     /// the console's wave size (lanes are thread ids in group order there).
     /// Pixel lanes match only within a quad.
     pub(super) fn cross_lane(&mut self, quad: bool) -> Result<(), Why> {
+        if self.emu.is_some() {
+            // The thread group is the console's wave (`emulated`).
+            return Ok(());
+        }
         if self.s.mesh.is_some() {
             // shortcut: no wave size for mesh shaders in SM 6.6, so host
             // lanes cannot follow the console's; emulate through group-shared
@@ -260,6 +260,9 @@ impl<'a> Lower<'a> {
             let f = self.mesh_thread();
             let m = self.s.m.i32(self.wave() - 1);
             return self.s.m.bin(self.s.entry, Bin::And, f, m);
+        }
+        if self.emu.is_some() {
+            return self.emu_lane();
         }
         self.s.op(
             self.cur,
@@ -328,15 +331,34 @@ impl<'a> Lower<'a> {
         self.s.m.select(c, helper, own, first)
     }
 
-    pub(super) fn read_lane(&mut self, x: V, lane: V) -> V {
-        self.s.op(
+    /// `x` as lane `lane` of the wave holds it.
+    pub(super) fn read_lane(&mut self, x: V, lane: V) -> Result<V, Why> {
+        if self.emu.is_some() {
+            return self.emu_read_lane(x, lane);
+        }
+        Ok(self.s.op(
             self.cur,
             "waveReadLaneAt.i32",
             Attr::NoUnwind,
             self.s.t.i32,
             117,
             &[x, lane],
-        )
+        ))
+    }
+
+    /// The lanes whose `bit` holds in block `at`, as the two dwords of a
+    /// lane mask: of the host's wave, or of the emulated one.
+    pub(super) fn ballot(&mut self, at: usize, bit: V) -> Result<(V, V), Why> {
+        if self.emu.is_some() {
+            return self.emu_ballot(at, bit);
+        }
+        let i32t = self.s.t.i32;
+        let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
+        let r = self
+            .s
+            .op(at, "waveActiveBallot", Attr::NoUnwind, four, 116, &[bit]);
+        self.s.flags |= flags::WAVE_OPS;
+        Ok((self.s.m.extract(at, r, 0), self.s.m.extract(at, r, 1)))
     }
 
     /// Whether `src` is active under the current `EXEC` mask (`guard` for
@@ -344,26 +366,25 @@ impl<'a> Lower<'a> {
     /// branch-structurised control flow). Returns `None` for unguarded pixel
     /// quad ops so WQM helper lanes remain active (`waveActiveBallot` excludes
     /// helper lanes in DXIL).
-    pub(super) fn src_lane_active(&mut self, src: V, guard: Option<V>, mesh_quad: bool) -> Option<V> {
+    pub(super) fn src_lane_active(
+        &mut self,
+        src: V,
+        guard: Option<V>,
+        mesh_quad: bool,
+    ) -> Result<Option<V>, Why> {
         let c = self.cur;
         if self.s.pixel {
-            let g = guard?;
+            let Some(g) = guard else {
+                return Ok(None);
+            };
             let (one, zero) = (self.s.m.i32(1), self.s.m.i32(0));
             let active_i32 = self.s.m.select(c, g, one, zero);
             let picked = self.quad_pick(active_i32, src);
-            return Some(self.s.m.cmp(c, pred::NE, picked, zero));
+            return Ok(Some(self.s.m.cmp(c, pred::NE, picked, zero)));
         }
         let bit = guard.unwrap_or_else(|| self.s.m.bool(true));
+        let (lo, hi) = self.ballot(c, bit)?;
         let i32t = self.s.t.i32;
-        let four = self.s.m.named_struct("dx.types.fouri32", vec![i32t; 4]);
-        let ballot = self
-            .s
-            .op(c, "waveActiveBallot", Attr::NoUnwind, four, 116, &[bit]);
-        self.s.flags |= flags::WAVE_OPS;
-        let (lo, hi) = (
-            self.s.m.extract(c, ballot, 0),
-            self.s.m.extract(c, ballot, 1),
-        );
         let ballot_lane = if mesh_quad {
             let host_lane = self
                 .s
@@ -375,7 +396,7 @@ impl<'a> Lower<'a> {
         } else {
             src
         };
-        Some(self.lane_bit_of(c, ballot_lane, lo, hi))
+        Ok(Some(self.lane_bit_of(c, ballot_lane, lo, hi)))
     }
 
     /// DPP: src0 as read from another lane, and which lanes write their
@@ -474,7 +495,7 @@ impl<'a> Lower<'a> {
         let src_active = if fi {
             None
         } else {
-            self.src_lane_active(src, guard, mesh_quad)
+            self.src_lane_active(src, guard, mesh_quad)?
         };
         let valid = match (inside, src_active) {
             (Some(in_b), Some(act)) => Some(self.s.m.bin(c, Bin::And, in_b, act)),
@@ -487,7 +508,7 @@ impl<'a> Lower<'a> {
                 Some(ok) => self.s.m.select(c, ok, src, lane),
                 None => src,
             };
-            self.read_lane(x, safe_src)
+            self.read_lane(x, safe_src)?
         };
         let mut enable = None;
         if let Some(ok) = valid {

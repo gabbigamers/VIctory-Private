@@ -141,9 +141,11 @@ pub(crate) fn host() -> Option<&'static Host> {
             // What this host is and how it meets the translation's needs,
             // once a run: the first thing to read in a report from a GPU
             // nobody has run on (docs/gpu-compatibility.md).
-            for line in crate::caps::report(&host.caps(false)).lines() {
+            let caps = host.caps(false);
+            for line in crate::caps::report(&caps).lines() {
                 tracing::info!("host GPU: {line}");
             }
+            crate::waves::set_device(&caps);
             Some(host)
         }
         Err(e) => {
@@ -3339,6 +3341,13 @@ impl Meter {
                  {indirect:.0} indirect; {root_views:.0} root-view slots/frame",
                 making = crate::pipeline::making()
             );
+            // What compute programs ask of the host's waves, when a
+            // program has been counted since it was last said.
+            if let Some(census) = crate::waves::take_changed() {
+                for line in census.lines() {
+                    tracing::info!("wave sizes so far: {line}");
+                }
+            }
             let period_us = std::mem::take(&mut self.period_us);
             let period_draws = drawn - std::mem::replace(&mut self.period_drawn, drawn);
             if let Some(pacing) = self.pacing.take() {
@@ -3373,6 +3382,7 @@ impl Meter {
                         dropped,
                         preparing: period_us[0] as f64 / 1000.0 / report_frames,
                         gpu: period_us[1] as f64 / 1000.0 / report_frames,
+                        waves: crate::waves::columns(),
                         memory: crate::pacing::Memory {
                             commit: Some(mb(process.commit)),
                             peak_commit: Some(mb(process.peak_commit)),

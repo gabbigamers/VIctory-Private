@@ -280,6 +280,14 @@ the machine's commit, RAM, free RAM and paging files; video memory on the
 card and shared. The file is made anew by each
 run and written a row at a time, so a run that crashes keeps what it
 measured. It holds measurements only, nothing of the title's.
+It also counts the compute programs that depend on the console's wave size
+(`wave_programs_*`, `wave_refused_*`): how many this device runs as they
+are, how many get no pipeline, by reason, and how many compute programs do
+not translate at all. `VICTORY_WAVE_EMULATION=1` (any build, experimental,
+off by default, not yet run on a GPU) translates those whose thread group
+is one console wave to carry the wave in the group instead; see
+[docs/gpu-compatibility.md](docs/gpu-compatibility.md), "The console's wave
+on any host".
 `cargo xtask perf-summary run.csv` summarises a run and
 `cargo xtask perf-summary after.csv --against before.csv` compares two, on
 any machine. [docs/progress.md](docs/progress.md) says how runs are

@@ -69,6 +69,16 @@ struct Tally {
     ms_emitted: usize,
     ms_validated: usize,
     ms_pipelines: usize,
+    /// Compute programs that declare a wave size, by that size, why
+    /// (`emit::wave_need`) and what became of their emulated form
+    /// (`emit::WaveUse`): made, or refused with a reason. And compute
+    /// programs with no per-lane form (they declare nothing), by why and
+    /// what became of their emulated form.
+    waves: BTreeMap<String, usize>,
+    /// Of `waves`, the programs with no per-lane form.
+    no_per_lane: usize,
+    /// Emulated forms made; of those, validated and given a pipeline.
+    emulated: [usize; 3],
     /// Reason → programs stopped by it, and the first one.
     failed: BTreeMap<String, (usize, String)>,
     /// With `--list`: one line per program and outcome.
@@ -132,6 +142,13 @@ impl Tally {
         self.ms_pipelines += other.ms_pipelines;
         for (k, n) in other.exports {
             *self.exports.entry(k).or_default() += n;
+        }
+        for (k, n) in other.waves {
+            *self.waves.entry(k).or_default() += n;
+        }
+        self.no_per_lane += other.no_per_lane;
+        for (mine, theirs) in self.emulated.iter_mut().zip(other.emulated) {
+            *mine += theirs;
         }
         self.lines.extend(other.lines);
         for (reason, (n, example)) in other.failed {
@@ -286,6 +303,24 @@ pub fn run(
         "             {} emitted of {} mesh programs; {} validated, {} pipelines",
         t.ms_emitted, t.ms_programs, t.ms_validated, t.ms_pipelines
     );
+    // The compute programs a host must run the console's wave size for
+    // (or that must carry the wave themselves), by size and reason; and
+    // those the per-lane form refuses, which only the emulated form could
+    // translate.
+    println!(
+        "waves        {} compute programs declare the console's wave size, {} more have no per-lane form; \
+         emulated forms: {} made, {} validated, {} pipelines",
+        t.waves.values().sum::<usize>() - t.no_per_lane,
+        t.no_per_lane,
+        t.emulated[0],
+        t.emulated[1],
+        t.emulated[2]
+    );
+    let mut waves: Vec<_> = t.waves.iter().collect();
+    waves.sort_by_key(|(kind, n)| (std::cmp::Reverse(**n), kind.as_str()));
+    for (kind, n) in waves {
+        println!("  {n:>7}  {kind}");
+    }
     if !pairs.is_empty() {
         let host = Host::new(false).map_err(anyhow::Error::msg)?;
         let kept = lock(&kept);
@@ -550,6 +585,9 @@ fn translate(
                         Err(e) => t.fail(e.to_string(), || format!("{} {:?}", example(), p.stage)),
                     }
                 }
+                // Why a compute program has no per-lane form, if it has
+                // none: its structure's refusal, or its lowering's.
+                let mut no_per_lane = None;
                 let structured = match structured {
                     Ok(s) => {
                         tally_structured(&program, &s, t);
@@ -561,25 +599,77 @@ fn translate(
                             ShaderError::Isa { reason, .. } => format!("structure: {reason}"),
                             e => e.to_string(),
                         };
+                        if compute {
+                            no_per_lane = Some(reason.clone());
+                        }
                         t.fail(reason, || format!("{} {:?}", example(), p.stage));
                         None
                     }
                 };
-                if let (Some(r), Some(i), Some(s)) = (res, raised, structured) {
-                    let label = || format!("{} {:?}", example(), p.stage);
+                let label = || format!("{} {:?}", example(), p.stage);
+                let marks = emit::Options {
+                    view_marks: true,
+                    ..emit::Options::default()
+                };
+                if let (Some(r), Some(i), Some(s)) = (&res, &raised, &structured) {
                     *counter(t, p.stage, 0) += 1;
-                    let marks = emit::Options { view_marks: true, ..Default::default() };
-                    match emit::emit_with(&container, &p, &program, &s, &i, &r, marks) {
+                    match emit::emit_with(&container, &p, &program, s, i, r, marks) {
                         Ok(shader) => {
                             *counter(t, p.stage, 1) += 1;
+                            // A program that asks the host for the console's
+                            // wave: counted by why, with what its emulated
+                            // form comes to (which is checked like any
+                            // other where checks are asked for).
+                            if shader.wave.size != 0 {
+                                let asked = emit::Options {
+                                    emulated_waves: emit::emulate::bit(shader.wave.size),
+                                    ..marks
+                                };
+                                let form = match emit::emit_with(&container, &p, &program, s, i, r, asked) {
+                                    Ok(e) if e.wave.emulated => {
+                                        check_emulated(e, t, checks, &label);
+                                        "emulated form made".to_owned()
+                                    }
+                                    Ok(e) => format!("emulated form refused: {}", e.wave.refusal),
+                                    Err(e) => format!("emulated form fails: {e}"),
+                                };
+                                let needs = emit::wave_needs_text(shader.wave.needs);
+                                let kind = format!("{}-lane waves: {needs}; {form}", shader.wave.size);
+                                *t.waves.entry(kind).or_default() += 1;
+                            }
                             check(shader, t, checks, label);
                         }
-                        Err(ShaderError::Unsupported { offset, what }) => t
-                            .fail(format!("emit: {what}"), || {
+                        Err(ShaderError::Unsupported { offset, what }) => {
+                            if compute {
+                                no_per_lane = Some(format!("emit: {what}"));
+                            }
+                            t.fail(format!("emit: {what}"), || {
                                 format!("{} at {offset:#x}", label())
-                            }),
+                            });
+                        }
                         Err(e) => t.fail(format!("emit: {e}"), label),
                     }
+                }
+                // A compute program the per-lane form refuses declares no
+                // wave size and would be in no count above, though it may
+                // be one that depends on the wave: counted here by that
+                // refusal, with what its emulated form alone comes to
+                // (checked like any other where checks are asked for).
+                if let (Some(reason), Some(i)) = (no_per_lane, &raised) {
+                    let form = match emit::emit_emulated(&container, &p, &program, i, marks) {
+                        Ok(e) => {
+                            check_emulated(e, t, checks, &label);
+                            "emulated form made".to_owned()
+                        }
+                        Err(ShaderError::Unsupported { what, .. }) => {
+                            format!("emulated form refused: {what}")
+                        }
+                        Err(e) => format!("emulated form fails: {e}"),
+                    };
+                    let lanes = if p.wave64 { 64 } else { 32 };
+                    let kind = format!("{lanes}-lane waves: no per-lane form ({reason}); {form}");
+                    *t.waves.entry(kind).or_default() += 1;
+                    t.no_per_lane += 1;
                 }
             }
             Err(e) => {
@@ -588,6 +678,36 @@ fn translate(
                     e => e.to_string(),
                 };
                 t.fail(reason, || format!("{} {:?}", example(), p.stage));
+            }
+        }
+    }
+}
+
+/// The checks asked for, on the emulated form of a compute program
+/// (`emit::WaveUse`): the validator, and a pipeline on this host.
+fn check_emulated(
+    mut shader: emit::HostShader,
+    t: &mut Tally,
+    checks: &mut Checks,
+    label: &impl Fn() -> String,
+) {
+    t.emulated[0] += 1;
+    if let Some((h, _)) = &checks.host {
+        match h.compute_pipeline(&shader) {
+            Ok(_) => t.emulated[2] += 1,
+            Err(e) => t.fail(format!("pipeline (emulated wave): {e}"), label),
+        }
+    }
+    if let Some(v) = checks.validator.as_mut() {
+        match v.validate(&mut shader.dxil) {
+            Ok(()) => t.emulated[1] += 1,
+            Err(text) => {
+                let first = text
+                    .lines()
+                    .find(|l| l.contains("error"))
+                    .unwrap_or(text.lines().next().unwrap_or(""))
+                    .to_owned();
+                t.fail(format!("validator (emulated wave): {first}"), label);
             }
         }
     }

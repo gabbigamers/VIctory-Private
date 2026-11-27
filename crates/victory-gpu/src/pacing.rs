@@ -95,6 +95,12 @@ pub(crate) struct Row {
     pub preparing: f64,
     pub gpu: f64,
     pub memory: Memory,
+    /// Compute programs by what they ask of the host's waves, counted
+    /// since the start ([`crate::waves::header`]'s columns): how many
+    /// declare a wave size the device runs, carry the console's wave
+    /// themselves, or get no pipeline for their wave size, and those last
+    /// by reason.
+    pub waves: [u64; crate::waves::COLUMNS],
 }
 
 /// Where memory stands at the end of a period, in MB; `None` where the host
@@ -186,7 +192,7 @@ pagefile_size_mb,host_textures_mb,texture_heaps_mb,uploads_mb,private_working_se
 /// columns by name (`cargo xtask perf-summary`), so columns are only added.
 pub(crate) fn header() -> String {
     let owners = Owner::ALL.map(Owner::column).join(",");
-    format!("{FRAME_COLUMNS},{MEMORY_COLUMNS},{owners}")
+    format!("{FRAME_COLUMNS},{MEMORY_COLUMNS},{owners},{}", crate::waves::header())
 }
 
 impl Row {
@@ -198,8 +204,9 @@ impl Row {
         let known: Vec<String> =
             self.memory.values().into_iter().map(|v| v.map_or(String::new(), |v| format!("{v:.0}"))).collect();
         let known = known.join(",");
+        let waves = self.waves.map(|n| n.to_string()).join(",");
         format!(
-            "{:.1},{},{},{fps:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.2},{:.0},{:.1},{:.2},{:.2},{known}",
+            "{:.1},{},{},{fps:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.2},{:.0},{:.1},{:.2},{:.2},{known},{waves}",
             self.seconds,
             self.frame,
             p.frames,
@@ -342,6 +349,7 @@ mod tests {
             preparing: 0.0,
             gpu: 0.0,
             memory: Memory::default(),
+            waves: [0; crate::waves::COLUMNS],
         };
         let mut file = create(&path).unwrap();
         append(&mut file, &row).unwrap();
@@ -383,6 +391,7 @@ mod tests {
                 private_working_set: Some(7_000.0),
                 owners: std::array::from_fn(|i| Some(i as f64 + 1.0)),
             },
+            waves: std::array::from_fn(|i| 100 + i as u64),
         };
         let (line, columns) = (row.line(), header());
         assert_eq!(line.split(',').count(), columns.split(',').count());
@@ -390,7 +399,8 @@ mod tests {
             line,
             "12.3,370,150,30.00,33.33,33.33,33.33,33.33,33.33,0.0000,0.00,5123,0.2,12.35,6.50,\
              20480,9000,28000,40000,9500,15000,120,21000,9500,1234,16300,2100,3000,24000,8000,8600,64,7000,\
-             1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18"
+             1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,\
+             100,101,102,103,104,105,106,107,108,109,110,111,112,113,114"
         );
         (row.memory.commit, row.memory.video_budget, row.memory.uploads) = (None, None, None);
         (row.memory.owners[14], row.memory.owners[16], row.memory.owners[17]) = (None, None, None);
@@ -398,7 +408,10 @@ mod tests {
         assert_eq!(line.split(',').count(), columns.split(',').count());
         assert!(line.contains(",6.50,,9000,28000,40000,9500,,120,"), "{line}");
         assert!(line.contains(",8600,,7000,1,2,"), "{line}");
-        assert!(line.ends_with(",13,14,,16,,"), "{line}");
+        assert!(line.contains(",13,14,,16,,,100,101,"), "{line}");
+        // The programs' wave counts come last, under their names.
+        assert!(columns.ends_with(&crate::waves::header()), "{columns}");
+        assert!(line.ends_with(",113,114"), "{line}");
     }
 
     /// Each value under the column that names it: the reader goes by name.
@@ -427,7 +440,8 @@ mod tests {
         };
         let columns = header();
         let names: Vec<&str> = columns.split(',').skip(FRAME_COLUMNS.split(',').count()).collect();
-        assert_eq!(names.len(), memory.values().len());
+        // (The columns after memory's are `crate::waves`'.)
+        assert_eq!(names.len(), memory.values().len() + crate::waves::COLUMNS);
         let at = |name: &str| memory.values()[names.iter().position(|n| *n == name).unwrap()];
         for (i, owner) in Owner::ALL.into_iter().enumerate() {
             assert_eq!(at(owner.column()), Some(100.0 + i as f64), "{owner:?}");

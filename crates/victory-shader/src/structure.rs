@@ -59,6 +59,10 @@ pub enum Atom {
     Opaque(Value),
     /// A constant mask other than all lanes or none.
     Constant(u64),
+    /// The decision the whole wave takes at a branch on a lane mask, the
+    /// same in every lane: an index into [`Structured::wave`]. Only the
+    /// wave form ([`waves`]) has these.
+    Wave(u32),
 }
 
 /// Reduced ordered binary decision diagrams over [`Atom`]s.
@@ -472,6 +476,32 @@ pub struct Structured {
     /// A pixel's discards, by block and instruction: the lanes (EXEC there)
     /// the instruction takes out of the live mask, which here stay in it.
     pub discards: HashMap<(usize, usize), Bool>,
+    /// Wave64: the high dword's value of each [`Atom::Opaque`] mask, by its
+    /// low dword's (the pair a mask operation read as one register pair);
+    /// `None` where one low dword was read paired with two different high
+    /// dwords, which the atom cannot tell apart.
+    pub opaque_high: HashMap<Value, Option<Value>>,
+    /// The masks an [`Atom::Phi`] joins, by the phi's value: per incoming
+    /// edge, in predecessor order, the low and the high dword's value (the
+    /// same value twice in wave32).
+    pub join_args: HashMap<Value, Vec<(Value, Value)>>,
+    /// The wave form ([`waves`]): the branches the wave decides as one, by
+    /// [`Atom::Wave`]'s index. Empty in the per-lane form.
+    pub wave: Vec<WaveBranch>,
+    /// Whether this is the wave form ([`waves`]).
+    pub waves: bool,
+}
+
+/// A branch on a wave-wide test of a lane mask, as the console takes it:
+/// by all lanes together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaveBranch {
+    /// The lane's own bit of what is tested.
+    pub when: Bool,
+    /// The branch is taken when some lane's `when` holds (`execnz`, `vccnz`,
+    /// SCC of a mask operation set); else when every lane's does (`execz`,
+    /// `vccz`, that SCC clear).
+    pub any: bool,
 }
 
 impl Structured {
@@ -486,7 +516,23 @@ impl Structured {
 
 /// Builds the per-lane form of `program`.
 pub fn structure(program: &Program) -> Result<Structured, ShaderError> {
-    structure_as(program, true)
+    structure_as(program, true, false)
+}
+
+/// The wave form of a compute program: the program as the console's wave
+/// runs it. Every lane of the wave runs every block the wave runs, in the
+/// wave's order. A branch on a wave-wide test of a lane mask stays what it
+/// is on the console, one decision for the whole wave
+/// ([`Atom::Wave`], [`Structured::wave`]), and EXEC stays a lane's own bit
+/// that guards each vector instruction: nothing is concluded about a lane
+/// from the path taken, because the lane did not choose it.
+///
+/// This is the form for a thread group that carries the console's wave
+/// itself (`emit`, "Emulated waves"): its threads can meet at any
+/// instruction, since all of them get there. It assumes nothing about what
+/// compiled code skips, where the per-lane form ([`structure`]) does.
+pub fn waves(program: &Program) -> Result<Structured, ShaderError> {
+    structure_as(program, true, true)
 }
 
 /// The per-lane form with a pixel's discarded lanes taken out of the live
@@ -494,14 +540,15 @@ pub fn structure(program: &Program) -> Result<Structured, ShaderError> {
 /// what a program needs whose discarded lanes would read values no
 /// surviving lane does (see [`Structured::discards`]).
 pub fn killing(program: &Program) -> Result<Structured, ShaderError> {
-    structure_as(program, false)
+    structure_as(program, false, false)
 }
 
-fn structure_as(program: &Program, helpers: bool) -> Result<Structured, ShaderError> {
+fn structure_as(program: &Program, helpers: bool, waves: bool) -> Result<Structured, ShaderError> {
     let mut l = Lanes::new(program)?;
     if !helpers {
         l.kills.clear();
     }
+    l.waves = waves;
     loop {
         let execs = l.masks_in_order();
         let cond = l.paths()?;
@@ -552,6 +599,17 @@ struct Lanes<'a> {
     /// A pixel's discards (see [`Structured::discards`]) by block and
     /// instruction.
     kills: HashSet<(usize, usize)>,
+    /// See [`Structured::opaque_high`].
+    opaque_high: Map<Value, Option<Value>>,
+    /// See [`Structured::join_args`].
+    join_args: Map<Value, Vec<Key>>,
+    /// The wave form is being built ([`waves`]).
+    waves: bool,
+    /// See [`Structured::wave`].
+    wave: Vec<WaveBranch>,
+    /// SCC values of [`Lanes::scc_lane`] that are set when every lane's bit
+    /// is (a mask compared for equality); the others when some lane's is.
+    scc_all: Set<Value>,
 }
 
 /// A mask join taken as `value` in every lane that reaches `block`: each
@@ -617,6 +675,11 @@ impl<'a> Lanes<'a> {
             active: HashSet::new(),
             restored: Map::default(),
             kills: HashSet::new(),
+            opaque_high: Map::default(),
+            join_args: Map::default(),
+            waves: false,
+            wave: Vec::new(),
+            scc_all: Set::default(),
         };
         for block in blocks {
             if let Exit::Branch { taken, not_taken } = block.exit
@@ -693,6 +756,10 @@ impl<'a> Lanes<'a> {
         self.first.fill(Bool::FALSE);
         self.when.fill(None);
         self.active.clear();
+        self.opaque_high.clear();
+        self.join_args.clear();
+        self.wave.clear();
+        self.scc_all.clear();
     }
 
     /// Lane masks, branch conditions and forward-edge knowledge, block by
@@ -760,7 +827,11 @@ impl<'a> Lanes<'a> {
             if let Exit::Branch { taken, not_taken } = p.blocks[b].exit
                 && let Some(last) = p.blocks[b].insts.last()
             {
-                let mut w = self.branch(last);
+                let mut w = if self.waves {
+                    self.wave_branch(n, last)
+                } else {
+                    self.branch(last)
+                };
                 // A discard's "no lane is left" exit: no lane takes it (the
                 // live mask keeps every lane, see `kills`).
                 if let Some(live) = self.discards(last)
@@ -892,6 +963,10 @@ impl<'a> Lanes<'a> {
             exits,
             guards,
             reach: cond.to_vec(),
+            opaque_high: self.opaque_high.into_iter().collect(),
+            join_args: self.join_args.into_iter().collect(),
+            wave: self.wave,
+            waves: self.waves,
         })
     }
 
@@ -956,6 +1031,14 @@ impl<'a> Lanes<'a> {
                 let derived = exec_write(lo, k.0) || exec_write(hi, k.1);
                 let m = m.unwrap_or_else(|| {
                     let born = self.born(k.0);
+                    if p.wave64 {
+                        // The atom is named by the low dword alone: the
+                        // high dword it stands for must be the only one.
+                        self.opaque_high
+                            .entry(k.0)
+                            .and_modify(|h| *h = h.filter(|&h| h == k.1))
+                            .or_insert(Some(k.1));
+                    }
                     self.b.atom(Atom::Opaque(k.0), born)
                 });
                 (m, derived)
@@ -1028,6 +1111,7 @@ impl<'a> Lanes<'a> {
             }
         }
         let born = self.index[block];
+        self.join_args.insert(id, args);
         Some((self.b.atom(Atom::Phi(id), born), derived))
     }
 
@@ -1218,6 +1302,8 @@ impl<'a> Lanes<'a> {
                 {
                     let ne = self.b.xor(a, c);
                     let m = if rest.starts_with("eq") {
+                        // Equal when no lane differs: every lane's bit.
+                        self.scc_all.insert(scc);
                         self.b.not(ne)
                     } else {
                         ne
@@ -1379,6 +1465,57 @@ impl<'a> Lanes<'a> {
                 }
             }
         }
+    }
+
+    /// The wave form of [`Lanes::branch`], for the branch closing the block
+    /// at reverse-postorder index `born`: a test of a lane mask is one
+    /// decision for the wave, as the instruction set defines it, and is
+    /// recorded with the lane's own bit of what it tests. A test of a value
+    /// every lane holds alike (SCC of scalar arithmetic) stays as it is.
+    ///
+    /// `execz` and `vccz` look at the register whole: EXEC, and VCC with no
+    /// regard to EXEC. SCC of a mask operation says whether its result has
+    /// a bit set; SCC of two masks compared for equality, whether no lane
+    /// differs ([`Lanes::scc_all`]).
+    fn wave_branch(&mut self, born: usize, inst: &Inst) -> Bool {
+        let exec = self.exec(inst);
+        let (when, any) = match inst.name() {
+            "s_cbranch_execz" => (self.b.not(exec), false),
+            "s_cbranch_execnz" => (exec, true),
+            n @ ("s_cbranch_vccz" | "s_cbranch_vccnz") => {
+                let vcc = match self.key(|r| inst.read(r), VCC) {
+                    Some(k) => self.mask(k).0,
+                    None => Bool::FALSE,
+                };
+                if n.ends_with("nz") {
+                    (vcc, true)
+                } else {
+                    (self.b.not(vcc), false)
+                }
+            }
+            n => {
+                let Some(scc) = inst.read(Reg::Scc) else {
+                    return Bool::FALSE;
+                };
+                let Some(&set) = self.scc_lane.get(&scc) else {
+                    return self.branch(inst);
+                };
+                let all = self.scc_all.contains(&scc);
+                if n == "s_cbranch_scc1" {
+                    (set, !all)
+                } else {
+                    (self.b.not(set), all)
+                }
+            }
+        };
+        // No lane, every lane, or what every lane holds alike: the wave's
+        // decision is the lane's own.
+        if self.b.support(when).iter().all(|a| matches!(a, Atom::Uniform(_))) {
+            return when;
+        }
+        let index = self.wave.len() as u32;
+        self.wave.push(WaveBranch { when, any });
+        self.b.atom(Atom::Wave(index), born)
     }
 
     /// What a lane knows on entering each block, to a fixpoint. A loop

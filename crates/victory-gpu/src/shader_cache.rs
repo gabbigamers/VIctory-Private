@@ -53,9 +53,10 @@ pub fn counts() -> (u64, u64) {
 /// (`victory_shader::SOURCE_HASH`: its sources, manifest, the lock file and
 /// the compiler), the entry's encoding (this file's text) and the
 /// translation settings (the loop limit and the limit on a lane's loops
-/// together, which a diagnostics build can change at run time, and whether
+/// together, which a diagnostics build can change at run time, whether
 /// compute programs take thread limits, which `VICTORY_DISPATCH_THREADS`
-/// decides).
+/// decides, and the wave sizes emulated, which `VICTORY_WAVE_EMULATION` and
+/// the device decide).
 fn build() -> &'static [u8; 32] {
     static BUILD: OnceLock<[u8; 32]> = OnceLock::new();
     BUILD.get_or_init(|| {
@@ -73,20 +74,28 @@ fn build() -> &'static [u8; 32] {
                 "VICTORY_SHADER_LOOP_TOTAL_LIMIT: a lane's loops together stop at another count"
             );
         }
-        key(victory_shader::SOURCE_HASH, ENCODING, limit, total, thread_limits())
+        key(victory_shader::SOURCE_HASH, ENCODING, limit, total, thread_limits(), crate::waves::emulated())
     })
 }
 
 /// This file, whose `encode` and `decode` define the entries.
 const ENCODING: &[u8] = include_bytes!("shader_cache.rs");
 
-fn key(translator: &str, encoding: &[u8], limit: u32, total: u32, thread_limits: bool) -> [u8; 32] {
+fn key(
+    translator: &str,
+    encoding: &[u8],
+    limit: u32,
+    total: u32,
+    thread_limits: bool,
+    emulated_waves: u8,
+) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(translator.as_bytes());
     h.update(blake3::hash(encoding).as_bytes());
     h.update(&limit.to_le_bytes());
     h.update(&total.to_le_bytes());
     h.update(&[u8::from(thread_limits)]);
+    h.update(&[emulated_waves]);
     *h.finalize().as_bytes()
 }
 
@@ -105,6 +114,7 @@ pub fn host_shader(container: &[u8]) -> (Result<HostShader, String>, bool) {
     let options = victory_shader::emit::Options {
         view_marks: true,
         thread_limits: thread_limits(),
+        emulated_waves: crate::waves::emulated(),
     };
     let translate = |c: &[u8]| victory_shader::emit::translate_with(c, options).map_err(|e| e.to_string());
     match CACHE.get() {
@@ -257,6 +267,7 @@ fn encode(translation: &Result<HostShader, String>) -> Vec<u8> {
         heap,
         heap_writes,
         view_marks,
+        wave,
     } = s;
     let mut out = MAGIC.to_vec();
     let word = |out: &mut Vec<u8>, v: u32| out.extend(v.to_le_bytes());
@@ -306,8 +317,15 @@ fn encode(translation: &Result<HostShader, String>) -> Vec<u8> {
             | u32::from(*view_addresses) << 2
             | u32::from(*heap) << 3
             | u32::from(*heap_writes) << 4
-            | u32::from(*view_marks) << 5,
+            | u32::from(*view_marks) << 5
+            | u32::from(wave.emulated) << 6,
     );
+    word(&mut out, wave.size);
+    word(&mut out, wave.needs);
+    for text in [&wave.refusal, &wave.per_lane] {
+        word(&mut out, text.len() as u32);
+        out.extend(text.as_bytes());
+    }
     out
 }
 
@@ -369,6 +387,13 @@ fn decode(bytes: &[u8]) -> Option<Result<HostShader, String>> {
     let root_srvs = r.list()?;
     let root_uavs = r.list()?;
     let memory = r.word()?;
+    let wave = victory_shader::emit::WaveUse {
+        size: r.word()?,
+        needs: r.word()?,
+        emulated: memory & 64 != 0,
+        refusal: String::from_utf8(r.list()?).ok()?,
+        per_lane: String::from_utf8(r.list()?).ok()?,
+    };
     r.0.is_empty().then_some(Ok(HostShader {
         stage,
         dxil,
@@ -384,6 +409,7 @@ fn decode(bytes: &[u8]) -> Option<Result<HostShader, String>> {
         heap: memory & 8 != 0,
         heap_writes: memory & 16 != 0,
         view_marks: memory & 32 != 0,
+        wave,
     }))
 }
 
@@ -417,6 +443,13 @@ mod tests {
             heap: true,
             heap_writes: true,
             view_marks: true,
+            wave: victory_shader::emit::WaveUse {
+                size: 64,
+                needs: 0x121,
+                emulated: true,
+                refusal: "a reason".into(),
+                per_lane: "another".into(),
+            },
         }
     }
 
@@ -498,19 +531,26 @@ mod tests {
 
     /// The key's parts: a change to any of them (the translator's sources,
     /// this file's encoding, the loop limit, the limit on a lane's loops
-    /// together, thread limits) makes another key, so no entry written
-    /// before it is read.
+    /// together, thread limits, the wave sizes emulated) makes another key,
+    /// so no entry written before it is read.
     #[test]
     fn the_key_covers_translator_encoding_and_settings() {
-        let k = key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, false);
-        assert_eq!(k, key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, false));
-        assert_ne!(k, key("0123456789abcdee", b"encoding", 1 << 20, 1 << 22, false));
-        assert_ne!(k, key("0123456789abcdef", b"encoding.", 1 << 20, 1 << 22, false));
-        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 19, 1 << 22, false));
-        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 20, 1 << 21, false));
+        let k = key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, false, 0);
+        assert_eq!(k, key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, false, 0));
+        assert_ne!(k, key("0123456789abcdee", b"encoding", 1 << 20, 1 << 22, false, 0));
+        assert_ne!(k, key("0123456789abcdef", b"encoding.", 1 << 20, 1 << 22, false, 0));
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 19, 1 << 22, false, 0));
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 20, 1 << 21, false, 0));
         // Each limit has its place: the two swapped are another key.
-        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 22, 1 << 20, false));
-        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, true));
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 22, 1 << 20, false, 0));
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, true, 0));
+        // Emulated waves are another translation of the same container,
+        // and their byte is not the thread limits'.
+        assert_ne!(k, key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, false, 2));
+        assert_ne!(
+            key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, true, 0),
+            key("0123456789abcdef", b"encoding", 1 << 20, 1 << 22, false, 1)
+        );
         assert_eq!(
             *build(),
             key(
@@ -518,7 +558,8 @@ mod tests {
                 ENCODING,
                 victory_shader::emit::loop_limit(),
                 victory_shader::emit::loop_total_limit(),
-                thread_limits()
+                thread_limits(),
+                crate::waves::emulated()
             )
         );
         // The encoding part is this file as built.
