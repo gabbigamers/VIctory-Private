@@ -1141,3 +1141,48 @@ Only what cannot be done from a cloud session.
     `VICTORY_WAVE_EMULATION=1`, watching for device removal (one fork
     reports it with barriers inside loops and branches, which this form
     has); on a card with 64-lane waves, `=64` against unset.
+* Ray-tracing validation, the half that needs no GPU (`victory-rt`:
+  synthetic scenes, an exact brute-force reference tracer, a CPU model
+  of the software traversal, the comparison policy): implemented, a
+  new crate that nothing in a run depends on; reviewed (9 findings,
+  all upheld; 8 fixed in full, 1 in part) and corrected. Tested (host
+  tests): 68 unit and 13 integration tests; reference against software
+  model at the documented seed, 23,635 rays in ten classes, no defect;
+  three more seeds; a third tracer in `f64`; planted defects caught.
+  By hand, not a test: 1000 seeds, no defect, worst error 0.096 of the
+  tolerance. Type-checked for Windows only: the crate for that target
+  and the one test in `victory-shader` that holds the crate's node
+  test to that crate's own reference, never executed. Not run on a
+  device; not hardware-validated; no timing.
+  * Evidence: arithmetic on this host, nothing else. The tolerance is
+    a bound of modelled `f32` arithmetic times 4; that any hardware
+    stays inside it is speculative. Found on the model of the existing
+    node test, each kept by a host test: `t` on slivers follows the
+    barycentric error; with tight boxes a ray leaves a closed mesh (7
+    of 40 seeds); a triangle of no area can be hit (D3D12 makes no such
+    hit); a hit one float step inside the range can be lost. That the
+    shader does the same rests on the test that has not run.
+  * By default nothing in a run changes; no switch, log line or
+    column. Outside the crate, kept by the coordinator: a Windows-only
+    dev-dependency of `victory-shader` on it with that one test, and
+    an optimisation override for the crate in the dev profile.
+  * The policy numbers are proposals, not accepted: a result within
+    tolerance but over 1/8 of it is reported with the verdict and does
+    not change it; one whose tolerance is over 1/16 is compared by ids
+    and face only; over 10 % such rays make a class `Useless`.
+  * Limits: behind rotated and scaled instances the tolerance is 10 to
+    40 times that of plain geometry; strongly scaled or far instances
+    come out `Useless`; the top level and instance records are our
+    own, not a title's. Not reconciled with the proposed rule of
+    `docs/dxr-compatibility.md` (another tolerance, no `k`, level 1
+    only): `docs/dxr-validation-reference.md` lists the differences in
+    a section added at integration; reconciling is the next step.
+  * What the review found: tolerances too wide to see small errors,
+    and of 1 or more judged as agreement; a negative zero in the
+    reference's records; a wrong total; an alpha boundary at 0 assumed
+    away; refusals no test reached; a result file blind to a generator
+    mismatch; a second copy of the node reference tied to nothing.
+  * For the owner's machine: on Windows, `cargo test -p victory-rt`
+    (the generator's fingerprints, pinned on Linux, must hold) and
+    `cargo test -p victory-shader the_validation_crates_node_test`;
+    decisions on the policy numbers and on the band as a verdict.

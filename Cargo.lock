@@ -760,11 +760,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "victory-rt"
+version = "0.1.0"
+
+[[package]]
 name = "victory-shader"
 version = "0.1.0"
 dependencies = [
  "miniz_oxide",
  "thiserror",
+ "victory-rt",
  "windows",
  "windows-sys",
 ]

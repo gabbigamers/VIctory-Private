@@ -39,6 +39,10 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
 ] }
+# The BVH tests hold the CPU reference of the node test; victory-rt has a
+# copy of it for the DXR validation, and one of those tests keeps the two
+# the same.
+victory-rt.workspace = true
 
 [lints]
 workspace = true

@@ -836,3 +836,75 @@ fn intersections_on_nodes_in_title_memory_equal_the_reference() {
     run_cases(false, 4, true);
     run_cases(true, 4, true);
 }
+
+// ---- the validation model ----
+
+/// `victory-rt` has a copy of the reference above as its `node` module,
+/// which the DXR validation's software traversal is made of
+/// (docs/dxr-validation-reference.md). The GPU tests of this file tie this
+/// reference to the lowering; nothing but this test ties that copy to
+/// either. A change to the lowering that is made here and not there fails
+/// it, on the cases the GPU runs and on arbitrary words.
+#[test]
+fn the_validation_crates_node_test_equals_the_reference() {
+    let same = |w: &[u32], ty: u32, ray: &Ray| {
+        let theirs = victory_rt::node::NodeRay {
+            extent: ray.extent,
+            origin: ray.origin,
+            dir: ray.dir,
+            inv: ray.inv,
+        };
+        assert_eq!(
+            intersect(w, ty, ray),
+            victory_rt::node::intersect(w, ty, &theirs),
+            "type {ty} {ray:?} {w:08x?}"
+        );
+    };
+    let mut rng = Rng(0x5EED);
+    let mut types = [0u32; 8];
+    for _ in 0..200_000 {
+        let (w, ty, ray) = case(&mut rng);
+        types[ty as usize] += 1;
+        same(&w, ty, &ray);
+        // Its ray type computes the inverse as a program does.
+        let made = victory_rt::node::NodeRay::new(ray.origin, ray.dir, ray.extent);
+        assert_eq!(made.inv.map(f32::to_bits), ray.inv.map(f32::to_bits));
+    }
+    assert!(types.iter().all(|n| *n > 1000), "{types:?}");
+    // Every word arbitrary, with the values arithmetic stumbles on thick
+    // among them: zeros of both signs, infinities, NaNs, denormals, the
+    // largest numbers, as 32-bit floats and as pairs of 16-bit ones. A
+    // result word never carries a NaN (a hit needs comparisons a NaN
+    // fails), so the words are comparable.
+    const HALVES: [u32; 8] = [0, 0x8000, 0x7C00, 0xFC00, 0x7E01, 0x0001, 0x7BFF, 0xFBFF];
+    let word = |rng: &mut Rng| match rng.below(14) {
+        0 => 0,
+        1 => 0x8000_0000,
+        2 => f32::INFINITY.to_bits(),
+        3 => f32::NEG_INFINITY.to_bits(),
+        4 => f32::NAN.to_bits() | rng.below(1 << 22),
+        5 => rng.below(1 << 23) | rng.below(2) << 31,
+        6 => f32::MAX.to_bits() | rng.below(2) << 31,
+        7 | 8 => rng.grid(8.0).to_bits(),
+        9 => HALVES[rng.below(8) as usize] | HALVES[rng.below(8) as usize] << 16,
+        10 => HALVES[rng.below(8) as usize] | to_half(rng.grid(8.0).round()) << 16,
+        11 => to_half(rng.grid(8.0).round()) | HALVES[rng.below(8) as usize] << 16,
+        _ => rng.next(),
+    };
+    for _ in 0..200_000 {
+        let w: Vec<u32> = (0..28).map(|_| word(&mut rng)).collect();
+        let f: [f32; 10] = std::array::from_fn(|_| f32::from_bits(word(&mut rng)));
+        let ray = Ray {
+            extent: f[0],
+            origin: [f[1], f[2], f[3]],
+            dir: [f[4], f[5], f[6]],
+            // A program's inverse need not be the direction's.
+            inv: if rng.below(4) == 0 {
+                [f[7], f[8], f[9]]
+            } else {
+                [f[4], f[5], f[6]].map(|d| 1.0 / d)
+            },
+        };
+        same(&w, rng.below(8), &ray);
+    }
+}

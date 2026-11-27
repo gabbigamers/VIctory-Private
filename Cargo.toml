@@ -22,6 +22,7 @@ victory-shader = { path = "crates/victory-shader" }
 victory-formats = { path = "crates/victory-formats" }
 victory-pipeline = { path = "crates/victory-pipeline" }
 victory-game = { path = "crates/victory-game" }
+victory-rt = { path = "crates/victory-rt" }
 
 # External crates
 anyhow = "1.0.104"
@@ -54,6 +55,11 @@ undocumented_unsafe_blocks = "warn"
 [profile.dev.package."*"]
 # Dependencies (hashing, parsing) are hot paths when chewing through
 # gigabytes of game data; keep them fast even in debug builds.
+opt-level = 2
+
+[profile.dev.package.victory-rt]
+# The reference tracer tests every triangle against every ray; its tests
+# are kept fast the same way.
 opt-level = 2
 
 [profile.release]

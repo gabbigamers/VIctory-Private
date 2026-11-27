@@ -42,6 +42,7 @@ title's), so a run finds them under the names it gives them itself.
 | `victory-shader` | Xbox shader containers → host shaders |
 | `victory-formats` | the GPU's texture layouts (sizes, tiling, detiling), BCPack, audio codecs |
 | `victory-pipeline` | converter trait, content-addressed cache |
+| `victory-rt` | ray-tracing validation without a GPU: synthetic scenes, an exact reference, a CPU model of the software BVH path, the comparison policy ([dxr-validation-reference.md](dxr-validation-reference.md)); depends on nothing; `victory-shader`'s Windows tests use it, to hold its node test to their own reference |
 | `victory-game` | Grand Theft Auto VI-specific formats, build identities, hooks |
 | `apps/victory` | command-line front end |
 | `xtask` | asset-policy check, git hooks |
