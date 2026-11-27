@@ -5,13 +5,14 @@
 use std::collections::HashMap;
 
 use super::{Lower, Stop, Val, Why, packed_half};
-use crate::emit::bitcode::{Attr, Bin, Cast, V, pred};
+use crate::emit::UserData;
+use crate::emit::bitcode::{Attr, Bin, Cast, Term, V, pred};
 use crate::emit::container::SigElement;
-use crate::emit::shader::flags;
+use crate::emit::shader::{USER_THREAD_LIMIT, flags};
 use crate::gfx10::{Fields, Operand};
 use crate::io::{Barycentric, Export, Input, Interp, Target};
 use crate::ir::{Inst, Reg, Value};
-use crate::native::{StageIo, Usage};
+use crate::native::{RootType, StageIo, Usage};
 use crate::resource::Site;
 use crate::structure::Bool;
 
@@ -276,6 +277,90 @@ impl<'a> Lower<'a> {
             }
             _ => self.s.m.bin(e, Bin::UDiv, f, xy),
         })
+    }
+
+    /// Compute, with [`Options::thread_limits`](crate::emit::Options): the
+    /// threads the dispatch did not ask for leave before anything else runs
+    /// (`emit`, "Thread limits"). Along each dimension the group is wider
+    /// than one thread, a thread whose number in the whole dispatch (its
+    /// group times the group's size, plus its place in the group) is not
+    /// below the limit the host passes returns at once; the program's own
+    /// first block, and everything lowering puts "in the entry block" from
+    /// here on, comes after that test, so wave operations, ballots of the
+    /// lanes at entry and every store see only the threads that run, as on
+    /// the console, which never starts the others.
+    ///
+    /// Programs left as they are (the host then cannot run a dispatch of
+    /// theirs whose counts do not fill whole groups):
+    /// * a group of one thread: nothing to leave out;
+    /// * one with `s_barrier`: a thread that has returned never reaches the
+    ///   host's group barrier, and what the others then wait for is not
+    ///   defined;
+    /// * one that depends on the lane layout in a group of more than one
+    ///   dimension: how the console packs a partial two-dimensional group
+    ///   into waves is not known here;
+    /// * one that reads user data where the limits are put (found when the
+    ///   whole program is lowered: [`Stop::Unlimited`]).
+    ///
+    /// The limits' places, one user-data dword per dimension that has one,
+    /// after every dword a root parameter holds.
+    ///
+    /// (Whose idea: a limit the host sets, tested at entry ahead of
+    /// everything, is how the public forks that follow the console's flag
+    /// do it, along x; the test below is close to theirs in shape, built
+    /// as it is from the same helpers. Which forks, which commit, and what
+    /// here is and is not theirs: `THIRD_PARTY_NOTICES.md`, "The forks'
+    /// entry test for dispatches counted in threads". Evidence for the
+    /// flag itself: `victory-gpu`, `dispatch.rs`.)
+    pub(super) fn limit_threads(&mut self) -> Vec<UserData> {
+        let StageIo::Cs(cs) = &self.x.native.io else {
+            return Vec::new();
+        };
+        let size = cs.threads;
+        let barrier = self.x.p.blocks.iter().flat_map(|b| &b.insts).any(|i| i.name() == "s_barrier");
+        let flat_lanes = self.console_lanes && size[1..] != [1, 1];
+        if size.iter().all(|&n| n <= 1) || barrier || flat_lanes {
+            return Vec::new();
+        }
+        let layout = self.x.native.layout.iter();
+        let mut index = layout.map(|p| u32::from(p.user_data) + p.sgprs).max().unwrap_or(0);
+        let e = self.s.entry;
+        self.cur = e;
+        let mut limits = Vec::new();
+        let mut runs: Option<V> = None;
+        for (c, &n) in (0u8..).zip(&size) {
+            if n <= 1 {
+                continue;
+            }
+            let entry = UserData {
+                index,
+                slot: c,
+                root: RootType::Other(USER_THREAD_LIMIT),
+                dword: n,
+            };
+            index += 1;
+            let limit = self.user_at(entry);
+            limits.push(entry);
+            let (Val::I32(group), Val::I32(thread)) =
+                (self.compute_id("groupId.i32", 94, c), self.thread_id(c))
+            else {
+                unreachable!("compute ids are values")
+            };
+            let n = self.s.m.i32(n);
+            let first = self.s.m.bin(e, Bin::Mul, group, n);
+            let id = self.s.m.bin(e, Bin::Add, first, thread);
+            let inside = self.s.m.cmp(e, pred::IULT, id, limit);
+            runs = Some(match runs {
+                Some(r) => self.s.m.bin(e, Bin::And, r, inside),
+                None => inside,
+            });
+        }
+        let runs = runs.expect("a dimension wider than one thread");
+        let (body, done) = (self.s.m.new_block(), self.abort_block());
+        self.s.m.terminate(e, Term::CondBr(runs, body, done));
+        self.s.entry = body;
+        self.cur = body;
+        limits
     }
 
     /// Mesh: the counts and the primitives no lane exports. The console's

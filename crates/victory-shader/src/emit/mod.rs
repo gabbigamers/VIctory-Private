@@ -174,6 +174,30 @@
 //!   [`VIEW_READS`] + the view's heap index in the same bitmap, after the
 //!   written pages, where still clear: the host makes views it left null
 //!   until a shader reads them (textures the title placed itself).
+//! * **Thread limits** (with [`Options::thread_limits`]; added
+//!   2026-11-27, off unless the host asks): the console can count a
+//!   dispatch in threads instead of thread groups, and then starts only
+//!   the threads asked for, the last group of a dimension being partial
+//!   (the dispatch initiator's `USE_THREAD_DIMENSIONS` and `PARTIAL_TG_EN`
+//!   in AMD's public register headers). A host dispatch is whole groups.
+//!   So a compute program reads, for each dimension its group is wider
+//!   than one thread, a user-data dword the host sets
+//!   ([`RootType::Other`]`(`[`USER_THREAD_LIMIT`]`)` in
+//!   [`HostShader::user_data`]: `slot` the dimension, `dword` the group's
+//!   size along it, `index` past every root parameter's dwords): the
+//!   number of threads that run along that dimension. A thread whose
+//!   number in the dispatch (group id times group size, plus its id in the
+//!   group) is not below it returns before anything else. That number
+//!   is 32 bits and wraps past them: the host must not count a dispatch
+//!   in threads whose groups times the group's size exceed
+//!   [`THREAD_LIMIT_NONE`] along a dimension.
+//!   [`THREAD_LIMIT_NONE`] stops none: the host sets it for every
+//!   dispatch counted in groups. Programs with a group barrier, programs
+//!   that depend on the lane layout in a group of more than one
+//!   dimension, and programs that themselves read user data where the
+//!   limits would go (past what the root parameters say they hold) get no
+//!   such dwords and are translated as without the option; neither do
+//!   groups of one thread, which need none.
 //!
 //! Entry points: [`translate`] (container bytes as the title passes them
 //! at pipeline creation → [`HostShader`]), [`emit`] (the same with the
@@ -237,7 +261,7 @@ use crate::{ShaderError, io, ir, resource, structure};
 pub use sampler::StaticSampler;
 pub use shader::{
     HEAP_SAMPLERS, HEAP_VIEWS, MEMORY_SPACE, NULL_BUFFER_VIEW, ROOT_CBV_SPACE, SAMPLER_SPACE,
-    USER_DATA_SPACE, VIEW_INTEGER, VIEW_MARK_NONE, VIEW_MARKS, VIEW_READS, VIEW_SIGNED, VIEW_STRIDE_BITS,
+    THREAD_LIMIT_NONE, USER_DATA_SPACE, USER_THREAD_LIMIT, VIEW_INTEGER, VIEW_MARK_NONE, VIEW_MARKS, VIEW_READS, VIEW_SIGNED, VIEW_STRIDE_BITS,
     VIEW_STRIDES, VIEW_WRITE_BITS, VIEW_WRITES,
 };
 
@@ -419,6 +443,12 @@ pub struct Options {
     /// "Write marks"); the host must then bind the view-mark table and the
     /// bitmap ([`HostShader::view_marks`]).
     pub view_marks: bool,
+    /// Compute programs read, per dimension their thread group is wider
+    /// than one thread, how many threads of the dispatch run along it, and
+    /// the others leave at entry (module notes, "Thread limits"): the host
+    /// must set each [`USER_THREAD_LIMIT`] dword of
+    /// [`HostShader::user_data`] before every dispatch.
+    pub thread_limits: bool,
 }
 
 /// Translates the vertex, pixel, compute or mesh program of a console
@@ -544,14 +574,14 @@ pub fn emit_with(
         mesh_stride,
         view_marks: options.view_marks,
     };
-    let l = match lower::lower(&parts(st, res)) {
+    let l = match lower::lower_with(&parts(st, res), options.thread_limits) {
         // Discarded lanes kept on as helpers can read what no surviving
         // lane does (a register only killed lanes skipped writing); such a
         // program kills them as the console does (`structure::killing`).
         Err(_) if !st.discards.is_empty() => {
             let st = structure::killing(p)?;
             let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
-            lower::lower(&parts(&st, &res))?
+            lower::lower_with(&parts(&st, &res), options.thread_limits)?
         }
         l => l?,
     };

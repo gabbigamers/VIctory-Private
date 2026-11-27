@@ -7,7 +7,9 @@ crates.io dependencies named in `Cargo.lock`, except the one a source
 comment singles out.
 
 The first two sections were written when the works were brought in
-(2026-11-26) and were checked against the sources. The section "Works
+(2026-11-26) and were checked against the sources. The third was written
+on 2026-11-27 with the change it describes and checked against the
+repositories it names; no file of theirs is in this one. The section "Works
 already in the tree" repeats what the headers of the named files state; the
 headers are the record, and this file does not change them.
 
@@ -125,6 +127,58 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## The forks' entry test for dispatches counted in threads
+
+Two public forks of VIctory follow the console's dispatch flag for counts
+in threads. One function here follows them in idea and in shape.
+
+* What: the test a compute program makes at entry when its dispatch may be
+  counted in threads, roughly ten lines: a thread's index in the dispatch
+  from its group id times the group's size plus its thread id, compared
+  with a limit the host sets, and a branch past the program's body for the
+  threads not below it. The lines here were written on helpers this
+  repository already had (`compute_id`, `thread_id`, which the forks have
+  from the same upstream) and are close to the fork's in their order and
+  in the names of their locals (`group`, `thread`, `first`, `inside`,
+  `body`, `done`); one statement, `self.s.entry = body;`, is the same text.
+* Source of the test: DexNom/VIctory (https://github.com/DexNom/victory),
+  the prologue of `Lower::run` in its
+  `crates/victory-shader/src/emit/lower.rs` (lines 2180-2202 at commit
+  `8114ff779b5e1c7112b87476753dc8d0992ed97c`), which its commit
+  `bc3cd4b045ff63c52972d29c1bef7e897b94abc7` (2026-11-25) introduced.
+  Belobug/VIctory-Belobug-AMD (https://github.com/Belobug/victory-belobug-amd)
+  and avatarmanz/victory-7900xtx have it from that commit: the message of
+  the commit `810efe5829e80d998b9b606a610a1df346c35045`, which both
+  histories hold, says so.
+* Source of the rule for which programs get no such test: Belobug's
+  `counted_in_threads` in its `crates/victory-shader/src/emit/lower.rs`
+  (lines 92-108 at commit `4eb6cfdf9e61cb112f1f811344ec0dd309eddd6c`): no
+  program with `s_barrier`, and thread groups of one dimension only (with
+  a third condition of its own, `spill::is_spilled`, not followed here).
+  Here: no program with `s_barrier`, and one dimension only for programs
+  that depend on the lane layout.
+* Licence: GPL-3.0-or-later, as this repository. The `LICENSE` file of
+  each of the three repositories is byte for byte this repository's
+  (compared on 2026-11-27), and each `Cargo.toml` names that licence.
+* Authorship: git names DexNom as author and committer of `bc3cd4b0`, one
+  commit that changes 30 files and adds 2,043 lines; that fork's own work
+  is in a few such commits (the first,
+  `570a941e9b4e945121c26eb30dfc10c126845207`, changes 170 files). Who wrote
+  a given line cannot be recovered from its history beyond that name.
+* Applies to: `crates/victory-shader/src/emit/lower/stage.rs`, the function
+  `limit_threads`: the lines from the thread's index to the branch.
+* Not from them, written for this repository (the reports of the change's
+  implementer and of its corrector say so, and a comparison on 2026-11-27
+  of the Rust lines the change adds, 40 characters or longer, with every
+  Rust source of DexNom's and Belobug's repositories found none in common
+  but test scaffolding this repository already had, the console method's
+  signature with its last argument named, and one `use` line): a limit
+  for each dimension, `u32::MAX` and not 0 for "no limit",
+  the stop through the block loop limits stop in, lowering again without
+  limits where a program reads user data in a limit's place, the planner
+  and its refusals (`crates/victory-gpu/src/dispatch.rs`), the diagnostics
+  and the tests.
 
 ## Works already in the tree
 

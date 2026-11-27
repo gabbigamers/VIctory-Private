@@ -1040,3 +1040,50 @@ Only what cannot be done from a cloud session.
     keeping every line that starts with `ray-tracing capture:`;
     `docs/dxr-build-capture.md` says what each outcome decides,
     including the pair of counts that settles the copy order.
+* Ray-tracing prerequisite, dispatch semantics (candidate cause 1 of
+  the structures never appearing: the builder's `DispatchX` counts
+  being threads, not thread groups): implemented, the diagnostics in
+  every run and the reading behind `VICTORY_DISPATCH_THREADS`, off by
+  default; reviewed (7 findings, all upheld) and corrected. Tested
+  (host tests): 26 tests of the plan arithmetic and its bounds, the
+  tally, the indirect diagnostics, the lowered entry test run lane by
+  lane, and the fallback; Microsoft's validator accepts that test's
+  DXIL in synthetic programs. Type-checked for Windows only:
+  `State::dispatch_as`, the root-constant writes, and a device test
+  that has never executed. Not run on a device; not hardware-validated.
+  * Evidence, mixed. Independent of every fork (AMD's public register
+    header, Mesa's open driver): bit 0x20 of this GPU generation's
+    dispatch initiator makes the counts threads, the last group
+    partial. Speculative, resting on the forks alone (one line of
+    descent): that `DispatchX`'s flags argument carries that bit, and
+    that following it lets the builder work. No console header,
+    disassembly or log supports it: a switch, not a default.
+  * By default nothing dispatched or translated changes. What changes:
+    log lines "DispatchX flags ..." per distinct flags value (counts,
+    group size and root constants at a program's first call and at its
+    first count that fills no whole groups; totals); lines for
+    indirect-dispatch signature values; a mutex and a name hash per
+    `DispatchX`; every shader translated again once (accepted).
+  * Behind `VICTORY_DISPATCH_THREADS=1`: counts with flag 0x20 are
+    threads; compute programs read a limit per dimension the host sets
+    and the threads past it return at entry. A dispatch that cannot
+    run exactly those threads is dropped, counted and logged: a
+    partial group of a program without limits (`s_barrier`; lane
+    layout in a group of two or three dimensions; user data read in a
+    limit's place), over 65535 groups along a dimension, thread
+    numbers past 32 bits. `=round` runs the first kind whole and
+    counts the extra threads. Not done: indirect dispatches are not
+    converted; `DispatchMeshX` flags are only counted and logged.
+  * What the review found: the entry test close in shape to the forks'
+    (kept; origin in `THIRD_PARTY_NOTICES.md`); a ninth indirect value
+    dropped quietly; tally claims stronger than the code (a default
+    run can clear the suspect or make it likely, not confirm it); a
+    plan promising what the host cannot run; a device test blind to
+    the group term; an outcome counted before the bind; a user-data
+    read in a limit's place failing the whole translation.
+  * For the owner's machine: a default run, keeping the "DispatchX
+    flags" and indirect-dispatch lines; if 0x20 appears, a run with
+    `=1`, then `=round` if dispatches are dropped for want of a limit,
+    saying whether ray-traced shadows or indirect light appear; on
+    Windows, `cargo test -p victory-gpu --features diagnostics
+    a_dispatch_counted_in_threads`, the entry test's only device check.

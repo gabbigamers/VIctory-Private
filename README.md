@@ -239,6 +239,22 @@ ray-tracing builder to build and logs counts of it; nothing is built from
 the record yet, and the title runs as without it
 ([docs/dxr-build-capture.md](docs/dxr-build-capture.md)).
 
+Every build also logs each distinct flags value the title passes to the
+console's dispatch-with-flags method (`DispatchX`, which the ray-tracing
+structure builder uses): the counts, the program's thread-group size and
+the call's root constants at each program's first call and at its first
+call with a count that fills no whole thread groups (for the first 128
+programs of a flags value; the rest are counted), and running totals.
+Flag 0x20 is taken to say that the counts are threads, not thread groups
+(the evidence is in `crates/victory-gpu/src/dispatch.rs`). These lines can
+show that the flag is not passed, or make the reading likely; only a run
+with the switch tells whether it is right. It is not followed unless asked:
+
+| Variable | Effect |
+|----------|--------|
+| `VICTORY_DISPATCH_THREADS=1` | experimental, any build: `DispatchX` counts with flag 0x20 are threads. The groups holding them run, and compute shaders are translated to stop the threads past a count themselves (own shader cache entries, so the first run translates every shader again). A dispatch that cannot run exactly the threads asked for (a partial thread group of a program with a group barrier, say, or more than 65535 thread groups along a dimension) is dropped, counted and logged |
+| `VICTORY_DISPATCH_THREADS=round` | as above, but a partial thread group of a program that cannot stop its own threads runs whole; the extra threads are counted and logged. What the host cannot run at all is still dropped |
+
 ### Measuring a run
 
 Every build logs, every five seconds, the frame rate with where a frame's

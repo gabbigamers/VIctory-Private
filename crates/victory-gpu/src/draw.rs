@@ -453,6 +453,11 @@ impl State {
     /// view's address (title memory).
     fn user_value(&self, compute: bool, slot: u8, root: RootType, dword: u32) -> u32 {
         match (self.roots_ref(compute).get(usize::from(slot)), root) {
+            // No root argument: every thread of every group runs, unless
+            // the dispatch says otherwise (`State::dispatch`).
+            (_, RootType::Other(victory_shader::emit::USER_THREAD_LIMIT)) => {
+                victory_shader::emit::THREAD_LIMIT_NONE
+            }
             (Some(Root::View(address)), RootType::Descriptor) if dword < 2 => {
                 (address >> (32 * dword)) as u32
             }
@@ -768,6 +773,10 @@ impl State {
                         .find(|m| m.0 == u.slot && u.root == RootType::Table);
                     values[u.index as usize] = match fresh {
                         Some(&(_, offset)) => offset,
+                        // A thread limit (its dword is the group's size).
+                        None if u.root == RootType::Other(victory_shader::emit::USER_THREAD_LIMIT) => {
+                            self.user_value(compute, u.slot, u.root, u.dword)
+                        }
                         None if u.dword == victory_shader::emit::ROOT_VIEW_OFFSET => {
                             // Where the root address lies in the copy its view shows.
                             let offset = match self.roots_ref(compute).get(usize::from(u.slot)) {
@@ -1095,15 +1104,72 @@ impl State {
         }
     }
 
-    /// Runs a dispatch on the host.
-    pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
+    /// Runs a dispatch of `counts` on the host. `flags`: the console's, for
+    /// `DispatchX` (`None` for the plain method). The counts are thread
+    /// groups unless the flags say threads and the run follows them
+    /// (`crate::dispatch`): then the groups holding those threads run, and
+    /// the program is told how many threads run along each dimension where
+    /// a count does not fill its last group. A dispatch that could not run
+    /// exactly the threads asked for is dropped and counted.
+    pub(crate) fn dispatch(&mut self, list: &HostList, counts: [u32; 3], flags: Option<u32>) {
+        self.dispatch_as(list, counts, flags, crate::dispatch::mode());
+    }
+
+    /// [`State::dispatch`] with the flags followed as `mode` says (the
+    /// run's, but for tests).
+    pub(crate) fn dispatch_as(
+        &mut self,
+        list: &HostList,
+        counts: [u32; 3],
+        flags: Option<u32>,
+        mode: crate::dispatch::Mode,
+    ) {
+        use crate::dispatch::{Mode, Plan};
         #[cfg(feature = "diagnostics")]
         if crate::pipeline::is_skipped(self.pipeline as This) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             dropped(list, self.pipeline, "dispatch");
             return;
         }
-        let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This) else {
+        let found = crate::pipeline::host_pipeline(self.pipeline as This);
+        // The thread-group size of the compute program it runs, if any.
+        let size = found
+            .filter(|p| p.compute)
+            .and_then(|p| p.stages.first())
+            .and_then(|s| s.translated().threads);
+        let is_constant =
+            |v: u32| self.compute.iter().any(|r| matches!(r, Root::Constants(c) if c.contains(&v)));
+        // What the tally tells programs apart by: without a host pipeline,
+        // the title's pipeline, so that each such program has its own lines.
+        let program = match found {
+            Some(p) => std::borrow::Cow::Borrowed(p.name.as_str()),
+            None => format!("no host pipeline (title pipeline {:#x})", self.pipeline).into(),
+        };
+        match flags {
+            // Counted and logged whether or not it can run.
+            Some(flags) => crate::dispatch::note(&crate::dispatch::Call {
+                method: crate::dispatch::Method::DispatchX,
+                flags: flags.into(),
+                counts,
+                size,
+                program: &program,
+                is_constant: &is_constant,
+                constants: &|| {
+                    let constants = self.compute.iter().filter_map(|r| match r {
+                        Root::Constants(c) => Some(c.iter().copied()),
+                        _ => None,
+                    });
+                    constants.flatten().take(32).collect()
+                },
+                followed: mode != Mode::Groups,
+            }),
+            None => {
+                if let Some(size) = size {
+                    crate::dispatch::note_plain(counts, size, &is_constant);
+                }
+            }
+        }
+        let Some(p) = found else {
             once!(
                 pipeline = format_args!("{:#x}", self.pipeline),
                 "a dispatch without a host pipeline dropped"
@@ -1117,18 +1183,73 @@ impl State {
             once!("a dispatch with a graphics pipeline");
             return;
         }
+        // Where the program takes its thread limits: the user-data dword
+        // per dimension, if it has one (`victory_shader::emit`, "Thread
+        // limits"). Only a dispatch counted in threads looks.
+        let threads = mode != Mode::Groups && flags.is_some_and(|f| f & crate::dispatch::THREAD_COUNTS != 0);
+        let mut limit_at = [None; 3];
+        if threads {
+            let limit = RootType::Other(victory_shader::emit::USER_THREAD_LIMIT);
+            for u in p.stages[0].translated().host.user_data.iter().filter(|u| u.root == limit) {
+                if let Some(at) = limit_at.get_mut(usize::from(u.slot)) {
+                    *at = Some(u.index);
+                }
+            }
+        }
+        let plan = crate::dispatch::plan(counts, flags, size, limit_at.map(|at| at.is_some()), mode);
+        let run = match plan {
+            Plan::Run(run) => run,
+            // Before anything is bound for it.
+            Plan::Refused(why) => {
+                crate::dispatch::outcome(counts, size, &plan, &p.name);
+                not_run(why);
+                DROPPED.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "diagnostics")]
+                dropped(list, self.pipeline, "dispatch");
+                return;
+            }
+        };
         if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             dropped(list, self.pipeline, "dispatch");
             return;
         }
+        // Counted as run only now that it does (a dispatch `bind` could
+        // not set up is among the dropped ones, not here).
+        if threads {
+            crate::dispatch::outcome(counts, size, &plan, &p.name);
+        }
+        let [x, y, z] = run.groups;
         #[cfg(feature = "diagnostics")]
-        list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
+        list.note_op(|| match run.limits {
+            Some(_) => self.op_text(format!("dispatch {x}x{y}x{z} of {counts:?} threads"), true),
+            None => self.op_text(format!("dispatch {x}x{y}x{z}"), true),
+        });
         #[cfg(feature = "diagnostics")]
         self.probe_small(list, true);
+        // `bind` set every limit to none; this dispatch's are set over that
+        // and taken back after it, so nothing later runs with them.
+        let limits = |values: [u32; 3]| {
+            let Some((param, _)) = p.stages[0].user_data else {
+                return;
+            };
+            for (at, value) in limit_at.into_iter().zip(values) {
+                if let Some(at) = at {
+                    // SAFETY: an open list with our root signature set; the
+                    // user-data parameter covers every dword the shader reads.
+                    unsafe { list.list.SetComputeRoot32BitConstant(param, value, at) };
+                }
+            }
+        };
+        if let Some(values) = run.limits {
+            limits(values);
+        }
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
+        if run.limits.is_some() {
+            limits([victory_shader::emit::THREAD_LIMIT_NONE; 3]);
+        }
         #[cfg(feature = "diagnostics")]
         self.probe_written(list);
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
@@ -3402,7 +3523,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             &st,
             &io,
             &res,
-            Options { view_marks: true },
+            Options { view_marks: true, ..Default::default() },
         )
         .unwrap();
         assert!(host_shader.view_marks);
@@ -3411,6 +3532,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             crate::pipeline::Translated {
                 host: host_shader,
                 used: used_entries,
+                threads: None,
             },
         );
         let hp = HostPipeline::new(&[shader], None).expect("compute host pipeline");

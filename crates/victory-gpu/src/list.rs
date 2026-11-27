@@ -1108,15 +1108,29 @@ extern "system" fn driver_hint(_: This, _feature: u64, _value: u64) -> u64 {
     0
 }
 
-/// `DispatchX(x, y, z, flags)`: a dispatch with console flags, which the
-/// host has no use for (the ray-tracing builder dispatches this way).
-extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, _flags: u32) {
+/// `DispatchX(x, y, z, flags)`: a dispatch with console flags (the
+/// ray-tracing builder dispatches this way). Every flags value is counted
+/// and logged with what came with it; flag 0x20 is taken to say the counts
+/// are threads, and is followed only with `VICTORY_DISPATCH_THREADS`
+/// ([`crate::dispatch`]).
+extern "system" fn dispatch_x(this: This, x: u32, y: u32, z: u32, flags: u32) {
+    count_dispatch();
     #[cfg(windows)]
-    state::dispatch(this, x, y, z);
+    with_state(this, |list, s| s.dispatch(list, [x, y, z], Some(flags)));
     #[cfg(not(windows))]
     {
-        let _ = (this, x, y, z);
-        count_dispatch();
+        // Without a host GPU nothing runs; the flags are still counted.
+        let _ = this;
+        crate::dispatch::note(&crate::dispatch::Call {
+            method: crate::dispatch::Method::DispatchX,
+            flags: flags.into(),
+            counts: [x, y, z],
+            size: None,
+            program: "no host GPU",
+            is_constant: &|_| false,
+            constants: &Vec::new,
+            followed: crate::dispatch::mode() != crate::dispatch::Mode::Groups,
+        });
     }
 }
 
@@ -1503,7 +1517,7 @@ mod state {
     }
     pub(super) extern "system" fn dispatch(this: This, x: u32, y: u32, z: u32) {
         super::count_dispatch();
-        with_state(this, |list, s| s.dispatch(list, x, y, z));
+        with_state(this, |list, s| s.dispatch(list, [x, y, z], None));
     }
     /// `DispatchMesh(x, y, z)` (the PC method of List6); the title's mesh
     /// programs take `x` groups only.
@@ -1518,14 +1532,28 @@ mod state {
     /// `DispatchMeshX(x, flags, indirect arguments, payload)`.
     /// shortcut: dispatches whose group count is in GPU memory (indirect)
     /// are dropped; make them ExecuteIndirect when the title uses them.
+    /// Its flags are not followed; a value other than 0 is counted and
+    /// logged ([`crate::dispatch`]).
     pub(super) extern "system" fn dispatch_mesh_x(
         this: This,
         x: u32,
-        _flags: u64,
+        flags: u64,
         indirect: u64,
         _payload: u64,
     ) {
         super::count_draw();
+        if flags != 0 {
+            crate::dispatch::note(&crate::dispatch::Call {
+                method: crate::dispatch::Method::DispatchMeshX,
+                flags,
+                counts: [x, 1, 1],
+                size: None,
+                program: "a mesh dispatch",
+                is_constant: &|_| false,
+                constants: &Vec::new,
+                followed: false,
+            });
+        }
         if indirect != 0 {
             static ONCE: std::sync::Once = std::sync::Once::new();
             ONCE.call_once(|| tracing::warn!("indirect mesh dispatches dropped"));
@@ -1613,6 +1641,12 @@ extern "system" fn execute_indirect(
     };
     let address = crate::resource::buffer_bytes(arguments).map(|(p, _)| p as u64 + offset);
     let counter = crate::resource::buffer_bytes(count).map(|(p, _)| p as u64 + count_offset);
+    // A dispatch's counts in GPU memory are groups to the host; what else
+    // its signature says (the single-pass dispatch has flags there) is
+    // logged once per distinct value.
+    if let [[kind @ (2 | 105), fields @ ..]] = args {
+        crate::dispatch::note_indirect(*kind, *fields);
+    }
     let mut ran = false;
     #[cfg(windows)]
     if let ([[kind, ..]], Some(address)) = (args, address)

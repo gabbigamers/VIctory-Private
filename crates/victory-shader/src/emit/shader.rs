@@ -53,6 +53,17 @@ pub const VIEW_WRITE_BITS: u32 = 1 << 22;
 /// resource-heap index, [`HEAP_VIEWS`] of them.
 pub const VIEW_READS: u32 = VIEW_WRITE_BITS;
 
+/// [`RootType::Other`](crate::native::RootType) code of a user-data dword
+/// the host sets for one dispatch: the number of threads that run along
+/// one dimension (`emit`, "Thread limits"). In such an entry of
+/// [`HostShader::user_data`](super::HostShader::user_data), `slot` is the
+/// dimension (0 x, 1 y, 2 z) and `dword` the thread group's size along it.
+/// The value is past anything a console container names as a root type.
+pub const USER_THREAD_LIMIT: u32 = 0x5644_0001;
+/// The value of a [`USER_THREAD_LIMIT`] dword that stops no thread: every
+/// thread of every group runs, as in a dispatch counted in groups.
+pub const THREAD_LIMIT_NONE: u32 = u32::MAX;
+
 /// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
 pub(crate) mod flags {
     pub const RAW_BUFFERS: u64 = 1 << 4;

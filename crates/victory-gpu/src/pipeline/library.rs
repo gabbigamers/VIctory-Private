@@ -207,6 +207,7 @@ fn open(device: &ID3D12Device1, blob: Vec<u8>) -> Option<Library> {
 fn tag(blob: &[u8]) -> String {
     let limit = victory_shader::emit::loop_limit().to_le_bytes();
     let total = victory_shader::emit::loop_total_limit().to_le_bytes();
+    let thread_limits = [u8::from(crate::shader_cache::thread_limits())];
     let translator = victory_shader::SOURCE_HASH.as_bytes();
     let mut h = blake3::Hasher::new();
     for part in [
@@ -215,6 +216,7 @@ fn tag(blob: &[u8]) -> String {
         include_bytes!("../shader_cache.rs"),
         &limit,
         &total,
+        &thread_limits,
         include_bytes!("host.rs"),
         include_bytes!("library.rs"),
     ] {

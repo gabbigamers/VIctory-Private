@@ -85,7 +85,7 @@ impl<'a> Lower<'a> {
 
     /// User-data dword `u.index`, which the host fills as `u` says, loaded
     /// in the entry block.
-    fn user_at(&mut self, u: UserData) -> V {
+    pub(super) fn user_at(&mut self, u: UserData) -> V {
         let index = u.index;
         self.user_reads.insert(index, u);
         self.s.user_data = self.s.user_data.max(index + 1);

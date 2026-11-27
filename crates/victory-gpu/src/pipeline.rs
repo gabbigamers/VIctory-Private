@@ -116,6 +116,8 @@ impl Shader {
 pub(crate) struct Translated {
     pub(crate) host: victory_shader::emit::HostShader,
     pub(crate) used: Vec<victory_shader::UsedResource>,
+    /// A compute program's thread-group size, as its container says.
+    pub(crate) threads: Option<[u32; 3]>,
 }
 
 #[cfg(windows)]
@@ -199,7 +201,7 @@ fn with_resources(
 ) -> Result<Translated, String> {
     use victory_shader::{Container, FourCC, HwStage};
     let c = Container::parse(container).map_err(|e| e.to_string())?;
-    let used = match c.part(FourCC::DXIL).or(c.part(FourCC::ACCC)) {
+    let program = match c.part(FourCC::DXIL).or(c.part(FourCC::ACCC)) {
         Some(part) => victory_shader::native_programs(part.data)
             .map_err(|e| e.to_string())?
             .into_iter()
@@ -208,12 +210,15 @@ fn with_resources(
                     p.stage,
                     HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs
                 )
-            })
-            .map(|p| p.used)
-            .unwrap_or_default(),
-        None => Vec::new(),
+            }),
+        None => None,
     };
-    Ok(Translated { host, used })
+    let threads = program.as_ref().and_then(|p| match p.io {
+        victory_shader::native::StageIo::Cs(cs) => Some(cs.threads),
+        _ => None,
+    });
+    let used = program.map(|p| p.used).unwrap_or_default();
+    Ok(Translated { host, used, threads })
 }
 
 #[repr(C)]
@@ -599,6 +604,8 @@ mod library;
 mod make;
 #[cfg(all(test, windows, feature = "diagnostics"))]
 mod placed_uav_tests;
+#[cfg(all(test, windows, feature = "diagnostics"))]
+mod thread_limit_tests;
 
 /// Keeps compiled host pipelines, and the list of title pipelines to start
 /// early, in `dir` (a folder of the cache) across runs.

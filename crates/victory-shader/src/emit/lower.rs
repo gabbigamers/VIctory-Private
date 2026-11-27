@@ -42,6 +42,8 @@ mod operands;
 mod scalar;
 mod smem;
 mod stage;
+#[cfg(test)]
+mod thread_limit_tests;
 mod valu;
 
 type Why = &'static str;
@@ -121,11 +123,15 @@ pub(crate) struct Parts<'a> {
 enum Stop {
     /// A phi whose incoming value has no DXIL form was read: redo with it missing.
     Retry(Value, Why),
+    /// The program reads user data where its thread limits were put: redo
+    /// without them.
+    Unlimited,
     Fail(ShaderError),
 }
 
+#[cfg(any(test, all(windows, feature = "host")))]
 pub(crate) fn lower(parts: &Parts) -> Result<Lowered, ShaderError> {
-    lower_limited(parts, Limits::in_force())
+    lower_with(parts, false)
 }
 
 /// What a lane's back edges are counted against.
@@ -148,13 +154,24 @@ impl Limits {
     }
 }
 
-/// [`lower`] with the limits given: the tests of the counting run loops
-/// against small ones.
-fn lower_limited(parts: &Parts, limits: Limits) -> Result<Lowered, ShaderError> {
+/// [`lower`]; with `thread_limits`, a compute program's threads past the
+/// host's limits leave at entry ([`Lower::limit_threads`]). A program
+/// that cannot take them is lowered exactly as without.
+pub(crate) fn lower_with(parts: &Parts, thread_limits: bool) -> Result<Lowered, ShaderError> {
+    lower_limited(parts, Limits::in_force(), thread_limits)
+}
+
+/// [`lower_with`] with the loop limits given: the tests of the counting
+/// run loops against small ones.
+fn lower_limited(parts: &Parts, limits: Limits, mut thread_limits: bool) -> Result<Lowered, ShaderError> {
     let mut bad = HashMap::new();
     loop {
-        match Lower::new(parts, &bad, limits).run() {
+        match Lower::new(parts, &bad, limits).run(thread_limits) {
             Ok(l) => return Ok(l),
+            Err(Stop::Unlimited) => {
+                thread_limits = false;
+                bad.clear();
+            }
             Err(Stop::Retry(v, why)) => {
                 if bad.insert(v, why).is_some() {
                     return Err(ShaderError::Unsupported {
@@ -732,8 +749,10 @@ impl<'a> Lower<'a> {
         }
     }
 
-    fn run(mut self) -> Result<Lowered, Stop> {
+    fn run(mut self, thread_limits: bool) -> Result<Lowered, Stop> {
         let p = self.x.p;
+        // First, so that the program's first block is the one after the test.
+        let limits = if thread_limits { self.limit_threads() } else { Vec::new() };
         let order = crate::ir::reverse_postorder(&p.blocks);
         for (n, &b) in order.iter().enumerate() {
             self.rpo[b] = n;
@@ -811,6 +830,16 @@ impl<'a> Lower<'a> {
             self.exit(b)?;
         }
         self.fill_phis()?;
+        // The limits sit past every dword the root parameters say they
+        // hold; a read of the program's own that took one of their places
+        // (a root descriptor's second dword where the container gives it
+        // one) would be handed a limit as its value, or the host the
+        // other way round. Such a program gets no limits: it is as
+        // without the option, and the host does not run a dispatch of
+        // its that would need them.
+        if limits.iter().any(|u| self.user_reads.get(&u.index) != Some(u)) {
+            return Err(Stop::Unlimited);
+        }
         let user_data = self.user_reads.values().copied().collect();
         self.s.samplers = self.samplers.len() as u32;
         let root_cbvs = self.s.root_cbvs.iter().map(|r| r.0).collect();
@@ -1035,7 +1064,7 @@ mod tests {
             view_marks: false,
         };
         let lowered = match limits {
-            Some(limits) => lower_limited(&parts, limits),
+            Some(limits) => lower_limited(&parts, limits, false),
             None => lower(&parts),
         }?;
         // Every program these tests lower is a well-formed function.
