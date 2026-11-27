@@ -1232,3 +1232,48 @@ Only what cannot be done from a cloud session.
     results of `the_containers_validate` and
     `pipelines_are_created_and_a_null_scene_is_missed`; decisions on
     2^24 as the bound of synthetic scenes and on the node test's range.
+* Ray-tracing prototype, the host side (`victory-gpu`'s `rt`: host
+  structures built with Direct3D 12 for inline ray queries, behind
+  `VICTORY_RT_BACKEND`, software by default): implemented, a module
+  that nothing in a run calls; reviewed (13 findings, all upheld; 12
+  fixed in code, 1 a matter of how validation is run) and corrected.
+  Tested (host tests): 83 tests of the parts that need no device
+  (selection, D3D12's limits, refit or rebuild, a structure's states,
+  the cache, release by fence value, scratch, bounds, timing), two of
+  them randomised lifetime properties; 19 faults planted by the
+  corrector each failed a test. Type-checked for Windows only: every
+  D3D12 call (`rt/device.rs`), the accessors added to `host.rs`, and
+  the smoke test, never executed. Not run on a device; not
+  hardware-validated; no timing.
+  * Evidence: D3D12's rules as read in the DirectX Raytracing
+    functional specification, and logic tested on this host. That a
+    device or the debug layer accepts the calls is speculative; the
+    document's status table lists the rules the reading left open.
+  * By default: the device report (`victory gpu-info`, a run's log)
+    ends with a `ray tracing backend:` line that says software and
+    that no run uses the hardware backend; three performance-log
+    columns after the other owners and before the wave columns
+    (`own_rt_structures_mb`, `own_rt_scratch_mb`, `own_rt_buffers_mb`;
+    rows R2 to R4 of docs/memory.md), 0 while nothing opens the backend.
+  * Behind the switches: `VICTORY_RT_BACKEND=hardware` or `auto`
+    changes that line only; `VICTORY_RT_REBUILD_AFTER_REFITS` (16) and
+    `VICTORY_RT_STRUCTURES_MB` (a quarter of the device's budget, 64
+    MiB to 2 GiB) are read where the backend is opened. Those numbers
+    and the scratch bounds are placeholders, not measurements.
+  * Accepted by the coordinator: a cache for one open list (a title
+    records several: not written); a refit past the limit, counted,
+    where no memory is left to rebuild; output buffers as scratch.
+  * What the review found: a primitive total that wrapped in a release
+    build and was accepted; a stale bottom level, given up, making its
+    top level readable again; pins for several lists that kept no
+    contract; no barrier before a refit in place; compaction after a
+    refit at the first build's size; collections without bound; a
+    smoke test that would not reach the compacting copy.
+  * Not reconciled, seen at integration: `docs/dxr-architecture.md`
+    gives the switch the values software, auto, native and hybrid;
+    this code takes software, hardware and auto.
+  * For the owner's machine: on Windows with the GPU, `cargo test -p
+    victory-gpu structures_are_built -- --nocapture`, keeping a skip
+    line or `COMPACTION NOT EXERCISED` (the compacting copy is then
+    untested there); `victory gpu-info` for the last line; decisions
+    on the placeholders and on `Kind::Video` in docs/memory.md.

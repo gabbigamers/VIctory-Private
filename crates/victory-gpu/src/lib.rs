@@ -14,7 +14,9 @@
 //! [`frame`] frame pacing, [`object`] what all console graphics objects
 //! share, [`console`] which console model the title sees, `external` host
 //! libraries recording into title lists, [`rtcapture`] the record of what
-//! the title asks its ray-tracing builder to build (off by default). Planned:
+//! the title asks its ray-tracing builder to build (off by default), [`rt`]
+//! an experimental host ray-tracing backend that nothing here calls yet.
+//! Planned:
 //! `present` (swap chain).
 
 pub mod account;
@@ -57,6 +59,7 @@ pub mod query;
 pub mod queue;
 pub mod resource;
 pub mod root;
+pub mod rt;
 pub mod rtcapture;
 #[cfg(windows)]
 mod sampler;

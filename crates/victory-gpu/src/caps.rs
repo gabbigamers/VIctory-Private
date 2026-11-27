@@ -48,6 +48,9 @@ pub struct HostCaps {
     /// (none), 10 (1.0), 11 (1.1).
     pub binding_tier: u32,
     pub raytracing_tier: u32,
+    /// The device answers as `ID3D12Device5`, the interface ray-tracing
+    /// structures are sized through (`crate::rt`).
+    pub raytracing_device: bool,
     pub depth_bounds: bool,
     /// 64-bit atomics on typed resources and through the descriptor heap.
     pub atomics64: bool,
@@ -178,7 +181,9 @@ pub fn assess(caps: &HostCaps) -> Vec<Finding> {
     find(
         "ray tracing tier 1.1",
         have(caps.raytracing_tier >= 11, State::Degraded),
-        "for building the title's ray-tracing structures on the host (not done yet on any host)".into(),
+        "the experimental hardware ray-tracing backend needs it (off unless asked for; the software traversal \
+         does not)"
+            .into(),
     );
     findings
 }
@@ -199,6 +204,19 @@ pub fn overall(findings: &[Finding]) -> State {
 /// a run logs, and what a hardware report in docs/gpu-compatibility.md is
 /// taken from. Nothing in it comes from a title.
 pub fn report(caps: &HostCaps) -> String {
+    use std::fmt::Write;
+    let (request, unknown) = crate::rt::select::Request::from_env();
+    let mut out = report_under(caps, request);
+    if let Some(unknown) = unknown {
+        let variable = crate::rt::select::VARIABLE;
+        let _ = writeln!(out, "    note  {variable}={unknown} is not software, hardware or auto: taken as software");
+    }
+    out
+}
+
+/// [`report`] with the ray-tracing backend that `request` would choose, and
+/// not what the environment asks for.
+pub fn report_under(caps: &HostCaps, request: crate::rt::select::Request) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     let driver = caps.driver.map_or("unknown".to_string(), |[a, b, c, d]| format!("{a}.{b}.{c}.{d}"));
@@ -226,6 +244,15 @@ pub fn report(caps: &HostCaps) -> String {
         };
         let _ = writeln!(out, "{state:>8}  {}: {}", f.need, f.detail);
     }
+    // Which ray-tracing backend is selected on this device, and what the
+    // device lacks for the other. A run's ray tracing is the software
+    // traversal whatever is selected, until the hardware backend is joined
+    // to it: the line says so, so that it promises nothing.
+    let _ = writeln!(
+        out,
+        "ray tracing backend: {}; no run uses the hardware backend yet",
+        crate::rt::select::select(caps, request).describe()
+    );
     out
 }
 
@@ -243,6 +270,7 @@ mod tests {
             mesh_shaders: true,
             binding_tier: 3,
             raytracing_tier: 11,
+            raytracing_device: true,
             depth_bounds: true,
             atomics64: true,
             view_heap: Some(SHADER_HEAP_VIEWS + (1 << 18)),
@@ -344,14 +372,34 @@ mod tests {
             wave_lanes: (32, 32),
             ..full()
         };
-        let text = report(&caps);
+        let text = report_under(&caps, crate::rt::select::Request::Software);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "adapter: Some Adapter (NVIDIA 0x10de:0x1234), driver 32.0.15.7000");
         assert_eq!(lines[1], "memory: 16000 MB on the card, 8000 MB shared, budget now 15200 MB");
-        assert_eq!(lines.len(), 2 + assess(&caps).len());
+        assert_eq!(lines.len(), 2 + assess(&caps).len() + 1);
+        assert_eq!(
+            lines[lines.len() - 1],
+            "ray tracing backend: software (VICTORY_RT_BACKEND is unset or software; this device could run the \
+             experimental hardware backend); no run uses the hardware backend yet"
+        );
+        let able = report_under(&caps, crate::rt::select::Request::Auto);
+        assert_eq!(
+            able.lines().last(),
+            Some(
+                "ray tracing backend: hardware inline RayQuery, experimental (VICTORY_RT_BACKEND=auto); no run uses \
+                 the hardware backend yet"
+            )
+        );
+        let older = HostCaps { raytracing_tier: 10, ..caps.clone() };
+        let asked = report_under(&older, crate::rt::select::Request::Hardware);
+        assert!(
+            asked.lines().last().is_some_and(|l| l.starts_with("ray tracing backend: software, though")
+                && l.contains("ray tracing tier 1.0 (1.1 needed)")),
+            "{asked}"
+        );
         assert!(lines.iter().any(|l| l.starts_with("DEGRADED  64-lane waves: host waves have 32 to 32 lanes")));
         assert!(lines.iter().any(|l| l.starts_with("     met  mesh shaders")));
-        let unknown = report(&HostCaps::default());
+        let unknown = report_under(&HostCaps::default(), crate::rt::select::Request::Software);
         assert!(unknown.starts_with("adapter:  (unknown vendor 0x0000:0x0000), driver unknown"), "{unknown}");
     }
 

@@ -470,17 +470,21 @@ fn log_gpu_times(frames: f64) {
 /// allocations at submissions.
 pub(crate) fn video_memory() -> Option<[(f64, f64); 2]> {
     static ADAPTER: OnceLock<Option<IDXGIAdapter3>> = OnceLock::new();
-    let adapter = ADAPTER
-        .get_or_init(|| {
-            let device = &host()?.device;
-            // SAFETY: plain device and DXGI queries.
-            unsafe {
-                let luid = device.GetAdapterLuid();
-                let factory: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
-                factory.EnumAdapterByLuid(luid).ok()
-            }
-        })
-        .as_ref()?;
+    video_memory_of(ADAPTER.get_or_init(|| adapter_of(&host()?.device)).as_ref()?)
+}
+
+/// The adapter `device` is on.
+pub(crate) fn adapter_of(device: &ID3D12Device) -> Option<IDXGIAdapter3> {
+    // SAFETY: plain device and DXGI queries.
+    unsafe {
+        let luid = device.GetAdapterLuid();
+        let factory: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        factory.EnumAdapterByLuid(luid).ok()
+    }
+}
+
+/// [`video_memory`] of `adapter`: our process's use and budget there.
+pub(crate) fn video_memory_of(adapter: &IDXGIAdapter3) -> Option<[(f64, f64); 2]> {
     let info = |group| {
         let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
         // SAFETY: a valid out pointer.
@@ -1216,6 +1220,7 @@ impl Host {
         if let Some(o) = feature::<D3D12_FEATURE_DATA_D3D12_OPTIONS5>(device, D3D12_FEATURE_D3D12_OPTIONS5) {
             caps.raytracing_tier = o.RaytracingTier.0 as u32;
         }
+        caps.raytracing_device = device.cast::<ID3D12Device5>().is_ok();
         if let Some(o) = feature::<D3D12_FEATURE_DATA_D3D12_OPTIONS7>(device, D3D12_FEATURE_D3D12_OPTIONS7) {
             caps.mesh_shaders = o.MeshShaderTier != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
         }
@@ -4025,6 +4030,53 @@ impl Host {
             }
         }
     }
+}
+
+/// What the experimental ray-tracing backend (`crate::rt`) needs of the
+/// queue. It records lists of its own, which name only buffers of its own,
+/// so none of the title's submission work (`Host::execute`) applies to
+/// them. Nothing in a run calls these yet.
+impl Host {
+    /// Runs closed `lists` and returns the fence value that is complete
+    /// once they have run, without waiting for it. Taken under the
+    /// submission lock, so fence values follow the queue's order: a
+    /// submission of the title's made after this one waits for its own,
+    /// later value and so for these lists too.
+    pub(crate) fn submit_unwaited(&self, lists: &[Option<ID3D12CommandList>]) -> windows::core::Result<u64> {
+        let mut submitted = self.submitted.lock().unwrap_or_else(|e| e.into_inner());
+        *submitted += 1;
+        // SAFETY: closed lists of the caller's; the fence is ours.
+        unsafe {
+            self.queue.ExecuteCommandLists(lists);
+            self.queue.Signal(&self.fence, *submitted)?;
+        }
+        Ok(*submitted)
+    }
+
+    /// The highest fence value whose submission has run.
+    pub(crate) fn completed(&self) -> u64 {
+        // SAFETY: a plain query.
+        unsafe { self.fence.GetCompletedValue() }
+    }
+
+    /// Returns once the submission with fence value `value` has run.
+    pub(crate) fn wait_for(&self, value: u64) -> windows::core::Result<()> {
+        // SAFETY: given no event, the call itself waits for the value.
+        unsafe { self.fence.SetEventOnCompletion(value, HANDLE::default()) }
+    }
+
+    /// The ticks a second of the queue's timestamps.
+    pub(crate) fn timestamp_frequency(&self) -> windows::core::Result<u64> {
+        // SAFETY: a plain query.
+        unsafe { self.queue.GetTimestampFrequency() }
+    }
+}
+
+/// Our process's private commit and working set now, bytes: for
+/// `crate::rt`'s measurements.
+pub(crate) fn commit_and_working_set() -> (u64, u64) {
+    let memory = process_memory();
+    (memory.commit, memory.working_set)
 }
 
 /// Host resources that view heap slots stopped viewing while a submission

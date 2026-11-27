@@ -270,6 +270,9 @@ ranges (address space only).
 | C2 | A save of the pipeline library | process heap | the whole serialised size again, on top of C1, under the library's lock | transient; runs when pipelines were stored, when the first use of any pipeline is recorded, and from idle workers every 20 s | C1 | none |
 | C3 | Every shader container the title passes, and its translation | process heap | container plus DXIL each | a static map that only inserts; after translation the DXIL is read only when a pipeline is made | the shader cache on disk | none |
 | C4 | Live pipeline state objects | driver memory | not in this code | while the title's pipeline or a list holds them | | counts only |
+| R2 | Host ray-tracing structures of the experimental backend (`crate::rt`; nothing unless `VICTORY_RT_BACKEND` turns it on) | on the card: one committed buffer a structure | what the device asks for each, rounded up to 64 KiB; bounded together at a quarter of the device's budget (64 MiB to 2 GiB) or `VICTORY_RT_STRUCTURES_MB` | while the structure's owner holds it, then until every submission that may read it has run | none: built from geometry, not a copy of it | `own_rt_structures_mb` |
+| R3 | That backend's other video memory: build scratch, its buffer for compacted sizes, and the output buffers a validation run's dispatches write | on the card | scratch in chunks of 4 MiB or one build's need, at most 256 MiB at once, 32 MiB kept idle; outputs as asked | scratch is reused once the submission that used a chunk has run, and idle chunks beyond what is kept are released; an output with its holder | transient | `own_rt_scratch_mb` |
+| R4 | That backend's buffers in system memory: instance descriptions, geometry a validation run uploads, read-backs | upload and read-back heaps | instance chunks of 1 MiB, at most 64 MiB at once, 4 MiB kept idle; the rest as asked | instance chunks as R3's scratch; the others with their holder | instance descriptions are written from the caller's | `own_rt_buffers_mb` |
 
 ### What is counted now
 
@@ -300,6 +303,9 @@ first run with the log is also the first check of these figures.
 | `own_demand_pages_mb` | G11 | whole 4 MiB buffers of pages held on demand, from a buffer's first copy until its last copy is gone | the maps and counters beside them (process heap, bounded: see the case below) |
 | `own_structure_slots` | G12 | host view heap slots that hold a view of a ray-tracing structure, as far as they are followed (a count) | slots past 2^14 a heap; the fixed tables of what was logged (static, 400 bytes) |
 | `own_rt_capture_mb` | R1 | the capture registry's entries and the addresses structures were made at; 0 unless `VICTORY_RT_CAPTURE` is on | the registry's own map nodes; a description while it is read |
+| `own_rt_structures_mb` | R2 | result buffers of host ray-tracing structures, live and waiting for their last reader | 0 unless the experimental backend is on |
+| `own_rt_scratch_mb` | R3 | build scratch chunks, the compacted-size buffer, a validation run's output buffers | on the card: not to be added to the system-memory owners |
+| `own_rt_buffers_mb` | R4 | instance-description chunks, uploads and read-backs of the backend | its query heap and command allocators |
 | `private_working_set_mb` | | the process's working set without section and mapped-file pages | not given before Windows 10 22H2 |
 
 A release of more than was counted leaves the gauge at zero and is noted;

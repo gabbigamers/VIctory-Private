@@ -161,6 +161,10 @@ pub enum Kind {
     /// chunks, pages held on demand and the argument and budget buffers of
     /// lists are then on the card, and still counted under their owners.
     GpuSystem,
+    /// Video memory: default heaps, on the card of a device that has one
+    /// (an adapter without its own memory keeps them in system RAM, which
+    /// the adapter's report of its memory says, not this counter).
+    Video,
     /// A count, not bytes.
     Count,
 }
@@ -271,10 +275,28 @@ pub enum Owner {
     /// or what a description takes while it is being read (36 MiB at
     /// most, for the call).
     RtCapture,
+    /// R2: host ray-tracing structures of the experimental backend
+    /// (`crate::rt`): each result buffer at the size it was made with (what
+    /// the device asked for, rounded up to 64 KiB), from when it is made
+    /// until it is released: while its structure lives, and after that until
+    /// every submission that may read it has run. Nothing without the
+    /// backend.
+    RtStructures,
+    /// R3: the video memory of `crate::rt` that is no structure: its build
+    /// scratch chunks, in use or kept for reuse, its buffer for compacted
+    /// sizes, and the output buffers a validation run's dispatches write.
+    RtScratch,
+    /// R4: the system-memory buffers of `crate::rt`: chunks of instance
+    /// descriptions, geometry it uploads itself (a validation run's; a
+    /// title's geometry is its buffer copies), and its read-back buffers
+    /// (compacted sizes, timestamps, results read back). Not its query heap
+    /// or command allocators (runtime memory), and nothing in video memory
+    /// (R3).
+    RtBuffers,
 }
 
 impl Owner {
-    pub const ALL: [Owner; 18] = [
+    pub const ALL: [Owner; 21] = [
         Owner::TitlePages,
         Owner::TitlePagesMapped,
         Owner::TitleSections,
@@ -293,6 +315,9 @@ impl Owner {
         Owner::DemandPages,
         Owner::StructureSlots,
         Owner::RtCapture,
+        Owner::RtStructures,
+        Owner::RtScratch,
+        Owner::RtBuffers,
     ];
 
     /// The owner's column in the performance log.
@@ -316,6 +341,9 @@ impl Owner {
             Owner::DemandPages => "own_demand_pages_mb",
             Owner::StructureSlots => "own_structure_slots",
             Owner::RtCapture => "own_rt_capture_mb",
+            Owner::RtStructures => "own_rt_structures_mb",
+            Owner::RtScratch => "own_rt_scratch_mb",
+            Owner::RtBuffers => "own_rt_buffers_mb",
         }
     }
 
@@ -336,7 +364,9 @@ impl Owner {
             | Owner::Staging
             | Owner::HeapTables
             | Owner::ListBuffers
-            | Owner::DemandPages => Kind::GpuSystem,
+            | Owner::DemandPages
+            | Owner::RtBuffers => Kind::GpuSystem,
+            Owner::RtStructures | Owner::RtScratch => Kind::Video,
         }
     }
 }
