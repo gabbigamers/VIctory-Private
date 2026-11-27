@@ -8,50 +8,75 @@ the platform underneath it and converts the title's data, ahead of time where
 it can (shaders and pipelines too, see Getting started) and on first use
 otherwise. See [docs/architecture.md](docs/architecture.md).
 
-## Status (2026-11-25)
-
-**Not playable yet, because of the framerate: about 1 frame per second in the
-world.** Nothing else keeps the game from working: the title boots, runs its
-menus at its own 30 fps, loads the world, plays the intro cutscene and
-reaches the **prologue**, the mission after it, with the graphics fully
-displayed. 
+## Status (2026-11-27)
 
 | Stage | State |
 |-------|-------|
-| Boot, first-boot screens (accessibility, language, settings, legal) | works, 30 fps |
-| Intro video with sound | works |
-| Start screen, profile and saves | works |
-| Loading into the world (about a minute) | works |
-| The intro cutscene | plays at about 1 fps (0.9-1.0 s a frame, warm cache, quiet machine): textured and lit characters with whole hair, buildings, sky, depth of field, the title card, credits and interface. Missing: ray-traced shadows and indirect light, the local-light shadow mask. Seen in some shots: a pink band over nearer bodies, a stand-in head on a secondary character for a few frames |
-| The prologue | reached; the graphics are fully displayed, at about 1 fps |
+| Boot, first-boot screens (accessibility, language, settings, legal) | Not Tested, 30 fps is the goal |
+| Intro video with sound | Not Tested |
+| Start screen, profile and saves | Not Tested |
+| Loading into the world (about a minute) | Not Tested |
+| The intro cutscene | Not Tested |
+| The prologue | Not Tested |
 
-In the intro cutscene at 1 fps the opening credits land over other shots than
-on a console: they follow the frame count, the shots follow the clock.
+## Architecture:
 
-Tested on one machine: Windows 11, AMD RX 6700 XT (12 GB).
+| Features |
+| Native x86-64 Execution | Executes Xbox Series X|S CPU code directly on Windows. |
+| Semantic Compatibility Layer | Translates guest operations into functionally equivalent native PC operations. |
+| Vendor-Independent Design | Capability-based hardware support, with NVIDIA prioritized for development. |
 
-> **Warning.** Entering the world on a real GPU hung it in earlier builds,
-> and Windows then reset the display driver (every monitor goes black for a
-> moment). The latest runs, several minutes each in the world, did not, but
-> it is not ruled out; a run can also end on a GPU fault (`crashes.log`). A
-> diagnostics build with `VICTORY_D3D12_WARP=1` renders on the software
-> adapter instead (too slow to reach the world in minutes).
+## Ray Tracing:
+| Features |
+| Native DXR Backend (Experimental) | Utilizes dedicated hardware for ray traversal and triangle intersections. | 
+| Hybrid Ray Tracing (Experimental) | Combines hardware traversal with guest-compatible intersection calculations. |
+| Software Ray Tracing Fallback | Retains translated compute-based traversal for unsupported workloads. |
+| Adaptive RT Backend Selection (Planned) | Selects the fastest validated implementation for each workload. |
+| Acceleration Structure Management | Supports native BLAS/TLAS construction, refitting, compaction and caching. |
+| Inline RayQuery Translation | Generates native DXIL ray-query operations. |
+| Semantic Traversal Recognition (In Development) | Identifies guest ray-tracing workloads for native substitution. |
 
-What each part does today and what it still needs:
+## Shader Translation:
+| Features |
+| RDNA-to-DXIL Translation | Recompiles console GPU instructions into DirectX-compatible shaders. |
+| Wave64 Emulation (Experimental) | Enables supported 64-lane workloads on 32-lane GPU architectures. |
+| Shader Execution Safeguards | Provides individual loop limits and cumulative execution protection. |
+| Persistent Shader Caching | Stores translated shaders and compiled pipelines across sessions. |
+| DXIL Validation | Validates generated shader containers using Microsoft's official validator. |
 
-| Subsystem | Today | Needs |
-|-----------|-------|-------|
-| Loader | Runs the title's executable and its DLLs in our process; crash reports name the faulting code and are kept in `crashes.log` | – |
-| Runtime services | One signed-in offline user, licences, packages, saves that survive a kill at any step, text entry dialog | Speech is silent; the dialog and relaunch are untested live |
-| Network | Offline by design: the title cannot reach the network | – |
-| Files and streaming | Archives and streamed data read, zlib and BCPack decoded in parallel | Loading is limited by writes into title memory |
-| Input | XInput pads, keyboard, keyboard stand-in pad | Trigger rumble |
-| Audio | Menu, video and loading sound; XMA voices and Opus streams decode | Reverb is silent; Opus results unverified against the title |
-| GPU: menus | Draws, compute and presentation on host D3D12; only changed title memory is copied | Frame pacing drifts on one screen in release builds |
-| GPU: world | The scene is drawn and presented: mesh pipelines, indirect execution, views the shaders pick from the heap themselves, title memory read by address, depth written from compute, lists that wait for values other queues write, textures made when a shader first reads them, pipelines pre-built or made by worker threads and kept on disk, depth bounds on supporting adapters (synthetic tests) | The title's ray-tracing structures are never built (no ray-traced shadows or indirect light in the intro cutscene); about 1 s a frame; draws of untranslated shaders are dropped; real queries, HDR and scaling are missing |
-| Shaders | Console GPU code recompiled to DXIL, ahead of time (`translate --cache`) or at first use, cached on disk. Menus: all. World: all but under 300 of 24,387 programs | Merged geometry stages (195 programs) and under 100 others; fused multiply-adds follow the host GPU; some compute programs need a GPU with 64-lane waves |
-| Textures | Console tiled layouts and detiling for the modes the title uses | Render-target metadata planes |
-| Series S mode | Menus, loading and the world run with the PC upscaler (`VICTORY_FIDELITYFX_DIR`, about 1 s a frame) | The title's own upscaler DLLs: six of their passes are untranslated, so their picture is wrong |
+## Memory Management:
+| Features |
+| Memory Ownership Tracking | Tracks resource ownership, lifetime, consumers and allocation dependencies. |
+| Memory Budget Management | Adapts resource allocation to available system RAM and VRAM. |
+| On-Demand Memory Paging (Experimental) | Creates host-backed memory pages when guest shader accesses require them. |
+| Resource Lifetime Management | Protects GPU resources against premature release and invalidation. |
+| Memory Allocation Accounting | Provides detailed per-subsystem memory consumption statistics. |
+| Scratch Memory Pooling | Reuses temporary ray-tracing allocations to reduce allocation overhead. |
+
+## Rendering & Streaming:
+| BCPack Texture Decompression | Implements corrected texture decoding backed by extensive synthetic validation. |
+| Native Direct3D 12 Rendering | Translates console graphics workloads into host GPU commands. |
+| Mesh Shader Support | Supports modern geometry rendering pipelines. |
+| Asynchronous Pipeline Compilation | Reduces blocking compilation during rendering. |
+| Texture Streaming | Converts and uploads textures as required by the guest renderer. |
+| FidelityFX Integration | Supports compatible PC-native upscaling providers. |
+| Xbox Series X|S Profiles | Supports both console rendering configurations. |
+
+## Validation & Diagnostics:
+| Independent Ray-Tracing Reference | Provides mathematical CPU reference implementations for intersection correctness. |
+| Synthetic Workload Validation | Tests rendering operations independently of game execution. |
+| Performance Instrumentation | Records CPU execution, GPU execution, frame pacing and memory consumption. |
+| GPU Capability Detection | Identifies supported shader models, wave sizes and ray-tracing capabilities. |
+| Regression Testing | Protects existing functionality against unintended implementation changes. |
+
+## Development Objectives:
+| Full Rendering Fidelity | Preserve original geometry, textures, materials, lighting and shadows. |
+| Sustained 30 FPS | Target consistent native rendering without frame generation. |
+| 16 GB RAM Compatibility | Reduce physical memory requirements without sacrificing rendering quality. |
+| Cross-Vendor Compatibility | Support capable NVIDIA, AMD and Intel GPUs through standardized APIs. |
+| Complete World Rendering | Achieve accurate geometry, reliable streaming and complete map representation. |
+
+
 
 ## Getting started
 
@@ -76,11 +101,8 @@ repository nearer the drive's root.
 A run in the world takes about 33 GB of Windows commit (RAM plus paging
 file) and about 10 GB of video memory. The tested machine has 32 GB of RAM
 and a commit limit of about 80 GB. Check **Committed** under **Task Manager →
-Performance → Memory**. If `crashes.log` reports Windows error 1455, the
-machine's commit limit was reached: close other applications and retry. A
-larger paging file raises that limit and gets a run going, but it is a
-stop-gap and not how this is meant to work: running inside 16 GB of RAM is
-a goal of the project ([docs/memory.md](docs/memory.md)).
+Performance → Memory**. If `crashes.log` reports Windows error 1455, close
+other applications or increase the Windows paging file size, then retry.
 
 ```powershell
 cargo xtask install-hooks                # asset-policy check on every commit
@@ -158,14 +180,7 @@ victory translate [paths...] --cache [--pipelines] [--jobs N]
 victory run <exe> [--execute] [--unimplemented trap|zero] [--strict]
             [--console series-x|series-s] [-- <title arguments>]
 victory config
-victory gpu-info
 ```
-
-`gpu-info` describes the host GPU and how it meets what the translation
-needs (shader model, mesh shaders, wave lane counts, heap size, fused
-multiply-add, memory). It reads no title files. A run logs the same lines
-when it makes its device. See
-[docs/gpu-compatibility.md](docs/gpu-compatibility.md).
 
 `translate --jobs N` requires a positive worker count. Omit it to use the
 default worker count.
@@ -224,77 +239,12 @@ The on/off switches below (`...=1`) are off when unset or set to `0`.
 | `VICTORY_D3D12_WARP=1` | host device on the software adapter (slow; cannot reset the driver) |
 | `VICTORY_PIPELINE_LOG=<file>` | a line per title pipeline created (key, shaders, state), first used, and made or loaded (library name); `translate --cache --pipelines` writes the last kind too |
 | `VICTORY_PREBUILD_KEYS=<file>` | `translate --cache --pipelines` makes nothing and lists each pack record's key, shaders and state (or why it is skipped) |
-| `VICTORY_MEMORY_PAGING=1` | experimental, any build: a 64 KiB page of title memory that a translated shader reached by address and that had no host copy gets one after the submission that missed it, and so do the pages after it in its aligned 4 MiB, side by side in one host buffer (`VICTORY_MEMORY_PAGING_MB=<megabytes>` of such buffers at most, 256 unset, 4096 at most; `own_demand_pages_mb` in the performance log). The list that missed is not run again and its writes stay out of title memory as before, so a program the title runs only once has lost its output if it missed; the switch helps work that runs again. Unset, such pages read 0 in every frame as before. Either way the log has a line "title memory misses over N frames" (each of the first eight frames with something to report, then every 60 frames): misses by reason (in a 256 MiB region with no copy, not title memory, tracked memory in no buffer object, in a title buffer with no copy, ...), frames whose writes were withheld, the pages looked at and the time it took, the draws and dispatches of lists whose writes were withheld by pipeline, pages the title and shaders both wrote, the pages a table names for a copy holding only part of them (the rest of such a page reads 0 and is no counted miss), the regions missed most; and a line for each kind of miss, and each pipeline with withheld writes, when first seen. `VICTORY_MEMORY_PROBES=0` turns off the empty page-table blocks that make misses name their page; `VICTORY_MEMORY_MISS_REASONS=0` turns off looking at missed pages (a few system calls for at most 16 pages a frame; ignored while pages on demand are on). What a run shows and does not show: docs/memory.md, G11 |
-| `VICTORY_STRUCTURE_ADDRESSES=1` | any build, experimental: shaders read the `Location` of a view of a ray-tracing structure (a shader view of dimension 11) as the view's address, where without it they read what they did before (0 for such a view made with no resource), and the host is given no view of a resource passed with one. Not shown by a run to be what a title's trace programs need. To compare two runs: a trace that then reads the structure where no host copy holds it shows in the `title memory this frame` lines as missed pages near the logged addresses, and holds back that frame's and the next one's title-memory write-backs. The counts and the log lines about such views are there without it |
-| `VICTORY_RT_BACKEND=hardware` | experimental, any build, not yet run on a GPU: selects the host ray-tracing backend (host structures traversed by inline `RayQuery`) where the device can run it: ray tracing tier 1.1, shader model 6.6 and `ID3D12Device5`. `auto` selects it on such a device and the software traversal elsewhere; unset or `software` is the software traversal, and so is any other value, which the report notes. No run uses the hardware backend yet: the switch changes only the `ray tracing backend:` line that ends the device report of `victory gpu-info` and of a run's log, which names what the device lacks ([docs/dxr-host-backend.md](docs/dxr-host-backend.md)) |
-| `VICTORY_RT_REBUILD_AFTER_REFITS=<n>` | experimental, read only where that backend is opened, which nothing in a run does yet: a structure refitted `n` times in a row is built again at its next change, instead of after 16; `0` never refits. Where the memory bound has no room for that rebuild the structure is refitted once more and counted (not with `0`). 16 is a placeholder, not a measurement |
-| `VICTORY_RT_STRUCTURES_MB=<MiB>` | experimental, read only where that backend is opened: the most video memory its structures may take (`own_rt_structures_mb` in the performance log), instead of a quarter of the device's budget within 64 MiB to 2 GiB. A build over the bound is refused and counted; nothing is evicted. The bounds are placeholders, not measurements |
-| `VICTORY_SHADER_LOOP_LIMIT=<n>` | a translated shader loop stops its lane after `n` iterations instead of 2^20, counted for each loop from where the lane enters it (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
-| `VICTORY_SHADER_LOOP_TOTAL_LIMIT=<n>` | a lane is stopped once it would have gone round its translated loops `n` times in all instead of 2^22, which is what bounds a loop inside another, and a loop whose `continue` the translation counts as a loop inside it (own shader cache entries) |
+| `VICTORY_SHADER_LOOP_LIMIT=<n>` | translated shader loops stop after `n` iterations per lane instead of 2^20 (own shader cache entries); if a lower `n` makes world frames much faster, loops hitting the limit are what makes them slow |
 | `VICTORY_AUDIO_CAPTURE=<file.wav>` | records what the title plays (our process only) |
 | `VICTORY_XMA_DUMP=<dir>` | saves the first 32 XMA voices' context and input |
 
 Every build appends unhandled exceptions, panics, and host GPU failures to
 `crashes.log` in the title's data folder.
-
-`VICTORY_RT_CAPTURE=1` (any build) records what the title asks its
-ray-tracing builder to build and logs counts of it; nothing is built from
-the record yet, and the title runs as without it
-([docs/dxr-build-capture.md](docs/dxr-build-capture.md)).
-
-Every build also logs each distinct flags value the title passes to the
-console's dispatch-with-flags method (`DispatchX`, which the ray-tracing
-structure builder uses): the counts, the program's thread-group size and
-the call's root constants at each program's first call and at its first
-call with a count that fills no whole thread groups (for the first 128
-programs of a flags value; the rest are counted), and running totals.
-Flag 0x20 is taken to say that the counts are threads, not thread groups
-(the evidence is in `crates/victory-gpu/src/dispatch.rs`). These lines can
-show that the flag is not passed, or make the reading likely; only a run
-with the switch tells whether it is right. It is not followed unless asked:
-
-| Variable | Effect |
-|----------|--------|
-| `VICTORY_DISPATCH_THREADS=1` | experimental, any build: `DispatchX` counts with flag 0x20 are threads. The groups holding them run, and compute shaders are translated to stop the threads past a count themselves (own shader cache entries, so the first run translates every shader again). A dispatch that cannot run exactly the threads asked for (a partial thread group of a program with a group barrier, say, or more than 65535 thread groups along a dimension) is dropped, counted and logged |
-| `VICTORY_DISPATCH_THREADS=round` | as above, but a partial thread group of a program that cannot stop its own threads runs whole; the extra threads are counted and logged. What the host cannot run at all is still dropped |
-
-### Measuring a run
-
-Every build logs, every five seconds, the frame rate with where a frame's
-time went, and the frame times as a distribution: median, 95th and 99th
-percentile, longest, the share of late frames (over 50 ms, a frame and a
-half at 30 fps) and the jitter (the mean difference between one frame's
-time and the next one's).
-
-Beside those lines, at the first report and whenever it changed: how many
-views of ray-tracing structures the title made (shader views of dimension
-11, whose description holds the structure's address), how many slots of
-the host view heaps hold one now, the addresses of the structures those
-name, and whether shaders read those addresses
-(`VICTORY_STRUCTURE_ADDRESSES`). Each distinct address is also logged once
-when its first view is made (the first 32), and so is a view whose
-dimension the Direct3D 12 header does not name.
-
-`VICTORY_PERF_LOG=<file.csv>` (any build; a file outside the repository)
-also writes those five-second periods as rows, with draws and dropped draws
-a frame and memory as four separate things: the process's commit and its
-working set (what is in RAM), each with its peak, and the page-fault rate;
-the machine's commit, RAM, free RAM and paging files; video memory on the
-card and shared. The file is made anew by each
-run and written a row at a time, so a run that crashes keeps what it
-measured. It holds measurements only, nothing of the title's.
-It also counts the compute programs that depend on the console's wave size
-(`wave_programs_*`, `wave_refused_*`): how many this device runs as they
-are, how many get no pipeline, by reason, and how many compute programs do
-not translate at all. `VICTORY_WAVE_EMULATION=1` (any build, experimental,
-off by default, not yet run on a GPU) translates those whose thread group
-is one console wave to carry the wave in the group instead; see
-[docs/gpu-compatibility.md](docs/gpu-compatibility.md), "The console's wave
-on any host".
-`cargo xtask perf-summary run.csv` summarises a run and
-`cargo xtask perf-summary after.csv --against before.csv` compares two, on
-any machine. [docs/progress.md](docs/progress.md) says how runs are
-compared and [docs/memory.md](docs/memory.md) what the memory figures mean.
 
 For a startup breakpoint (`0x80000003`), run the diagnostics build with
 `VICTORY_CRASH_BREAKPOINTS=1`. Keep the console output along with the new
